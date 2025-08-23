@@ -1,0 +1,216 @@
+---
+title: "Actions and Cardinalities"
+description: "Explains APIs for controlling what mocks do when called (actions) and specifying how many times they should be invoked (cardinalities). Includes discussion of advanced action composition, invocation limits, and variadic support."
+---
+
+# Actions and Cardinalities
+
+This documentation page focuses on the APIs provided by GoogleMock to control the behavior of mock functions when they are called, known as *actions*, and to specify how many times such calls are expected, known as *cardinalities*. These capabilities empower users to create precise, readable, and maintainable mock expectations that reflect real test intentions effectively.
+
+---
+
+## Cardinalities: Controlling Call Counts
+
+In GoogleMock, cardinalities specify how many times a mock function is expected or allowed to be called. They appear primarily in the `.Times()` clause of `EXPECT_CALL()` and establish the invocation limits used to validate test interactions.
+
+### Basic Cardinality Types
+
+| Cardinality            | Description                                                                                              |
+|-----------------------|----------------------------------------------------------------------------------------------------------|
+| `Exactly(n)`          | Expect the mock function to be called exactly `n` times.                                                 |
+| `AtLeast(n)`          | Expect the function to be called at least `n` times (no upper bound).                                   |
+| `AtMost(n)`           | Expect the function to be called at most `n` times (possibly zero).                                     |
+| `Between(m, n)`       | Expect the function to be called between `m` and `n` times inclusive.                                   |
+| `AnyNumber()`         | The function can be called any number of times (equivalent to `AtLeast(0)`).                            |
+
+Using these cardinalities helps express fuzzier, more natural expectations that accommodate variable execution paths.
+
+### Common Cardinality Special Cases
+
+- **Never Called (0 times):** `.Times(0)` specifies that the function must not be called with given arguments.
+- **No `Times()` Clause:** if omitted, GoogleMock infers cardinality based on the number of `.WillOnce()`/`.WillRepeatedly()` clauses:
+  - No `WillOnce()` or `WillRepeatedly()` &rarr; Exactly once (.Times(1))
+  - *n* `WillOnce()`, no `WillRepeatedly()` &rarr; Exactly `n` times
+  - *n* `WillOnce()` and one `WillRepeatedly()` &rarr; At least `n` times
+
+### Cardinality Behavior and Queries
+
+Under the hood, each cardinality exposes:
+
+- **Lower and Upper Invocation Bounds:** Conservative estimates of minimum and maximum expected calls.
+- **IsSatisfiedByCallCount(call_count):** Whether a given call count fulfills the cardinality.
+- **IsSaturatedByCallCount(call_count):** Whether the maximum calls allowed have been reached.
+- **IsOverSaturatedByCallCount(call_count):** Whether the calls exceed the allowable maximum.
+
+Example: For `Between(3, 5)`, calls 3, 4, or 5 satisfy the cardinality; 5 saturates, and 6 oversaturates it.
+
+### Human-Readable Cardinality Descriptions
+
+GoogleMock provides human-friendly descriptions of cardinalities used in error messages, e.g.:
+
+- "called once"
+- "called twice"
+- "called between 3 and 5 times"
+- "called at most twice"
+- "never called"
+
+This clarity helps users quickly understand failures involving call count mismatches.
+
+### Custom Cardinalities
+
+Advanced users can implement their own cardinalities by deriving from `CardinalityInterface` and providing these methods. This extensibility allows specifying domain- or test-specific invocation semantics.
+
+---
+
+## Actions: Defining Mock Behavior on Invocation
+
+Unlike real functions, mock functions don't contain actual implementation logic. Actions define what happens *when* a mock method is invoked. Actions can return values, manipulate arguments, invoke callbacks, or chain multiple behaviors.
+
+### Setting Actions in Expectations
+
+Actions are specified in the `.WillOnce()` and `.WillRepeatedly()` clauses following an `EXPECT_CALL()`.
+
+- `.WillOnce(action)`: Defines behavior for a single invocation matching the expectation.
+- `.WillRepeatedly(action)`: Defines behavior for all subsequent invocations after all `.WillOnce()` actions have been used.
+
+The number of `.WillOnce()` clauses can determine the inferred cardinality as described above.
+
+### Examples of Actions
+
+- **Return fixed values:**
+  ```cpp
+  EXPECT_CALL(mock, GetValue())
+      .WillOnce(Return(100))
+      .WillRepeatedly(Return(200));
+  ```
+  Returns 100 on first call, 200 thereafter.
+
+- **Change side effects:** Using built-in actions like `SetArgPointee<N>(value)` to modify output arguments.
+
+- **Combine multiple actions:** Using `DoAll()` to execute several actions in sequence, returning the last value.
+
+- **Invoke functions or lambdas:** Use `Invoke()` to delegate behavior to existing functions, functors, or lambdas, increasing flexibility.
+
+### Important Action Composition Details
+
+- The action clauses are evaluated only once when the expectation is set up; side effects inside actions happen on invocation.
+
+- If the return type is a built-in or default-constructible type and no action is specified, a default action returning zero, false, or a default constructed value is used.
+
+- Once `.WillOnce()` actions are exhausted, and if `.WillRepeatedly()` is not specified, the default action executes.
+
+- The `RetiresOnSaturation()` clause can make an expectation retire once its cardinality limit is reached, so subsequent calls match other expectations.
+
+### Advanced Action Constructs
+
+- **Variadic support:** While GoogleMock itself doesn't directly mock variadic (ellipsis `...`) methods, users can mock overloaded fixed-argument alternatives or craft actions to handle argument unpacking.
+
+- **Custom Actions:** Users can write their own actions by implementing C++ function objects or the `ActionInterface` pattern, to perform arbitrary complex behaviors.
+
+- **Delegation:** Actions can delegate to fakes, real objects, or parent implementations, letting users compose mock behavior dynamically.
+
+---
+
+## Typical Usage Scenario Combining Actions and Cardinalities
+
+1. Declare a mock class with mocked methods.
+2. In your test, use `EXPECT_CALL(mock, Method(args))` to set expectations.
+3. Specify **how many times** the method should be called with `.Times(cardinality)` or rely on default inference.
+4. Specify **what the method should do** when called via `.WillOnce()` and/or `.WillRepeatedly()`.
+5. Optionally, control expectation lifetime with `.RetiresOnSaturation()`.
+6. Exercise code that calls the mock; GoogleMock verifies call counts and behaviors automatically.
+
+Sample:
+
+```cpp
+using ::testing::Return;
+using ::testing::AtLeast;
+
+EXPECT_CALL(mock_turtle, GetX())
+    .Times(AtLeast(2))
+    .WillOnce(Return(100))
+    .WillOnce(Return(150))
+    .WillRepeatedly(Return(200));
+```
+
+This says: "GetX() will be called at least twice. It returns 100 on the first call, 150 on the second, and 200 thereafter."
+
+---
+
+## Troubleshooting Tips for Cardinalities and Actions
+
+- **Unexpected call count failures:** Review if `.Times()` matches your real call pattern.
+
+- **Overusing `.WillOnce()` without `.WillRepeatedly()` may cause unexpected default actions after expected calls expire. Use `.RetiresOnSaturation()` or `.Times()` carefully.
+
+- **Beware of side effects in `.WillOnce()` arguments:** Expressions in `.WillOnce()` are evaluated once when expectation is set, not per call.
+
+- **Use `.Times(0)` to ban calls explicitly.**
+
+- **For variadic methods:** Since direct mocking is not supported, refactor or wrap methods to fixed argument variants.
+
+- **Understand expectation precedence:** Later expectations override earlier ones; organize your expectations accordingly.
+
+- **Use `--gmock_verbose=info`** to get detailed traces and understand matching.
+
+---
+
+## Reference Summary of Cardinality API
+
+```cpp
+namespace testing {
+
+class CardinalityInterface {
+public:
+  virtual ~CardinalityInterface() = default;
+
+  virtual int ConservativeLowerBound() const { return 0; }
+  virtual int ConservativeUpperBound() const { return INT_MAX; }
+
+  virtual bool IsSatisfiedByCallCount(int call_count) const = 0;
+  virtual bool IsSaturatedByCallCount(int call_count) const = 0;
+
+  virtual void DescribeTo(std::ostream* os) const = 0;
+};
+
+class Cardinality {
+public:
+  // Constructs Cardinality from a pointer to CardinalityInterface implementation.
+  explicit Cardinality(const CardinalityInterface* impl);
+
+  int ConservativeLowerBound() const;
+  int ConservativeUpperBound() const;
+
+  bool IsSatisfiedByCallCount(int call_count) const;
+  bool IsSaturatedByCallCount(int call_count) const;
+  bool IsOverSaturatedByCallCount(int call_count) const;
+
+  void DescribeTo(std::ostream* os) const;
+  static void DescribeActualCallCountTo(int actual_call_count, std::ostream* os);
+};
+
+// Factory functions
+Cardinality AtLeast(int n);
+Cardinality AtMost(int n);
+Cardinality AnyNumber();
+Cardinality Between(int min, int max);
+Cardinality Exactly(int n);
+
+}  // namespace testing
+```
+
+---
+
+## Related Documentation
+
+Please consult the following pages for additional context and practical examples:
+
+- [Mocking Reference](reference/mocking.md) — Detailed API for defining mocks, expectations, and clauses.
+- [gMock Cookbook](gmock_cook_book.md) — Examples and recipes on advanced mocking techniques.
+- [gMock for Dummies](gmock_for_dummies.md) — Beginner-friendly introduction and common workflows.
+- [gMock Cheat Sheet](gmock_cheat_sheet.md) — Handy quick reference for mock syntax and cardinalities.
+- [Legacy gMock FAQ](gmock_faq.md) — Troubleshooting and common issues in mocking.
+
+---
+
+By mastering cardinalities and actions, you precisely specify how your mocks behave during tests and how many times the interactions are expected, turning your tests into powerful, descriptive, and maintainable scenarios.
