@@ -1,0 +1,255 @@
+---
+title: "Common Mocking Scenarios and Solutions"
+description: "Addresses typical use cases and challenging scenarios in mocking, such as partial mocks, strict versus nice mocks, and handling side effects. Provides practical solutions and sample code for routine obstacles."
+---
+
+# Common Mocking Scenarios and Solutions
+
+This guide addresses typical use cases and challenging scenarios in mocking with GoogleMock. You will learn how to handle partial mocks, choose between strict, nice, and naggy mocks, and manage side effects within your mocks. Each section includes practical solutions with code examples illustrating routine obstacles encountered by C++ developers writing tests with mocks.
+
+---
+
+## 1. Understanding Partial Mocks: Combining Real and Mock Behavior
+
+Partial mocks allow you to selectively mock some methods of a class while letting the real implementations handle others. This is particularly useful when you want to override certain behaviors for testing without rewriting the entire class.
+
+### How to Create a Partial Mock
+
+- Derive a mock class from your concrete class.
+- Use `MOCK_METHOD` macros for methods you want to override.
+- For other methods, the original class's implementations remain active.
+
+```cpp
+class RealFoo {
+ public:
+  virtual ~RealFoo() = default;
+  virtual int DoSomething() { return 42; }
+  virtual void DoAnotherThing() { /* Real behavior */ }
+};
+
+class PartialMockFoo : public RealFoo {
+ public:
+  MOCK_METHOD(int, DoSomething, (), (override));  // Mock this
+};
+
+// Usage
+PartialMockFoo mock;
+EXPECT_CALL(mock, DoSomething()).WillOnce(Return(99));
+int result = mock.DoSomething();  // Returns 99 via mock
+mock.DoAnotherThing();           // Calls real implementation
+```
+
+#### Key Benefits
+- Tests remain focused: override only what is needed to simulate or verify behavior.
+- Avoid duplication: use existing class implementations seamlessly.
+
+---
+
+## 2. Choosing Between Nice, Naggy, and Strict Mocks
+
+GoogleMock supports different mock strictness levels that govern how uninteresting calls are handled:
+
+### Definitions
+- **NaggyMock** (default): Prints warnings for uninteresting calls but allows them.
+- **NiceMock**: Suppresses warnings for uninteresting calls.
+- **StrictMock**: Treats uninteresting calls as errors, failing the test.
+
+### How to Use
+
+Wrap your mock class with the desired strictness modifier:
+
+```cpp
+using ::testing::NiceMock;
+using ::testing::NaggyMock;
+using ::testing::StrictMock;
+
+class MockFoo {
+ public:
+  MOCK_METHOD(void, DoThis, (), ());
+  MOCK_METHOD(int, DoThat, (int arg), ());
+};
+
+// Nice mock ignores calls without expectations
+NiceMock<MockFoo> nice;
+
+// Naggy mock warns about calls without expectations (default)
+NaggyMock<MockFoo> naggy;
+
+// Strict mock fails on calls without expectations
+StrictMock<MockFoo> strict;
+```
+
+### When to use which
+
+- Use **NiceMock** for more tolerant tests to reduce noise.
+- Use **NaggyMock** during test development to get notified of unexpected calls.
+- Use **StrictMock** to enforce exact interaction contracts and catch unintended calls.
+
+### Important Caveats
+
+- These modifiers only affect *uninteresting calls* (no expectation set).
+- They do not affect *unexpected calls* (calls that do not match any existing expectation).
+- Ensure your mock methods are defined with `MOCK_METHOD` macros directly in the mock class for these modifiers to work correctly.
+
+---
+
+## 3. Handling Side Effects in Mocked Methods
+
+Mock methods often need to perform side effects, such as modifying output parameters or internal state, in addition to returning values.
+
+### Common Side-Effect Actions
+
+- **Set output parameters:** Use `SetArgPointee<N>(value)` to set the *N*th argument pointed-to value.
+- **Set array output:** Use `SetArrayArgument<N>(begin, end)` to copy elements into an output array argument.
+- **Combine side effects:** Use `DoAll()` to execute multiple actions in sequence (side effects followed by a return).
+
+```cpp
+using ::testing::SetArgPointee;
+using ::testing::DoAll;
+using ::testing::Return;
+
+class MockMutator {
+ public:
+  MOCK_METHOD(bool, Mutate, (int* value), ());
+};
+
+MockMutator mock;
+EXPECT_CALL(mock, Mutate(_))
+    .WillOnce(DoAll(SetArgPointee<0>(10), Return(true)));
+
+int val = 0;
+mock.Mutate(&val);
+assert(val == 10);
+```
+
+### Tips
+
+- `SetArgPointee` copies the value you pass in, so it must be copyable.
+- For output iterators or complex side effects, consider using a lambda in `.WillOnce()`.
+
+---
+
+## 4. Common Problems and How to Avoid Them
+
+### Issue: Uninteresting Calls Generate Warnings
+
+If your mock receives calls without matching expectations, you'll see warnings (naggy behavior).
+
+**Solutions:**
+- Use `NiceMock` to suppress warnings if those calls are harmless.
+- Add expected calls with `.Times(AnyNumber())` to explicitly allow calls without enforcing strict testing.
+
+```cpp
+EXPECT_CALL(mock, SomeMethod(_)).Times(AnyNumber());
+```
+
+
+### Issue: Unexpected Calls Fail Tests
+
+Calls that don't match any expectation cause failures by design.
+
+**Solutions:**
+- Add specific `EXPECT_CALL` statements matching the interactions you expect.
+- Provide a broad catch-all `EXPECT_CALL` with wildcards and `Times(AnyNumber())` for calls that can happen but aren't the focus of the test.
+
+### Issue: Over-Specifying Expectations Leads to Brittle Tests
+
+Strict expectations on call order or arguments make refactoring harder.
+
+**Solutions:**
+- Use `Times()` judiciously, preferring fuzzy cardinalities like `AtLeast(1)` or `AnyNumber()` when appropriate.
+- Use sequences (`InSequence`) *only* when order truly matters.
+- Employ `RetiresOnSaturation()` to make expectations forget after being matched.
+
+```cpp
+EXPECT_CALL(mock, MethodA())
+    .WillOnce(Return(1))
+    .RetiresOnSaturation();
+```
+
+---
+
+## 5. Practical Examples
+
+### Example: Partial Mock Delegating Unmocked Methods
+
+```cpp
+class Base {
+public:
+  virtual int Foo() { return 10; }
+  virtual int Bar() = 0;
+  virtual ~Base() = default;
+};
+
+class PartialMock : public Base {
+public:
+  MOCK_METHOD(int, Bar, (), (override));
+
+  // Calls real Foo()
+};
+
+TEST(PartialMockTest, PartialMockBehavior) {
+  PartialMock mock;
+  EXPECT_CALL(mock, Bar()).WillOnce(Return(5));
+
+  EXPECT_EQ(10, mock.Foo());  // Calls real implementation
+  EXPECT_EQ(5, mock.Bar());   // Calls mock implementation
+}
+```
+
+### Example: Using StrictMock to Catch Unexpected Calls
+
+```cpp
+StrictMock<MockFoo> strict_mock;
+EXPECT_CALL(strict_mock, DoTask(42));
+
+// This will cause test failure due to an unexpected call
+strict_mock.DoTask(23);
+```
+
+### Example: Mock Method with Side Effects on Output Parameter
+
+```cpp
+class MockProcessor {
+public:
+  MOCK_METHOD(bool, Process, (int input, int* output));
+};
+
+TEST(MockProcessorTest, SideEffectTest) {
+  MockProcessor mock;
+
+  EXPECT_CALL(mock, Process(5, _))
+      .WillOnce(DoAll(SetArgPointee<1>(10), Return(true)));
+
+  int result = 0;
+  EXPECT_TRUE(mock.Process(5, &result));
+  EXPECT_EQ(10, result);
+}
+```
+
+---
+
+## 6. Troubleshooting Tips
+
+- Ensure all mock methods are defined with the correct `MOCK_METHOD` signatures in the `public:` section.
+- Use `--gmock_verbose=info` during test runs to see extensive logs on matching and unexpected calls.
+- Check for missing `EXPECT_CALL` on methods that your code under test calls.
+- If using strict mocks, consider switching to nicer mocks during debugging to reduce noise.
+- If mocked methods are overloaded, be sure to mock all necessary overloads or use `using BaseClass::Method;` to avoid hiding base methods.
+- For methods with complex arguments including those with `,` in types, wrap types in parentheses or use type aliases.
+- Use `Mock::VerifyAndClearExpectations(&mock_object)` if you need to verify a mock before destruction.
+
+---
+
+## 7. Related Documentation and Next Steps
+
+- [Designing and Using Mock Objects](/guides/advanced-mocking/designing-mock-objects)
+- [Action and Matcher Patterns](/guides/advanced-mocking/actions-matchers)
+- [GoogleMock Core API Reference](../api-reference/core-apis/mocking-basics)
+- [Understanding Uninteresting vs Unexpected Calls](https://google.github.io/googletest/gmock_cook_book.html#uninteresting-vs-unexpected)
+
+For deeper dives into advanced scenarios, consult the full [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html).
+
+---
+
+**Empower your tests with practical mocking!** By mastering partial mocks, mock strictness levels, and side-effect handling, you can create robust, clear, and maintainable test suites that accelerate development and improve code quality.
