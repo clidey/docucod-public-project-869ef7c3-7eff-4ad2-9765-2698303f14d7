@@ -1,0 +1,333 @@
+---
+title: "Testing Legacy and Difficult Code"
+description: "Strategies and patterns for introducing GoogleTest and GoogleMock into legacy codebases. Covers refactoring techniques, seams for introducing tests, and handling code without clear interfaces."
+---
+
+# Testing Legacy and Difficult Code
+
+## Overview
+This guide provides practical strategies and patterns for integrating GoogleTest and GoogleMock into legacy C++ codebases. Legacy code often lacks clear abstractions and interfaces, making it challenging to write effective tests or mocks. Here, we tackle common obstacles such as introducing seams, refactoring safely, and managing code without virtual functions or interfaces.
+
+By following these steps, you’ll gradually enhance your code’s testability without disrupting existing functionality.
+
+---
+
+## 1. Preparing to Test Legacy Code
+
+### Understanding the Challenges
+Legacy code typically exhibits:
+- Tight coupling between components
+- Absence of virtual interfaces for mocks
+- Complex or monolithic methods
+- Lack of seams for dependency injection
+
+Recognizing these challenges helps you plan test integration carefully.
+
+### Prerequisites
+- A working GoogleTest and GoogleMock environment
+- Basic familiarity with mocking concepts ([gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html))
+- Access to the legacy code with an understanding of its structure and dependencies
+
+<Tip>
+If you have not yet installed and set up GoogleTest and GoogleMock, refer to the [Installing GoogleTest and GoogleMock](../getting_started/setup_requirements_install/installing_framework) guide.
+</Tip>
+
+---
+
+## 2. Introducing Seams into Legacy Code
+Legacy code often lacks natural seams—points where dependencies can be replaced or intercepted for testing. Creating seams is vital for isolation.
+
+### What is a Seam?
+A seam allows you to replace a component with a test double (mock or fake) without modifying the entire system.
+
+### Techniques to Introduce Seams:
+
+#### a. Use Abstract Interfaces
+- Identify tightly coupled classes.
+- Introduce abstract interfaces that encapsulate concrete implementations.
+- Refactor the legacy code to depend on interfaces instead of concrete classes.
+
+Example:
+```cpp
+// Legacy class
+class FileReader {
+public:
+  bool Read(const std::string& path);  // Concrete implementation
+};
+
+// Introduce interface
+class IFileReader {
+public:
+  virtual ~IFileReader() = default;
+  virtual bool Read(const std::string& path) = 0;
+};
+
+// Adapt legacy class to implement interface
+class FileReader : public IFileReader {
+  bool Read(const std::string& path) override;
+};
+
+// In code under test, accept IFileReader* dependency
+```
+
+<Tip>
+Ensure that destructors in interfaces are declared virtual to avoid memory leaks.
+</Tip>
+
+#### b. Create Adaptors / Wrappers
+If you cannot modify legacy classes:
+- Write adaptor classes implementing interfaces, delegating calls to legacy code.
+- Use adaptors in new code to facilitate mocking.
+
+Example:
+```cpp
+class LegacyDB {};  // Legacy class without interface
+
+class IDatabase {
+public:
+  virtual ~IDatabase() = default;
+  virtual bool Connect() = 0;
+};
+
+class LegacyDBAdapter : public IDatabase {
+public:
+  LegacyDBAdapter(LegacyDB* db) : db_(db) {}
+  bool Connect() override { return db_->ConnectLegacy(); }
+private:
+  LegacyDB* db_;
+};
+```
+
+### Inject Dependencies
+- Modify constructors or setters to accept interface pointers.
+- Pass mocks during testing.
+
+Example:
+```cpp
+class Widget {
+public:
+  explicit Widget(IDatabase* db) : db_(db) {}
+  void Initialize() { db_->Connect(); }
+private:
+  IDatabase* db_;  // Injected
+};
+```
+
+---
+
+## 3. Refactoring Legacy Code for Testability
+
+### Incremental Refactoring
+Refactor slowly and verify behavior at each step.
+
+- Extract virtual interfaces and mocks as described.
+- Use [gMock MOCK_METHOD](../api-reference/gmock-mocking-framework/mock-methods-and-classes#MOCK_METHOD) macros to define mocks.
+- Employ **GoogleMock** to verify interactions.
+
+### Handling Non-virtual Methods
+If legacy methods aren’t virtual, avoid directly mocking them.
+
+Strategies include:
+- Use template or policy-based injection to parameterize behavior at compile-time.
+- Wrap calls in interface methods which can be mocked.
+
+### Example Mock Class
+```cpp
+#include <gmock/gmock.h>
+
+class MockFileReader : public IFileReader {
+public:
+  MOCK_METHOD(bool, Read, (const std::string& path), (override));
+};
+```
+
+### Delegation to Real or Fake Implementations
+Use delegation patterns when you want to preserve some real behavior but still verify calls:
+
+```cpp
+class MockFoo : public Foo {
+public:
+  MOCK_METHOD(int, Calculate, (int), (override));
+
+  MockFoo() {
+    ON_CALL(*this, Calculate)
+        .WillByDefault([this](int x) { return real_.Calculate(x); });
+  }
+
+private:
+  Foo real_;
+};
+```
+
+---
+
+## 4. Handling Code Without Clear Interfaces
+
+When legacy code does not present interfaces or virtual functions:
+
+### a. Introduce Interfaces Gradually
+- Start with key classes that you want to mock.
+
+### b. Use gMock’s Non-virtual Mocking Techniques
+- See [Mocking Non-virtual Methods](https://google.github.io/googletest/gmock_cook_book.html#MockingNonVirtualMethods).
+- Mock unrelated classes with the same method signatures.
+
+### c. Abstract Free Functions
+- Wrap free functions in interface classes.
+- Mock the interfaces.
+
+Example:
+```cpp
+class FileOps {
+public:
+  virtual ~FileOps() = default;
+  virtual bool Open(const char* path) = 0;
+};
+
+class RealFileOps : public FileOps {
+public:
+  bool Open(const char* path) override {
+    return ::OpenFile(path);
+  }
+};
+
+class MockFileOps : public FileOps {
+public:
+  MOCK_METHOD(bool, Open, (const char* path), (override));
+};
+```
+
+<Tip>
+This approach improves testability and modularity.
+</Tip>
+
+---
+
+## 5. Best Practices and Tips
+
+### Use `NiceMock` and `StrictMock` Appropriately
+- `NiceMock<MockClass>` suppresses warnings about uninteresting calls, helping reduce noisy test output in legacy code.
+- `StrictMock<MockClass>` treats unexpected calls as errors for tighter test coverage.
+
+Example:
+```cpp
+using ::testing::NiceMock;
+NiceMock<MockFoo> mock_foo;
+```
+
+### Use `EXPECT_CALL` Carefully
+- Set explicit expectations on the behavior you want to verify.
+- Use wildcards `_` to avoid overspecification.
+
+### Leverage `RetiresOnSaturation()`
+- In cases of repeated calls, retire expectations once the call count is reached to avoid failures on extra calls.
+
+### Troubleshooting Common Legacy Testing Issues
+- When mocks don't behave as expected, increase verbose logging with `--gmock_verbose=info`.
+- Use `Mock::VerifyAndClearExpectations()` to manually check mock expectations if mock destruction timing is ambiguous.
+- If legacy code is locked down or lacks interfaces, consider starting tests with larger integration tests and gradually refactor.
+
+---
+
+## 6. Summary
+Testing legacy and difficult code requires pragmatic integration of GoogleTest and GoogleMock techniques. By introducing seams, refactoring gradually, leveraging mock delegation, and employing appropriate mock strictness modes, you can increase coverage and maintain test robustness without invasive changes.
+
+---
+
+## References and Further Reading
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html) — Basic concepts and mock object usage
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) — Recipes for creating mocks and setting expectations
+- [Mocking Reference](../api-reference/gmock-mocking-framework/mock-methods-and-classes) — Technical details on MOCK_METHOD, EXPECT_CALL
+- [The Nice, Strict, and Naggy](docs/gmock_cook_book.md#NiceStrictNaggy) — Managing mock object strictness modes
+- [Using Mocks in Tests](docs/gmock_for_dummies.md#using-mocks-in-tests) — Test structure and best practices
+
+---
+
+<AccordionGroup title="Common Patterns and Techniques">
+<Accordion title="Introducing an Interface Seam">
+Use an abstract interface as an indirection point to replace legacy dependencies with mocks.
+</Accordion>
+<Accordion title="Adaptor Pattern for Legacy Code">
+Create adaptor classes that convert legacy classes to interface implementations.
+</Accordion>
+<Accordion title="Delegation to Fakes or Real Objects">
+Set mock default actions to invoke real or fake methods to keep behavior consistent.
+</Accordion>
+</AccordionGroup>
+
+<AccordionGroup title="Mock Strictness Modes">
+<Accordion title="NiceMock">
+Suppresses uninteresting call warnings. Ideal when legacy code calls many methods not under test.
+</Accordion>
+<Accordion title="NaggyMock">
+Default mode, prints warnings on uninteresting calls.
+</Accordion>
+<Accordion title="StrictMock">
+Fails tests if uninteresting calls occur, enforcing tight control.
+</Accordion>
+</AccordionGroup>
+
+<Info>
+For detailed syntax on defining mocks using `MOCK_METHOD` and setting expectations with `EXPECT_CALL()`, see the [Mocking Reference](../api-reference/gmock-mocking-framework/mock-methods-and-classes).
+</Info>
+
+<Warning>
+Avoid mocking classes you do not own directly. Instead, mock interfaces or adaptors you control.
+</Warning>
+
+---
+
+## Example: Adding a Mock for a Legacy Interface
+
+Suppose you have legacy logging with no interface:
+
+```cpp
+class LegacyLogger {
+public:
+  void Log(const char* message);
+};
+```
+
+Add a seam by defining an interface and adaptor:
+
+```cpp
+class ILogger {
+public:
+  virtual ~ILogger() = default;
+  virtual void Log(const char* message) = 0;
+};
+
+class LegacyLoggerAdapter : public ILogger {
+public:
+  explicit LegacyLoggerAdapter(LegacyLogger* legacy) : legacy_(legacy) {}
+  void Log(const char* msg) override { legacy_->Log(msg); }
+private:
+  LegacyLogger* legacy_;
+};
+
+class MockLogger : public ILogger {
+public:
+  MOCK_METHOD(void, Log, (const char* message), (override));
+};
+```
+
+In your unit test:
+
+```cpp
+using ::testing::_;
+using ::testing::AtLeast;
+
+TEST(FooTest, LogsSomething) {
+  MockLogger mock_logger;
+  EXPECT_CALL(mock_logger, Log(_)).Times(AtLeast(1));
+  Foo foo(&mock_logger);
+  foo.DoSomething();
+}
+```
+
+This pattern localizes changes, enabling legacy code testability.
+
+---
+
+# Summary
+This guide equips you with strategies to insert GoogleTest and GoogleMock into legacy systems by introducing abstractions, leveraging mock delegation, and managing strictness to improve testing without extensive rewrites.
