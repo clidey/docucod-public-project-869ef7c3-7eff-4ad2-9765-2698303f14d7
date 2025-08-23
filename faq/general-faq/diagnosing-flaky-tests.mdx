@@ -1,0 +1,310 @@
+---
+title: "Diagnosing Flaky or Unstable Tests"
+description: "Describes causes and solutions for flaky or unreliable tests, including setup/teardown pitfalls, order dependencies, and environmental factors. Guides users on best practices to write robust, repeatable tests."
+---
+
+# Diagnosing Flaky or Unstable Tests
+
+Flaky or unstable tests are those that pass or fail seemingly at random or under inconsistent conditions. Such tests undermine confidence in your testing suite, slow down development, and complicate debugging.
+
+This page helps you understand the common causes of flaky tests in GoogleTest and guides you through practical solutions and best practices to write robust, reliable, and repeatable tests.
+
+---
+
+## Understanding Flakiness in Tests
+
+Flakiness often arises from factors beyond simple test logic errors. These include improper setup and teardown, hidden dependencies between tests, order sensitivity, or environmental issues.
+
+Detecting flaky behavior early helps you maintain a fast, trustworthy testing pipeline.
+
+---
+
+## Common Causes of Flaky or Unstable Tests
+
+### 1. Improper Setup and Teardown
+
+- **Shared Mutable State**: Using global or static state that is modified by tests without proper reset.
+- **Side Effects Escaping Tests**: Resources like files, network connections, or database entries are not cleaned up correctly.
+- **Constructor/Destructor Misuse**: Using constructors or destructors for setup or teardown instead of `SetUp()` and `TearDown()` methods, which can cause subtle bugs or incomplete clean-up. GoogleTest runs `SetUp()` and `TearDown()` for each test freshly.
+
+### 2. Test Order Dependencies
+
+- Tests that pass only when run after or before other specific tests.
+- Shared global or static data carries state across tests.
+- Randomized or shuffled test execution exposing these dependencies.
+
+### 3. Environmental Factors
+
+- Relying on external services, network availability, or specific hardware.
+- Using time-dependent operations without isolation.
+- Race conditions or timing issues arising from asynchronous execution or multi-threading.
+
+### 4. Improper Use of Assertions
+
+- Using fatal assertions (`ASSERT_`) incorrectly inside constructors or methods with non-void return types causing confusing failures.
+- Not handling fatal failures in sub-functions properly, leading to unexpected continuations after failure.
+
+---
+
+## Best Practices to Prevent Flaky Tests
+
+### Use Proper Setup and Teardown
+
+- Prefer `SetUp()` and `TearDown()` methods in your test fixtures instead of constructors and destructors for initializing and cleaning your test environment.
+
+  ```cpp
+  class FooTest : public ::testing::Test {
+   protected:
+    void SetUp() override {
+      // Initialize fresh state before each test
+    }
+    void TearDown() override {
+      // Clean up after each test
+    }
+  };
+  ```
+
+- If your resource setup can fail fatally, use `SetUp()` so you can issue assertions, as constructors do not support `ASSERT_*` macros.
+
+### Avoid Shared Mutable State
+
+- Use per-test fixture instances rather than static or global variables.
+- When shared state is unavoidable (e.g., expensive external resources), ensure correct synchronization and reset state in `SetUpTestSuite()` and `TearDownTestSuite()`.
+
+### Maintain Test Independence
+
+- Tests should not rely on the execution order or side effects of other tests.
+- Use `--gtest_shuffle` flag to randomize the test order and expose order dependencies.
+
+### Handle Fatal Failures in Helper Functions
+
+- GoogleTest aborts only the current function on fatal failures. If your test logic calls helper functions with `ASSERT_*` macros, the test might unintentionally keep running after failure.
+- Use `ASSERT_NO_FATAL_FAILURE()` or `EXPECT_NO_FATAL_FAILURE()` macros to wrap such calls, or check `HasFatalFailure()` after subroutine calls.
+
+  ```cpp
+  void Helper() {
+    ASSERT_EQ(...);  // Fatal in Helper
+  }
+
+  TEST(FooTest, Bar) {
+    Helper();
+    if (testing::Test::HasFatalFailure()) return;
+    // Safe to continue if no fatal failure.
+  }
+  ```
+
+### Use Scoped Traces for Better Failure Context
+
+- Wrap loops or helper calls with `SCOPED_TRACE()` to add failure context.
+
+  ```cpp
+  for (int i = 0; i < 10; ++i) {
+    SCOPED_TRACE(testing::Message() << "iteration " << i);
+    ASSERT_TRUE(SomeFunction(i));
+  }
+  ```
+
+### Isolate Tests from External Dependencies
+
+- Mock network calls, file systems, or databases whenever possible.
+- Use GoogleMock or other mocking frameworks to simulate dependencies reliably.
+
+### Be Wary of Time and Threading Issues
+
+- Avoid tests that rely on wall-clock time or real delays.
+- When using threads, ensure proper synchronization and avoid race conditions.
+
+### Use `GTEST_SKIP()` to Handle External Preconditions
+
+- Skip tests gracefully when external dependencies or preconditions are unmet.
+
+  ```cpp
+  TEST(FooTest, MaySkip) {
+    if (!IsNetworkAvailable()) {
+      GTEST_SKIP() << "Network not available, skipping test.";
+    }
+    ...
+  }
+  ```
+
+### Use Repeat and Shuffle Flags Strategically
+
+- Use `--gtest_repeat=N` to run tests multiple times and catch intermittent failures.
+- Combine with `--gtest_shuffle` to uncover order-dependent issues.
+
+  ```bash
+  $ ./my_tests --gtest_repeat=100 --gtest_shuffle
+  ```
+
+---
+
+## Diagnosing Flaky Tests
+
+### Step-by-Step Approach
+
+1. **Identify flaky test patterns:** Observe if failures happen intermittently or under specific conditions like parallel runs or long test suites.
+
+2. **Run tests in isolation:** Use `--gtest_filter` to run the suspicious test alone to check whether the flakiness persists.
+
+3. **Enable verbose output:** Add `--gtest_break_on_failure` to debug on first failure with a debugger.
+
+4. **Randomize test order:** Use `--gtest_shuffle` and note the seed for reproducing failures.
+
+5. **Repeat runs:** Use `--gtest_repeat` to catch rare failure instances.
+
+6. **Add detailed logging and scoped traces:** Incorporate `SCOPED_TRACE` to get precise failure contexts in helpers.
+
+7. **Audit shared resources:** Check static or global variables and external dependencies.
+
+8. **Check setup/teardown:** Ensure proper initialization and cleanup around tests, especially for shared state.
+
+9. **Verify proper assertion usage:** Make sure fatal assertions don’t run in constructors or non-void functions.
+
+### Tools and Flags for Diagnosis
+
+| Tool / Flag                  | Purpose                                                   |
+|-----------------------------|-----------------------------------------------------------|
+| `--gtest_repeat=N`           | Repeat test N times to catch intermittent failures        |
+| `--gtest_shuffle`            | Randomize test execution order to detect order dependencies|
+| `--gtest_break_on_failure`   | Drop into debugger on first failure                        |
+| `--gtest_filter=TestSuite.TestName` | Run specific tests for focused debugging                    |
+
+### Workflow Example
+
+```bash
+# Run flaky test alone, 100 times, shuffled order
+./my_tests --gtest_filter=FlakyTest.* --gtest_repeat=100 --gtest_shuffle --gtest_break_on_failure
+```
+
+---
+
+## Handling Setup/Teardown Pitfalls
+
+### Why Not Use Constructors/Destructors for Test Setup?
+
+- Cannot use `ASSERT_*` macros in constructors/destructors (no void return).
+- Fatal failures in constructors/destructors do not abort the test properly and can leave objects partially constructed or destructed.
+
+Use `SetUp()` and `TearDown()` for initialization and cleanup with proper fatal failure handling.
+
+### Dealing with Shared Resources
+
+- Use static member variables and public static `SetUpTestSuite()`/`TearDownTestSuite()` for expensive shared resources.
+- Make sure shared resources are thread-safe and properly reset between tests.
+
+### Avoiding Order Dependencies
+
+- Do not rely on tests being run in any particular order.
+- Ensure tests clean up any state they alter.
+- Verify by running tests with shuffling enabled.
+
+---
+
+## Environmental and External Factors
+
+### Avoiding Flakiness from Outside the Test Suite
+
+- Do not depend on network availability, file systems, or external services without isolation.
+- Use mocking frameworks to simulate such dependencies.
+
+### Handling Time and Concurrency
+
+- Avoid sleep or timed waits in tests.
+- Use synchronization primitives and deterministic mocks for threaded code.
+
+---
+
+## Summary of Best Practices
+
+- Write tests to be independent, isolated, and reproducible.
+- Use GoogleTest fixtures' `SetUp()` and `TearDown()` for test lifecycle management.
+- Avoid global or static state mutations between tests.
+- Use assertions correctly, particularly handling fatal assertions' control flow.
+- Apply `SCOPED_TRACE()` for enhanced failure messages and troubleshooting.
+- Run flaky tests with repeat and shuffle options to surface nondeterministic bugs.
+- Mock external dependencies to reduce environmental noise.
+- Skip tests gracefully when preconditions are unmet using `GTEST_SKIP()`.
+
+---
+
+## Troubleshooting Checklist for Unstable Tests
+
+<AccordionGroup title="Troubleshooting Common Causes of Flaky Tests">
+<Accordion title="Test Order Dependence">
+**Symptoms:** Tests pass or fail depending on previous test execution.
+
+**Check:**
+- Run tests with `--gtest_shuffle` and observe failure patterns.
+- Ensure no test relies on static or global state altered by others.
+
+**Solution:**
+- Reset or avoid shared mutable state.
+- Refactor dependent tests to be independent.
+</Accordion>
+<Accordion title="Improper Setup/TearDown">
+**Symptoms:** Tests fail intermittently due to resource leaks or residual state.
+
+**Check:**
+- Verify usage of `SetUp()`/`TearDown()` instead of constructors/destructors.
+- Check for missing cleanup of files, network connections, or database records.
+
+**Solution:**
+- Correctly implement setup/teardown fixtures.
+- Explicitly clean shared resources.
+- Use `SetUpTestSuite()` and `TearDownTestSuite()` for shared expensive resources.
+</Accordion>
+<Accordion title="Fatal Assertions in Subroutines Not Stopping Tests">
+**Symptoms:** After a fatal assertion inside a helper function, the test continues running causing crashes.
+
+**Check:**
+- Wrap calls that contain `ASSERT_*` in `ASSERT_NO_FATAL_FAILURE()`.
+- After calls, check `HasFatalFailure()` and return early if true.
+
+**Solution:**
+- Use macros or control flow checks to abort tests properly on fatal failures.
+</Accordion>
+<Accordion title="Environmental Dependencies and Timing Issues">
+**Symptoms:** Failures dependent on system state, network, time, or threading.
+
+**Check:**
+- Test presence of external services or dependencies.
+- Use mocking or dependency injection.
+- Avoid real-time waits or sleeps.
+
+**Solution:**
+- Mock external dependencies.
+- Use simulated clocks or deterministic schedulers.
+- Remove or isolate asynchronous code triggers in tests.
+</Accordion>
+<Accordion title="Improper Assertion Usage in Constructors or Non-void Functions">
+**Symptoms:** Compilation errors or obscure runtime failures.
+
+**Check:**
+- Fatal assertions (`ASSERT_*`) used in constructors, destructors, or functions returning non-void.
+
+**Solution:**
+- Refactor setup logic to `SetUp()`.
+- Use non-fatal assertions where necessary.
+</Accordion>
+</AccordionGroup>
+
+---
+
+## Summary
+
+By understanding the common causes of flaky tests and applying the best practices outlined above, you will significantly improve the robustness and reliability of your test suites in GoogleTest. Thorough isolation, proper lifecycle management, and effective debugging strategies are key to eliminating test flakiness.
+
+---
+
+## Additional Resources
+
+- [GoogleTest Primer](primer.md) – Getting started with writing tests
+- [Advanced GoogleTest Topics](advanced.md) – In-depth usage and advanced assertions
+- [GoogleTest FAQ](faq.md) – Answers to common questions, including test best practices
+- [Parameterized and Typed Tests Guide](guides/real-world-usage-and-best-practices/parameterized-and-typed-tests) – To expand test coverage effectively
+- [GoogleMock Documentation](googlemock/README.md) – For mocking dependencies
+- Use flags like `--gtest_repeat` and `--gtest_shuffle` to diagnose flaky tests
+
+---
+
+_Last updated from GoogleTest User's Guide and FAQ._
