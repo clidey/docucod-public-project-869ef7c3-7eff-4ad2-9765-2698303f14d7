@@ -1,0 +1,279 @@
+---
+title: "Creating Custom Matchers"
+description: "Shows how to implement and register user-defined matchers tailored to unique application needs. Explains matcher contract, custom predicates, and debugging tips for complex assertions."
+---
+
+# Creating Custom Matchers
+
+This page guides you through the process of designing and implementing user-defined matchers in GoogleTest and GoogleMock. Custom matchers enable you to articulate precise, domain-specific validation rules within your tests, allowing you to tailor assertions and mock expectations to the unique needs of your application.
+
+---
+
+## Introduction to Custom Matchers
+
+Matchers are the heart of expressive assertions and mock expectations. While GoogleTest provides a rich set of built-in matchers covering common idioms, there are scenarios where you must craft your own to capture nuanced validation logic impossible to express otherwise.
+
+Custom matchers must fulfill a contract: they should **explain why a match succeeds or fails** to facilitate debugging, **remain purely functional with no side effects**, and support intuitive usage within `EXPECT_THAT` and `EXPECT_CALL` constructs.
+
+Below, you'll discover how to write simple matchers, parameterized matchers, and advanced polymorphic matchers with rich diagnostic messages.
+
+---
+
+## Defining Simple Custom Matchers Using `MATCHER` Macros
+
+For most use cases, simple matchers can be written concisely with the `MATCHER` macro family. Using these macros, you specify the matcher name, an optional description string, and a predicate body testing the match condition.
+
+### Basic Syntax
+
+```cpp
+MATCHER(Name, "description") { 
+  // Return true if 'arg' satisfies the matcher condition.
+  return /* boolean expression involving 'arg' */;
+}
+```
+
+- `Name`: The matcher name used in expectations and assertions.
+- `description`: A C-string that describes the matcher. If left empty (`""`), GoogleMock derives a description from the matcher name for error messages.
+- Inside the body, `arg` refers to the value being matched.
+
+### Example: Checking Even Numbers
+
+```cpp
+MATCHER(IsEven, "") {
+  return (arg % 2) == 0;
+}
+```
+
+You can now use:
+
+```cpp
+// Mock method expectation
+EXPECT_CALL(mock_obj, Foo(IsEven()));
+
+// Assertion on a value
+EXPECT_THAT(value, IsEven());
+```
+
+If the assertion fails, the message will indicate that the value was expected to be even.
+
+### Enhancing Failure Messages
+
+You can write to `*result_listener` to provide detailed mismatch information:
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  if ((arg % 7) == 0) return true;
+
+  *result_listener << "the remainder is " << (arg % 7);
+  return false;
+}
+```
+
+This produces failure output like:
+
+```
+Value of: x
+Expected: is divisible by 7
+  Actual: 27 (the remainder is 6)
+```
+
+### Important Guidelines
+
+- Matchers must be **pure functions** without side effects.
+- They can be polymorphic—the `arg` type is deduced automatically based on the context.
+- Use `EXPECT_` assertions inside the matcher body only when they clarify the match logic and do not cause side effects.
+
+---
+
+## Parameterized Matchers
+
+Oftentimes, you need matchers to accept parameters specifying the matching criteria. For this, use `MATCHER_P` (single parameter), `MATCHER_P2` (two parameters), up to `MATCHER_P10`.
+
+### Syntax
+
+```cpp
+MATCHER_P(Name, param1, "description") {
+  // Access 'param1' and 'arg'
+  return /* boolean expression involving arg and param1 */;
+}
+```
+
+The description string can reference `negation` (false for normal match, true for negation) and parameters to customize the message.
+
+### Example: Absolute Value Matcher
+
+```cpp
+MATCHER_P(HasAbsoluteValue, value, "") {
+  return abs(arg) == value;
+}
+```
+
+Usage:
+
+```cpp
+EXPECT_THAT(x, HasAbsoluteValue(10));
+```
+
+This prints failures like:
+
+```
+Value of: x
+Expected: has absolute value 10
+  Actual: -9
+```
+
+### Custom Descriptions
+
+You can provide richer descriptions using string expressions referencing `negation` and parameters:
+
+```cpp
+MATCHER_P2(InClosedRange, low, high,
+          std::string(negation ? "isn't" : "is") + " in range [" +
+          ::testing::PrintToString(low) + ", " + ::testing::PrintToString(high) + "]") {
+  return low <= arg && arg <= high;
+}
+```
+
+---
+
+## Writing Advanced Matcher Classes
+
+If your requirements are more complex, or you want fine-grained control over type behavior, you can implement matcher classes manually.
+
+### Matcher Interface Contract
+
+Your matcher class must:
+
+- Define `using is_gtest_matcher = void;` to enable detection.
+- Implement `bool MatchAndExplain(const T& value, MatchResultListener* listener) const;` which returns `true` when matching succeeds and optionally streams diagnostics to `listener`.
+- Implement `void DescribeTo(std::ostream* os) const;` and `void DescribeNegationTo(std::ostream* os) const;` to explain matcher expectations.
+
+### Example: DivisibleBy7 Matcher
+
+```cpp
+class DivisibleBy7Matcher {
+ public:
+  using is_gtest_matcher = void;
+
+  bool MatchAndExplain(int n, MatchResultListener* os) const {
+    if (n % 7 == 0) return true;
+    if (os) (*os) << "the remainder is " << (n % 7);
+    return false;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "is divisible by 7";
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "is not divisible by 7";
+  }
+};
+
+::testing::Matcher<int> DivisibleBy7() {
+  return ::testing::MakePolymorphicMatcher(DivisibleBy7Matcher());
+}
+```
+
+### Usage
+
+```cpp
+EXPECT_THAT(value, DivisibleBy7());
+```
+
+---
+
+## Polymorphic Matchers
+
+To build matchers reusable across different types, implement a polymorphic matcher class with a templated `MatchAndExplain`.
+
+The class must implement:
+
+- Templated `MatchAndExplain(const T& value, MatchResultListener* listener) const`.
+- Non-templated `DescribeTo` and `DescribeNegationTo` methods.
+
+Wrap an instance with `MakePolymorphicMatcher()` to produce a polymorphic matcher.
+
+---
+
+## Composing Matchers
+
+Matchers can be combined into logical compositions using `AllOf()`, `AnyOf()`, `Not()`, and more, enabling complex validation rules.
+
+Use parameterized matchers and composite matchers to test properties such as range membership, container contents, variant types, pointers, and more.
+
+Refer to the [Matchers Reference](../matchers.md) for detailed descriptions.
+
+---
+
+## Best Practices
+
+- **Keep matchers pure and side-effect free.** A matcher may be invoked multiple times and out of order.
+- **Provide helpful diagnostic messages.** Use `DescribeTo` and `MatchAndExplain` with reason streaming to aid debugging failing tests.
+- **Use parameterized matchers for flexibility.** This enables reuse and clearer code.
+- **Take advantage of polymorphic matchers** to cover multiple types elegantly.
+
+---
+
+## Debugging Matcher Failures
+
+When a matcher fails, the detailed diagnostic messages explain:
+
+- What was expected.
+- What actual value was observed.
+- Additional contextual information from your matcher.
+
+Use `EXPECT_THAT` and `ASSERT_THAT` with matchers to get rich failure logs. Consider adding `result_listener` messages within your custom matchers to clarify mismatches.
+
+---
+
+## Extended Examples
+
+### Using Custom Matchers with Mock Objects
+
+```cpp
+class MockCalculator {
+ public:
+  MOCK_METHOD(int, Compute, (int x), ());
+};
+
+MATCHER(IsMultipleOfTen, "") {
+  return arg % 10 == 0;
+}
+
+TEST(CalculatorTest, TestMultiples) {
+  MockCalculator mock;
+
+  EXPECT_CALL(mock, Compute(IsMultipleOfTen()));
+
+  mock.Compute(20);  // Passes
+  mock.Compute(25);  // Fails
+}
+```
+
+### Parameterizing Matchers
+
+```cpp
+MATCHER_P(IsBetween, lower_bound, "") {
+  return arg >= lower_bound.first && arg <= lower_bound.second;
+}
+
+TEST(RangeTest, ChecksIntervals) {
+  EXPECT_THAT(7, IsBetween(std::make_pair(5, 10)));
+}
+```
+
+---
+
+For more extensive recipes and advanced usage, consult the [gMock Cookbook](../gmock_cook_book.md).
+
+---
+
+## See Also
+
+- [Matchers Reference](../matchers.md) — comprehensive list and details of built-in matchers
+- [Mocking Reference](../mocking.md) — how expectations and mock methods interact with matchers
+- [Assertions Reference](../assertions.md) — integrating matchers in tests
+- [gMock Cookbook](../gmock_cook_book.md) — detailed tutorials and examples
+
+<Source url="https://github.com/google/googletest" paths={[{"path": "googlemock/include/gmock/gmock-matchers.h", "range": "1-790"}]} />
