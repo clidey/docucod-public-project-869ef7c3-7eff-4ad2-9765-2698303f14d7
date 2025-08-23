@@ -1,0 +1,287 @@
+---
+title: "Best Practices and Patterns for Mocking"
+description: "Emphasizes practical strategies and patterns in mocking—how to avoid brittle tests, use StrictMock/NiceMock wisely, minimize over-mocking, and structure your tests for clarity and maintainability."
+---
+
+# Best Practices and Patterns for Mocking
+
+GoogleMock offers powerful mocking capabilities, but to maximize test maintainability and clarity, you need to apply sound patterns and practical strategies. This guide focuses specifically on practical methods to avoid brittle tests, use StrictMock and NiceMock judiciously, minimize over-mocking, and structure tests for long-term clarity.
+
+---
+
+## Workflow Overview
+
+### What This Guide Helps You Accomplish
+
+This guide helps you build robust, maintainable, and clear tests by applying proven mocking best practices. It shows you how to use mock strictness modes wisely, avoid fragile test failures, control expectations effectively, and design your mocks and tests to remain useful as code evolves.
+
+### Prerequisites
+
+- Familiarity with defining mock classes and mock methods using `MOCK_METHOD`.
+- Understanding of basic mocking workflow: setting default behaviors (`ON_CALL`), setting expectations (`EXPECT_CALL`), and running tests.
+- Access to your codebase with GoogleMock integrated.
+
+### Expected Outcome
+
+By following this guide, you will:
+- Use `NiceMock`, `NaggyMock`, and `StrictMock` appropriately to balance strictness and maintainability.
+- Avoid over-specifying expectations and reduce brittle test failures.
+- Structure tests to verify intent clearly while adapting flexibly to implementation changes.
+- Refactor mocks for clarity and simplicity using delegation and minimal mocking.
+
+### Difficulty Level
+
+Intermediate — assumes you have a working knowledge of mocking but aims to deepen effective usage.
+
+---
+
+## 1. Choose Mock Strictness Wisely
+
+GoogleMock supports three strictness modes to control how uninteresting calls (mock calls with no matching `EXPECT_CALL`) are handled:
+
+- **`NiceMock<T>`**: Suppresses warnings for uninteresting calls.
+- **`NaggyMock<T>` (Default behavior)**: Prints warnings for uninteresting calls.
+- **`StrictMock<T>`**: Treats uninteresting calls as test failures.
+
+### Best Practice
+
+- Prefer **`NiceMock`** for most tests to reduce noise and brittleness.
+- Use **`NaggyMock`** temporarily when diagnosing unexpected calls.
+- Reserve **`StrictMock`** for critical interfaces where every call must be verified.
+- Avoid mixing nested strictness (e.g., `NiceMock<StrictMock<...>>`) as it is unsupported.
+
+### Why?
+
+Strict mocks can cause tests to fail with minor internal refactoring. Nice mocks reduce maintenance overhead by ignoring uninteresting calls but still alert you through your `EXPECT_CALL`s.
+
+### Example
+
+```cpp
+using ::testing::NiceMock;
+using ::testing::StrictMock;
+
+class MockFoo {
+ public:
+  MOCK_METHOD(void, DoSomething, (), (override));
+};
+
+// NiceMock suppresses warnings for uninteresting calls.
+NiceMock<MockFoo> nice_mock;
+EXPECT_CALL(nice_mock, DoSomething());
+
+// StrictMock fails if unexpected calls occur.
+StrictMock<MockFoo> strict_mock;
+EXPECT_CALL(strict_mock, DoSomething());
+```
+
+<Info>
+Always match the mock strictness choice to how much behavioral verification your test needs.
+</Info>
+
+---
+
+## 2. Minimize Over-Mocking: Use `ON_CALL` Liberally
+
+Many tests become brittle because they contain over-specified expectations with too many `EXPECT_CALL`s. This couples tests tightly to implementation details.
+
+### Key Principle
+
+- Use `ON_CALL` to set **default behaviors** without verifying calls.
+- Use `EXPECT_CALL` only when you want to **assert that a call happens with specific arguments or times**.
+
+### How to Apply
+
+1. Prefer `ON_CALL` in test fixture setup or constructor to provide typical return values or side effects.
+2. Place sparse, targeted `EXPECT_CALL`s in individual tests to verify concrete interactions.
+3. Avoid adding `EXPECT_CALL` just to suppress "Uninteresting mock function call" warnings; use `NiceMock` or `EXPECT_CALL(...).Times(AnyNumber())` for such methods instead.
+
+### Example
+
+```cpp
+using ::testing::_;
+using ::testing::Return;
+
+class MockDatabase {
+ public:
+  MOCK_METHOD(int, Query, (const std::string&), (override));
+};
+
+class TestFixture : public ::testing::Test {
+ protected:
+  MockDatabase mock_db;
+
+  void SetUp() override {
+    ON_CALL(mock_db, Query(_))
+      .WillByDefault(Return(1));
+  }
+};
+
+TEST_F(TestFixture, CallsQueryWithSpecificKey) {
+  EXPECT_CALL(mock_db, Query("user_123"));  // Verifies this call.
+  // ...exercise code that calls Query("user_123")... 
+}
+
+TEST_F(TestFixture, OtherQueriesSucceedSilently) {
+  // No EXPECT_CALL here, calls with other keys just return 1.
+}
+```
+
+<Callout title="Why This Matters">Using `ON_CALL` default behaviors creates resilient tests that tolerate internal refactors and partial code path changes without brittle failures.</Callout>
+
+---
+
+## 3. Avoid Brittle Tests by Limiting Matching Complexity
+
+### Do Not Over-Specify Argument Matchers in Expectations
+
+Avoid checking every argument if only some are relevant. Use wildcards (`_`) or simpler matchers to express intent without brittleness.
+
+**Example**
+
+```cpp
+// Avoid this brittle style:
+EXPECT_CALL(mock, DoWork(42, true, "unused"));
+
+// Prefer this clearer intent:
+EXPECT_CALL(mock, DoWork(42, _, _));
+```
+
+### Do Not Over-Constrain Call Counts
+
+Avoid `Times(Exactly(n))` unless it is meaningful. Consider `Times(AtLeast(n))` or omit `Times` when counting is unimportant.
+
+### Use `.RetiresOnSaturation()` When Setting Sequential Expectations
+
+For expectations set in sequence, call `.RetiresOnSaturation()` so earlier expectations automatically deactivate on saturation, preventing calls from matching retired expectations erroneously.
+
+```cpp
+using ::testing::InSequence;
+using ::testing::Return;
+{
+  InSequence s;
+
+  EXPECT_CALL(mock, GetValue()).WillOnce(Return(1)).RetiresOnSaturation();
+  EXPECT_CALL(mock, GetValue()).WillOnce(Return(2)).RetiresOnSaturation();
+}
+```
+
+---
+
+## 4. Structure Tests for Clarity and Maintainability
+
+### One Assert Per Test
+
+Isolate tests verifying a single behavior or interaction. This makes failures easier to diagnose and tests easier to maintain.
+
+### Name Tests Descriptively
+
+Names should reflect the behavior under test, e.g., `TEST_F(UtilsTest, ReturnsTrueWhenInputIsValid)`.
+
+### Use Sequences and Partial Orders Where Order Matters
+
+Use `InSequence` or sequence objects to specify call order only when truly required. Avoid making call order a strict requirement unnecessarily.
+
+### Delegate Complex Default Behavior to Fakes Where Appropriate
+
+If you have complex default behavior, delegate it to a fake object and use delegation inside mocks. This prevents duplicating complex logic inside mocks and keeps tests simpler.
+
+```cpp
+class FakeFoo : public Foo { ... };
+
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(...);
+  void DelegateToFake() {
+    ON_CALL(*this, Method()).WillByDefault([&](...) {
+      return fake_.Method(...);
+    });
+  }
+ private:
+  FakeFoo fake_;
+};
+```
+
+---
+
+## 5. Practical Tips & Common Pitfalls
+
+### Use `NiceMock` to Suppress Noise from Uninteresting Calls
+
+This reduces test flakiness and makes logs cleaner.
+
+### Be Careful With `StrictMock`
+
+While strict mocks can catch unexpected calls, they can make tests brittle if you refactor your code.
+
+### Avoid Mocking Concrete Classes When Possible
+
+Mocking interfaces instead improves test independence and design.
+
+### Verify and Reset Mocks Carefully
+
+Use `Mock::VerifyAndClearExpectations(&mock)` if you need to force verification before mock destruction.
+
+### Relax Expectations When Refactoring
+
+If your test breaks after a refactoring that did not change external behavior, consider relaxing expectations or switching some `EXPECT_CALL` to `ON_CALL`.
+
+### Use Wildcard Matchers (`_`)
+
+Use `_` liberally to avoid over-specifying details that don't matter to the test.
+
+### Use `EXPECT_CALL(mock, Foo).Times(AnyNumber())` to Suppress Warnings
+
+This explicitly tells gMock not to warn about calls to a method.
+
+### Avoid Setting Expectations After Exercise
+
+Expectations must be set before invoking the mock method.
+
+---
+
+## Troubleshooting
+
+### Warning: 'Uninteresting mock function call'
+
+- Ensure you use `ON_CALL` for default behavior rather than `EXPECT_CALL` unless verifying the call.
+- Switch to `NiceMock` if the warning is acceptable.
+
+### Test Fails on Unexpected Calls
+
+- Add `EXPECT_CALL` for expected calls.
+- Use catch-all `EXPECT_CALL(mock, Method(_)).Times(AnyNumber());` for calls you want to allow.
+
+### Test Fails on Excessive Calls
+
+- Relax the `Times()` cardinality or add `.RetiresOnSaturation()` when setting multiple expectations on the same method.
+
+### Mock Methods Not Called
+
+- Verify that your code under test calls the method.
+- Make sure you set `EXPECT_CALL` **before** calling code.
+
+### Difficult to Match Overloaded Methods
+
+- Use `Const()` wrapper to distinguish const vs non-const overloads.
+- Use typed matchers like `An<int>()` or `TypedEq<char>('a')`.
+
+---
+
+## Next Steps & Related Content
+
+- **Mocking Workflow with GoogleMock**: For detailed step-by-step on creating mocks and setting expectations.
+- **Advanced Mocking: Actions, Matchers, and Customizations**: To leverage advanced mocking features.
+- **Nice, Naggy, and Strict Mocks**: API reference on strictness modes to deepen understanding.
+- **Matchers Reference and Actions Reference**: For building precise and powerful expectations.
+
+<Note>
+For foundational concepts, consider reviewing the [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) and the [Mocking Workflow Guide](https://google.github.io/googletest/guides/mocking-best-practices/mocking-workflow.html).
+</Note>
+
+---
+
+## Summary
+
+Use this guide as a practical foundation to write maintainable mocks by focusing on user intent rather than implementation details. Remember that less is more: verifying behavior precisely but minimally leads to robust tests. Structure your tests for future-proof clarity, and choose your mock strictness with care. Avoid brittle setups by using `ON_CALL` effectively and delegate complex logic to fakes or real objects if needed to balance test speed and reliability.
+
+---
