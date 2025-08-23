@@ -1,0 +1,224 @@
+---
+title: "Results Collection and Reporting"
+description: "Understand GoogleTest’s reporting architecture, including how results are tracked per test part, collected, and serialized. Learn how reporting integrates with CI systems and output formats such as XML or custom listeners."
+---
+
+# Results Collection and Reporting
+
+GoogleTest provides a comprehensive reporting architecture designed to track, collect, and serialize test results at multiple granularities, from individual assertions to entire test programs. This page guides you through understanding how test outcomes are recorded, how properties can be attached to tests, and how GoogleTest integrates with continuous integration (CI) tools through various output formats including XML, JSON, and streaming listeners.
+
+---
+
+## Test Results Tracking
+
+### Test Parts and TestPartResult
+
+At the core of Google's test reporting are **test parts**, which typically correspond to assertions or explicit success/failure invocations within tests. Each test part produces a `TestPartResult` object capturing the outcome, source location, and messages.
+
+`TestPartResult` can represent the following states:
+
+- **Success**: The test part passed.
+- **Non-Fatal Failure**: The assertion failed, but the test continues.
+- **Fatal Failure**: The failure causes immediate test termination.
+- **Skipped**: The test part or test was intentionally skipped.
+
+Each `TestPartResult` includes:
+
+- Source file and line number (if known)
+- Full failure message and summarized message
+- Query methods such as `passed()`, `failed()`, `fatally_failed()`, and `nonfatally_failed()`
+
+### TestResult: Aggregating Test Parts
+
+Each test has a `TestResult` object that aggregates all `TestPartResults` generated during its execution. `TestResult` provides:
+
+- Counts of all assertion outcomes (`total_part_count()`, `test_property_count()`)
+- Boolean queries such as `Passed()`, `Failed()`, `Skipped()`, `HasFatalFailure()`, and `HasNonfatalFailure()`
+- Access to individual parts via `GetTestPartResult(int i)`
+
+`TestResult` also holds user-defined **test properties**, key-value pairs you can log during test execution for enriched reporting.
+
+---
+
+## Attaching Properties to Tests
+
+You can enrich test result data by logging custom key-value pairs using `::testing::Test::RecordProperty`. This mechanism supports:
+
+- Adding properties during test execution, test suite setup/teardown, or globally.
+- Restricting keys to avoid conflicts with reserved XML attributes such as `name`, `status`, `time`, and `classname`.
+- Overwriting property values for existing keys, ensuring the last write wins.
+
+Properties recorded inside tests appear as XML/JSON attributes within the `<testcase>` element; those recorded during test suite setup or teardown appear within `<testsuite>`; and global properties appear in the top-level `<testsuites>`.
+
+---
+
+## Test Events and Listeners
+
+GoogleTest uses an event-driven model to report test progress and results, with `TestEventListener` as the interface. Users can add custom listeners to observe or extend test reporting. Key events include:
+
+- `OnTestProgramStart` / `OnTestProgramEnd`
+- `OnTestIterationStart` / `OnTestIterationEnd`
+- `OnTestSuiteStart` / `OnTestSuiteEnd`
+- `OnTestStart` / `OnTestEnd`
+- `OnTestPartResult`: Called each time an assertion or test part completes
+- `OnTestDisabled`: For disabled test notifications
+- Environment setup/tear-down events
+
+The `TestEventListeners` class manages these listeners, including the default console printer and XML/JSON report generators, forwarding events to all registered listeners.
+
+### Event Ordering
+
+Listeners receive `On*Start` and `OnTestPartResult` events in the order they were appended, while `On*End` events are dispatched in reverse order. This pattern allows later listeners to surround earlier listeners' output, framing results logically.
+
+---
+
+## Output Formats and Integration
+
+GoogleTest supports multiple output formats to aid integration with CI systems and automated tools.
+
+### Console Output
+
+- The default printer provides colorized and detailed output.
+- A brief mode (`--gtest_brief`) reduces output to failed tests only.
+- Elapsed test execution time is printed by default; can be suppressed with `--gtest_print_time=0`.
+
+### XML Output
+
+Invoked when using `--gtest_output=xml[:path_or_dir]`:
+
+- Generates JUnit-style XML report including suites, tests, failures, skips, and timing.
+- File location and line numbers for each test are included.
+- Supports multiple files if a directory is specified.
+
+Example snippet of XML format:
+
+```xml
+<testsuites name="AllTests" tests="3" failures="1" errors="0" time="0.035" timestamp="2011-10-31T18:52:42">
+  <testsuite name="MathTest" tests="2" failures="1" errors="0" time="0.015">
+    <testcase name="Addition" file="test.cpp" line="1" status="run" time="0.007" classname="MathTest">
+      <failure message="..." type="">...</failure>
+    </testcase>
+    <testcase name="Subtraction" file="test.cpp" line="2" status="run" time="0.005" classname="MathTest"/>
+  </testsuite>
+</testsuites>
+```
+
+### JSON Output
+
+Use `--gtest_output=json[:path_or_dir]` to generate JSON reports conforming to a defined Proto3 schema. This includes detailed test, suite, failure, skip, timestamp, and timing information.
+
+### Streaming Results
+
+For advanced CI needs, GoogleTest can stream test events to a socket via the `--gtest_stream_result_to=host:port` flag. This streams encoded event notifications for program start/end, test iteration starts/ends, test suite and test start/end, and individual assertion results with proper escaping.
+
+---
+
+## Test Sharding and Filtering
+
+GoogleTest supports sharding, where tests are partitioned across multiple parallel environments (shards). Environment variables `GTEST_TOTAL_SHARDS` and `GTEST_SHARD_INDEX` control test selection in each shard, ensuring each test runs exactly once across shards.
+
+Test filtering is provided via glob patterns in `--gtest_filter` (or `GTEST_FILTER`), supporting positive and negative patterns separated by `-`. Disabled tests have the prefix `DISABLED_` and can be optionally included with `--gtest_also_run_disabled_tests`.
+
+---
+
+## TestRun Lifecycle and Result Serialization
+
+The runner orchestrates:
+
+1. **Environment setup** (global environments) before tests.
+2. **Test suite setup (`SetUpTestSuite`)** before first test in suite.
+3. Running all tests in suites, collecting their individual `TestResult`s.
+4. **Test suite teardown (`TearDownTestSuite`)** after last test.
+5. **Environment teardown** after all tests.
+6. Final event `OnTestProgramEnd`.
+7. Serializing results to configured output.
+
+If a test or test suite fails during setup or teardown, results are recorded in the `ad_hoc_test_result()` attached to the suite or global invocation.
+
+---
+
+## Practical Tips & Best Practices
+
+- Record properties sensibly without conflicting with reserved XML keys.
+- Use event listeners to customize reporting or integrate new output formats.
+- Use XML or JSON reports to feed results into CI dashboards.
+- Consider enabling streaming to integrate with live reporting infrastructure.
+- Use filtering and sharding to optimize execution in large test suites.
+
+---
+
+## Example: Reporting Integration
+
+```cpp
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+
+  // Register a custom listener if desired
+  ::testing::TestEventListeners& listeners =
+      ::testing::UnitTest::GetInstance()->listeners();
+
+  // Remove default console printer if you want custom output
+  delete listeners.Release(listeners.default_result_printer());
+
+  listeners.Append(new MyCustomResultPrinter());
+
+  return RUN_ALL_TESTS();
+}
+```
+
+---
+
+## Troubleshooting Common issues
+
+- Ensure `InitGoogleTest` is called before `RUN_ALL_TESTS` to initialize flags and listeners.
+- Use the `--gtest_list_tests` flag to verify available tests and filters.
+- Verify output file paths and permissions when generating XML or JSON reports.
+- When using sharding, confirm `GTEST_TOTAL_SHARDS` and `GTEST_SHARD_INDEX` environment variables are set correctly.
+- If output is unexpectedly verbose or silent, check flags such as `--gtest_brief`, `--gtest_print_time`, and `--gtest_color`.
+
+---
+
+## Architecture Flow Diagram
+
+```mermaid
+flowchart TD
+  Start([Test Program Start]) --> Init[InitGoogleTest(argc, argv)]
+  Init --> Filter[FilterTests by --gtest_filter and sharding]
+
+  Filter -->|No tests to run| WarnNoTests[Warn if filter excludes all tests]
+  WarnNoTests --> End([Test Program End])
+
+  Filter -->|Tests to run| SetupEnv[Run Environments::SetUp()]
+  SetupEnv --> ForEachIteration{Repeat Iterations}
+
+  ForEachIteration --> SetupSuites[Run SetUpTestSuite() for each TestSuite]
+  SetupSuites --> RunTests[Run all Tests in TestSuites]
+  RunTests --> TearDownSuites[Run TearDownTestSuite() for each TestSuite]
+  TearDownSuites --> TearDownEnv[Run Environments::TearDown()]
+  TearDownEnv --> ForEachIteration
+
+  ForEachIteration -->|Done| Finalize[Generate Output & Notify Listeners]
+  Finalize --> End
+
+  subgraph Reporting
+    Finalize --> ConsoleOutput[Console Printer]
+    Finalize --> XmlOutput[XML Report File]
+    Finalize --> JsonOutput[JSON Report File]
+    Finalize --> StreamingOutput[Network Stream Outputs]
+  end
+```
+
+---
+
+## See Also
+
+- [TestEventListener API](/docs/reference/testing.md#TestEventListener)
+- [TestResult and TestPartResult classes](/docs/reference/testing.md#TestResult)
+- [Recording Properties](/docs/advanced.md#logging-additional-information)
+- [XML and JSON Output Formats Overview](/docs/advanced.md#controlling-test-output)
+- [Test Filtering and Sharding](/docs/advanced.md#selecting-tests)
+- [Event Listeners and Custom Printers](/docs/advanced.md#extending-googletest-by-handling-test-events)
+
+---
+
+By understanding this architecture, you can control and extend how test results flow through GoogleTest, enabling insightful reporting and smooth integration into your devops pipeline.
