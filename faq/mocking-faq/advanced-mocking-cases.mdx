@@ -1,0 +1,329 @@
+---
+title: "Advanced and Edge-Case Mocking Questions"
+description: "Addresses advanced or rare questions about mock class customization, call ordering, cardinalities, matchers, custom actions, and integration with legacy code bases."
+---
+
+# Advanced and Edge-Case Mocking Questions
+
+This FAQ page addresses the more advanced and rare questions users encounter when customizing mock classes in GoogleMock (`gMock`). It covers topics like precise control of call ordering, managing call cardinalities, constructing complex matchers, defining custom actions, and strategies for integrating mocks with legacy or complex code bases.
+
+---
+
+## 1. Customizing Mock Call Ordering and Cardinalities
+
+### How can I specify that certain mock method calls must occur in a particular order?
+
+By default, mock expectations (`EXPECT_CALL`) can match calls in any order. To enforce ordering, gMock provides:
+
+- **InSequence:** Group expectations inside an `InSequence` object to require calls happen sequentially:
+
+```cpp
+{
+  InSequence s;
+  EXPECT_CALL(mock, Foo(1));
+  EXPECT_CALL(mock, Bar(2));
+}
+// Calls to mock.Foo(1), then mock.Bar(2) must occur in this order.
+```
+
+- **After Clause:** To specify an expectation must occur after one or more other expectations:
+
+```cpp
+Expectation foo_called = EXPECT_CALL(mock, Foo(1));
+EXPECT_CALL(mock, Bar(2)).After(foo_called);
+```
+
+This allows expressing partial ordering and even DAGs of call dependencies.
+
+### What should I do if I want to allow multiple sequences or partial order on calls?
+
+Create multiple `Sequence` objects and attach them with `.InSequence(s1, s2)` to expectations. Calls must then respect the partial order induced by these sequences.
+
+Example:
+
+```cpp
+Sequence s1, s2;
+EXPECT_CALL(mock, A()).InSequence(s1, s2);
+EXPECT_CALL(mock, B()).InSequence(s1);
+EXPECT_CALL(mock, C()).InSequence(s2);
+```
+
+This enforces A before B and A before C but does not constrain the order between B and C.
+
+### How do I control how many times an expectation should be matched?
+
+Use the `.Times()` clause with cardinalities like `Exactly(n)`, `AtLeast(n)`, `AtMost(n)`, `AnyNumber()`, or `Between(m, n)`.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Foo(1)).Times(2);  // Exactly twice.
+EXPECT_CALL(mock, Bar(_)).Times(AnyNumber()); // Any number of times.
+```
+
+If `.Times()` is omitted, it is inferred based on the presence of `WillOnce()` and `WillRepeatedly()` clauses.
+
+### What if I want an expectation to *retire* after saturation?
+
+Use `.RetiresOnSaturation()` on the expectation. This means after the expected calls have occurred, the expectation becomes inactive and won't match further calls.
+
+This is useful for expectations that should match only a fixed number of times and then let other expectations match subsequent calls.
+
+## 2. Crafting and Using Complex Matchers
+
+### How do I specify that an argument to a mock method matches a complex condition?
+
+Use gMock's rich set of built-in matchers (e.g., `_`, `Ge()`, `NotNull()`, `HasSubstr()`, `ElementsAre()`, etc.) to express argument constraints. 
+
+You can combine matchers using `AllOf()`, `AnyOf()`, or negate with `Not()`.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Foo(AllOf(Ge(5), Lt(10))));
+```
+
+### How can I write a matcher to check a member or property of an argument object?
+
+Use `Field()` and `Property()` matchers:
+
+```cpp
+EXPECT_CALL(mock, Foo(Field(&Object::id, Eq(42))));
+EXPECT_CALL(mock, Foo(Property(&Object::GetName, HasSubstr("Test"))));
+```
+
+These allow matching on specific members or method results within complex argument objects.
+
+### What if I need to match arguments using tuples or multiple arguments?
+
+Use `.With()` in an `EXPECT_CALL` to specify a matcher on the entire argument tuple:
+
+```cpp
+EXPECT_CALL(mock, SetPosition(_, _))
+    .With(Lt());  // first arg less than second arg
+```
+
+You can also use `Args<N1, N2, ...>(matcher)` or `AllArgs(matcher)` inside `.With()`.
+
+### How do I create a custom matcher for advanced or domain-specific criteria?
+
+Use the `MATCHER`, `MATCHER_P`, or implement the matcher interface directly.
+
+Example:
+
+```cpp
+MATCHER_P(IsMultipleOf, n, "is multiple of " + ::testing::PrintToString(n)) {
+  return (arg % n) == 0;
+}
+EXPECT_CALL(mock, Foo(IsMultipleOf(3)));
+```
+
+
+## 3. Defining Custom Actions and Behavior
+
+### How can I define what a mock method does when called?
+
+You can specify actions in `EXPECT_CALL` or `ON_CALL` using:
+
+- **Built-in actions**, e.g. `Return()`, `ReturnRef()`, `ReturnPointee()`, `SetArgPointee<N>()`, `Invoke()`, etc.
+- **Custom actions** using lambdas or functors.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Foo(_))
+    .WillOnce(Return(42));
+
+EXPECT_CALL(mock, Bar(_))
+    .WillOnce([](int x) { return x * 2; });
+```
+
+### How do I combine multiple actions in a single call?
+
+Use `DoAll()` to chain actions executed sequentially, where the return value of the last action is returned:
+
+```cpp
+EXPECT_CALL(mock, Foo(_))
+    .WillOnce(DoAll(SetArgPointee<0>(5), Return(true)));
+```
+
+### Can I invoke the real method or a method of a parent class inside a mock method?
+
+Yes. To avoid recursion, explicitly scope the parent method:
+
+```cpp
+ON_CALL(mock, ConcreteMethod)
+    .WillByDefault([&mock](Args...) {
+      return mock.ParentClass::ConcreteMethod(Args...);
+    });
+```
+
+### How do I handle complex default behaviors or delegate to a real or fake instance?
+
+Use `ON_CALL()` to set default behaviors with `WillByDefault()`. You can delegate calls to a real or fake object by forwarding from the mock’s methods:
+
+```cpp
+ON_CALL(*this, Method(_)).WillByDefault(
+    [this](Args... args) { return real_.Method(args...); });
+```
+
+### How do I delete arguments or invoke callback arguments?
+
+- To delete a pointer argument:
+
+```cpp
+EXPECT_CALL(mock, Foo(_))
+    .WillOnce(DeleteArg<0>());
+```
+
+- To invoke a callback argument:
+
+```cpp
+EXPECT_CALL(mock, Foo(_, _))
+    .WillOnce(InvokeArgument<1>(val));
+```
+
+### What if my mock method needs to handle move-only types (e.g. std::unique_ptr)?
+
+Mock them normally using `MOCK_METHOD` but be cautious with actions:
+
+- Use lambdas or callables to create or handle move-only return or argument types.
+- Avoid `Return(std::move(...))` in `WillRepeatedly()`, as it will move only once.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, MakeBuzz(_))
+    .WillRepeatedly([](StringPiece sp) {
+       return std::make_unique<Buzz>();
+    });
+```
+
+## 4. Handling Uninteresting Calls
+
+### What are uninteresting calls and how does GoogleMock treat them?
+
+An *uninteresting call* is a call to a mock method that has no `EXPECT_CALL` expectation.
+
+- By default, GoogleMock treats uninteresting calls as **naggy**: it allows them but prints warnings.
+- You can control this behavior per mock object by using:
+  - `NiceMock<MockClass>`: suppresses warnings for uninteresting calls.
+  - `NaggyMock<MockClass>`: prints warnings (default).
+  - `StrictMock<MockClass>`: treats uninteresting calls as errors.
+
+Example:
+
+```cpp
+NiceMock<MockFoo> nice_foo;
+nice_foo.SomeMethod();  // no warning
+```
+
+### How do I disable warnings for specific methods without using NiceMock?
+
+Write an explicit catch-all expectation:
+
+```cpp
+EXPECT_CALL(mock, Method(_)).Times(AnyNumber());
+```
+
+But avoid overusing this as it can make your tests harder to maintain.
+
+## 5. Working with Multiple Expectations and Shadowing
+
+### How does gMock match a call if there are multiple expectations?
+
+gMock searches expectations in the **reverse order** they are defined and picks the last matching active expectation. This lets you write general expectations first, and more specific ones later. It enables overriding default behaviors easily.
+
+### What is the effect of sticky expectations?
+
+Expectations remain active even after reaching their upper call count, unless explicitly retired with `.RetiresOnSaturation()` or are in a sequence and superseded. This prevents subtle matching errors but requires care when writing multiple expectations to avoid unintended shadowing.
+
+### How do I test that a function is never called?
+
+Explicitly disallow calls using:
+
+```cpp
+EXPECT_CALL(mock, Foo(_)).Times(0);
+```
+
+## 6. Integration with Legacy or Complex Code Bases
+
+### Can I mock non-virtual methods?
+
+Yes, but this requires use of template-based dependency injection rather than inheritance. Define your mock class unrelated to the original class but with matching methods. Use template parameters in production and test code to swap implementations.
+
+Consult the [MockingNonVirtualMethods](https://google.github.io/googletest/gmock_cook_book.html#MockingNonVirtualMethods) recipe for details.
+
+### How can I mock static or global functions?
+
+Direct mocking is not possible. Instead, introduce an interface wrapping those functions and mock the interface using gMock. This promotes decoupling and testability.
+
+See the Google Testing Blog post on defeating static dependencies: [Defeat Static Cling](https://testing.googleblog.com/2008/06/defeat-static-cling.html).
+
+### How can I combine mocks with existing fake implementations?
+
+You can delegate default implementations of some methods to a fake inside your mock using `ON_CALL` with lambdas forwarding calls. This is useful when existing fake behavior is complex and you want partial interaction verification.
+
+Example:
+
+```cpp
+ON_CALL(mock, Foo).WillByDefault([this](Args... args) {
+  return fake_.Foo(args...);
+});
+```
+
+### How do I mock destructors or verify timing of destruction?
+
+Mock destructors indirectly by adding a mock method (e.g. `Die()`) that the destructor calls. You can then set expectations on `Die()` to check destruction order.
+
+```cpp
+class MockFoo {
+ public:
+  MOCK_METHOD(void, Die, ());
+  ~MockFoo() override { Die(); }
+};
+```
+
+## 7. Troubleshooting and Best Practices
+
+### Why does gMock sometimes print multiple failure messages for the same expectation?
+
+Each failure corresponds to a different point in time (e.g., first violation, later repeated calls violating counts). Though descriptions may look similar, they reflect distinct errors.
+
+### What to do when MSVC warns about `const` parameters in mocks?
+
+Remove top-level `const` qualifiers in function parameters in both base and mock class declarations, as MSVC has a known bug producing false warnings.
+
+### How to debug why gMock says expectations aren't satisfied?
+
+Run tests with `--gmock_verbose=info` to get detailed traces of mock calls and matching expectations. Study the trace to find mismatches.
+
+### How to avoid slow compilation of large mock classes?
+
+Move mock class constructors and destructors definitions into `.cc` files to prevent repeated instantiations in multiple translation units.
+
+### How to suppress uninteresting call warnings in tests?
+
+Use `NiceMock<>` wrapper for your mock objects or add catch-all expectations with `.Times(AnyNumber())`. Avoid blindly adding expectations just to suppress warnings.
+
+---
+
+### Related Topics
+
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) — practical recipes
+- [Mocking Reference](reference/mocking.md) — detailed API reference
+- [Matchers Reference](api_reference/core_assertions_matchers/matchers_reference) — matcher details
+- [Using Mocks in Tests](guides/getting-started/introduction-to-mocking.md) — beginner to advanced usage
+- [Legacy gMock FAQ](docs/gmock_faq.md) — common legacy issues
+
+### Tips and Recommendations
+
+- Use `ON_CALL()` to define defaults, and `EXPECT_CALL()` selectively for calls you want to verify.
+- Place more general expectations before more specific expectations, remembering the last matching rule.
+- When specifying call orders, use `InSequence` or `After` clauses for clear constraints.
+- Use `RetiresOnSaturation()` to avoid sticky expectation side effects when needed.
+- Use `NiceMock<>` for less noisy tests, `StrictMock<>` to enforce strict behavior.
+- Leverage `Invoke()` and custom actions for complex behavior needs.
+- Always ensure your mock class methods are virtual and destructors are virtual to avoid leaks and undefined behavior.
+
+This collection of answers should empower you to take full advantage of gMock's flexible, precise, and powerful mocking capabilities, even in sophisticated or legacy code scenarios.
