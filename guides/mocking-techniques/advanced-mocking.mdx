@@ -1,0 +1,266 @@
+---
+title: "Advanced Mocking Patterns and Customizations"
+description: "Dive into advanced scenarios: partial mocks, custom actions and matchers, controlling uninteresting calls, and best practices for maintainable test doubles."
+---
+
+# Advanced Mocking Patterns and Customizations
+
+GoogleMock (gMock) empowers you to take mocking far beyond the basics, enabling you to create highly expressive, maintainable, and finely controlled test doubles. This guide dives into advanced mocking patterns such as partial mocks, crafting custom actions and matchers, managing uninteresting calls, and following best practices to keep your tests robust and clean.
+
+---
+
+## 1. Partial and Hybrid Mocks
+
+### What Are Partial Mocks?
+Partial mocks let you mock *some* methods of a class while using the real implementations of others. This is useful when you want to test interactions with certain methods but retain real behavior for the rest.
+
+### How to Create Partial Mocks
+To create a partial mock:
+- Derive your mock class from the real class.
+- Use the `MOCK_METHOD` macro only for those virtual methods you want to mock.
+- Call real implementations for non-mocked methods as usual.
+
+### Example
+```cpp
+class MyClass {
+ public:
+  virtual int Add(int x, int y) { return x + y; }
+  virtual int Sub(int x, int y) { return x - y; }
+  virtual ~MyClass() = default;
+};
+
+class MockMyClass : public MyClass {
+ public:
+  MOCK_METHOD(int, Add, (int x, int y), (override));
+  // Sub() remains unmocked and calls real implementation
+};
+
+TEST(PartialMockTest, UseRealAndMockedMethods) {
+  MockMyClass mock;
+  EXPECT_CALL(mock, Add(3, 4)).WillOnce(Return(10));
+
+  // Calls mocked Add()
+  EXPECT_EQ(mock.Add(3, 4), 10);
+
+  // Calls real Sub()
+  EXPECT_EQ(mock.Sub(7, 2), 5);
+}
+```
+
+### Delegating Calls to Real Methods in Mock
+Sometimes, even for mocked methods, you want to call the real implementation. Use `Invoke()` with a pointer to the real method:
+
+```cpp
+using ::testing::Invoke;
+
+EXPECT_CALL(mock, Add).WillOnce(Invoke(&mock, &MyClass::Add));
+```
+
+This lets you selectively override behavior only when needed.
+
+---
+
+## 2. Writing Custom Actions
+
+Actions define what happens when a mock method that matches an expectation is called. Beyond built-in actions, custom actions allow you to specify complex behaviors.
+
+### Creating a Custom Action with a Lambda
+The simplest way is to pass a lambda directly to `WillOnce()` or `WillRepeatedly()`:
+
+```cpp
+EXPECT_CALL(mock, Foo(_)).WillOnce([](int x) { return x * 2; });
+```
+
+### Implementing an Action Class
+For more reusable or complex behavior, define a class with a call operator matching the mock method signature:
+
+```cpp
+struct MultiplyBy {
+  int factor;
+  int operator()(int x) const { return x * factor; }
+};
+
+EXPECT_CALL(mock, Foo(_)).WillOnce(MultiplyBy{5});
+```
+
+### Chaining Multiple Actions
+Use `DoAll()` to run multiple actions in sequence, returning the last action's value:
+
+```cpp
+using ::testing::DoAll;
+using ::testing::SetArgPointee;
+using ::testing::Return;
+
+EXPECT_CALL(mock, Update(_, _))
+    .WillOnce(DoAll(SetArgPointee<1>(42), Return(true)));
+```
+
+This sets an output argument and returns `true`.
+
+---
+
+## 3. Defining Custom Matchers
+
+Matchers let you specify how arguments passed to mock methods should be verified. Sometimes built-in matchers are insufficient.
+
+### Basic Custom Matcher with `MATCHER`
+Define a matcher easily using the `MATCHER` macro:
+
+```cpp
+MATCHER(IsEven, "checks if the number is even") {
+  return (arg % 2) == 0;
+}
+
+EXPECT_CALL(mock, Foo(IsEven()));
+```
+
+### Parameterized Matcher with `MATCHER_P`
+```cpp
+MATCHER_P(InRange, range, "checks if in range") {
+  return arg >= range.first && arg <= range.second;
+}
+
+EXPECT_CALL(mock, Foo(InRange(std::make_pair(5, 10))));
+```
+
+### Writing Complex Matchers
+For advanced logic requiring state or explanation:
+
+```cpp
+class DivisibleByMatcher {
+ public:
+  explicit DivisibleByMatcher(int divisor) : divisor_(divisor) {}
+
+  bool MatchAndExplain(int n, std::ostream* os) const {
+    if (n % divisor_ != 0) {
+      *os << "which leaves remainder " << (n % divisor_);
+      return false;
+    }
+    return true;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "is divisible by " << divisor_;
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "is not divisible by " << divisor_;
+  }
+
+ private:
+  int divisor_;
+};
+
+::testing::Matcher<int> DivisibleBy(int divisor) {
+  return MakeMatcher(new DivisibleByMatcher(divisor));
+}
+
+EXPECT_CALL(mock, Foo(DivisibleBy(7)));
+```
+
+---
+
+## 4. Controlling Uninteresting Calls
+
+An uninteresting call is a call to a mock method without a matching `EXPECT_CALL`. By default, gMock warns on such calls but lets the test pass.
+
+### Mocks Modes
+- **Naggy Mocks** (default) warn on uninteresting calls.
+- **Nice Mocks** suppress warnings on uninteresting calls.
+- **Strict Mocks** fail on uninteresting calls.
+
+### Using Nice and Strict Mocks
+```cpp
+#include <gmock/gmock.h>
+
+NiceMock<MockFoo> nice_mock;   // Suppresses warnings
+StrictMock<MockFoo> strict_mock;  // Fails test on uninteresting calls
+```
+
+### Explicitly Allowing Calls
+Use a catch-all `EXPECT_CALL` with `Times(AnyNumber())` to allow certain calls:
+
+```cpp
+EXPECT_CALL(mock, Foo(_)).Times(AnyNumber());
+```
+
+This tells gMock to expect any number of calls to `Foo` with any arguments.
+
+### Changing Default Behavior Globally or Per Mock
+Modify default behavior for uninteresting calls:
+
+```cpp
+// Globally
+--gmock_verbose=error  // Only print errors
+
+// Per mock
+Mock::AllowUninterestingCalls(reinterpret_cast<uintptr_t>(&mock));
+```
+
+---
+
+## 5. Best Practices for Maintainable Test Doubles
+
+### Use Interfaces and Separate Mocks
+- Mock only interfaces or abstract base classes.
+- Avoid mocking concrete classes directly; instead code to interfaces.
+
+### Be Careful with Over-specification
+- Specify expectations only to the extent necessary.
+- Avoid brittle tests by minimizing argument matching to what really matters.
+
+### Leverage ON_CALL and EXPECT_CALL Appropriately
+- Use `ON_CALL` for setting default mock behaviors.
+- Use `EXPECT_CALL` only when verifying that calls occur.
+
+### Use Sequences and Ordering Sparingly
+- Explicit call order can improve clarity but can increase brittleness.
+- Use [`InSequence`](reference/mocking.md#InSequence) or `.After()` clauses only when call order is critical.
+
+### Encapsulate Complex Behavior
+- Use custom actions and matchers to encapsulate complex mock behaviors.
+- Keep test logic out of expectations; delegate to helper functions or classes.
+
+### Verify and Clear Expectations Explicitly
+- If mocks outlive test scope, call `Mock::VerifyAndClearExpectations(mock)` to enforce verification.
+
+### Avoid Mocking Private and Non-Virtual Methods
+- Mock only virtual functions.
+- For private/protected functions, mock using public access via subclassing.
+
+### Control Output Verbosity
+- Use `--gmock_verbose` flag or set `::testing::FLAGS_gmock_verbose` in code to reduce noise or increase insights when debugging.
+
+---
+
+## 6. Troubleshooting Common Issues
+
+| Issue                                                      | Solution or Explanation                                            |
+| ---------------------------------------------------------- | ----------------------------------------------------------------- |
+| Mock method calls real method unexpectedly                  | Ensure methods to be mocked are `virtual`.                        |
+| Too many/few `WillOnce()` actions compared to `Times()`    | Match the action count to cardinality to avoid warnings.          |
+| Uninteresting call warnings flooding test output           | Use `NiceMock` or add catch-all `EXPECT_CALL` with `Times(AnyNumber())`. |
+| Unexpected call failure when arguments differ               | Check matchers and argument specificity; use `_` matcher to broaden expectations. |
+| Over-specification causes brittle tests                     | Narrow expectations; do not verify irrelevant arguments.          |
+| Compiler warnings on const parameters in mock methods       | Remove meaningless top-level const qualifiers on function parameters. |
+
+---
+
+## 7. Next Steps & Related Content
+
+- Explore the [Creating and Using Mock Objects](https://google.github.io/googletest/guides/mocking.html) for foundational skills.
+- Study [Setting and Verifying Expectations](https://google.github.io/googletest/guides/mocking-techniques/setting-expectations.html) to master call controls.
+- Dive into [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) for recipes to handle tricky scenarios.
+- Understand [Matchers and Actions Reference](https://google.github.io/googletest/reference/matchers.html) to build precise tests.
+- Use [GoogleTest Primer](https://google.github.io/googletest/primer.html) to reinforce core testing concepts.
+
+---
+
+<Tip>
+Advanced mocking elevates testing from basic verification to expressive, maintainable interaction validation. Start by mastering partial mocks and custom matchers, and progressively incorporate sequences and strictness modes to enforce interaction contracts.
+</Tip>
+
+<Note>
+Be mindful that excessive use of strict mocks and overly precise expectations can make tests fragile. Strive for balance by only asserting what your test truly depends on.
+</Note>
+
