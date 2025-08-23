@@ -1,0 +1,196 @@
+---
+title: "Performance Optimization Tips"
+description: "Advice for speeding up test execution, using parallelization tools, and minimizing overhead when running large test suites."
+---
+
+# Performance Optimization Tips
+
+Efficient test execution is crucial when working with large C++ test suites using GoogleTest and GoogleMock. This page provides actionable advice to speed up your tests, utilize parallelization effectively, and reduce runtime overheads to maximize productivity and minimize feedback loops.
+
+---
+
+## 1. Run Tests in Parallel
+
+One of the simplest and most powerful ways to improve test performance is to run tests concurrently.
+
+- **Use `--jobs=N` or `-j N` with your build system:** When building tests with CMake + Ninja or Bazel, specify parallel jobs to utilize multiple CPU cores.
+
+- **Leverage `--gtest_parallel` external utility:** This tool splits your test suite across multiple CPU cores for faster execution.
+
+- **Invoke tests with GoogleTest's built-in sharding:** Use `--gtest_shard_index` and `--gtest_total_shards` to split tests manually for parallel runs in CI.
+
+### Tips
+
+- Make sure your tests are independent; parallel execution assumes no shared mutable state.
+- Avoid tests relying on global or static state that might introduce races.
+- Use `INSTANTIATE_TEST_SUITE_P` carefully to avoid overly large parameterized tests that serially execute.
+
+---
+
+## 2. Minimize Mock Overhead
+
+While GoogleMock is powerful, mocks come with a runtime cost that can accumulate in large suites.
+
+- **Use NiceMock or StrictMock selectively:** Choose the right mock strictness. `NiceMock` suppresses warnings and can reduce noise and some overhead.
+
+- **Avoid unnecessary expectations:** Use `ON_CALL` for default behaviors unless call verification is required. Excessive `EXPECT_CALL` with strict cardinalities may slow down execution.
+
+- **Group expectations:** When possible, batch related mocks and sequences to avoid expensive dynamic checks.
+
+- **Move mock constructor/destructor to .cc file:** Defining mock constructors and destructors outside header files reduces compilation overhead and may indirectly impact runtime performance by enabling better optimizations.
+
+---
+
+## 3. Optimize Test Filtering and Selection
+
+Focusing on subsets of tests reduces the workload during development.
+
+- **Use `--gtest_filter` to run only relevant tests:** Target only the tests impacted by your code changes.
+
+- **Combine with parallel execution:** Run filtered tests in parallel to maximize speed.
+
+- **Split large parameterized tests into smaller suites:** Helps reduce unnecessary test instantiations.
+
+---
+
+## 4. Control GoogleMock Verbosity
+
+Verbose output slows down tests due to string formatting and IO.
+
+- **Use `--gmock_verbose=warning` or `error` in CI:** Limits logging overhead.
+
+- **Avoid excessive `--gmock_verbose=info` during normal runs:** Use it only for targeted debugging.
+
+- **Reduce stack trace depth:** Configure `--gtest_stack_trace_depth` to lower values if full traces aren't required.
+
+---
+
+## 5. Reduce Global and Static Test Data
+
+Avoid large shared or static data that must be constructed or destroyed for every test.
+
+- **Use `SetUpTestSuite` and `TearDownTestSuite` for shared fixtures:** Initialize expensive resources once per test suite.
+
+- **Avoid global state mutations:** To keep tests isolated and enable parallel execution.
+
+---
+
+## 6. Leverage Mock Object Lifecycle Management
+
+Proper mock lifecycle management prevents leaks and speeds up runs.
+
+- **Explicitly verify and clear expectations:** Use `Mock::VerifyAndClearExpectations(&mock_obj)` after tests to reclaim resources promptly and avoid accumulating expectations.
+
+- **Use `Mock::AllowLeak` only intentionally:** Leaking mocks skips verification and cleanup, which can mask bugs and increase memory use.
+
+---
+
+## 7. Adopt Incremental Compilation and Caching
+
+Although external to GoogleMock itself, build system optimizations complement test speed.
+
+- **Use precompiled headers** to speed up repetitive header parsing.
+- **Cache test binaries** and intermediate build artifacts.
+- **Split mocks across multiple translation units** to speed parallel compiles.
+
+---
+
+## 8. Profile and Identify Hotspots
+
+Use profiling tools to find bottlenecks in your tests:
+
+- Use CPU profilers (e.g. `perf`, Visual Studio Profiler) to detect slow test functions.
+- Verify your mocks’ expectations are not over-constraining leading to repeated failures.
+- Minimize unnecessary heap allocations within mock actions and matchers.
+
+---
+
+## Practical Example
+
+Here's how you might apply some tips in a sample test:
+
+```cpp
+#include <gmock/gmock.h>
+using ::testing::NiceMock;
+using ::testing::Return;
+
+class MockDatabase {
+ public:
+  MOCK_METHOD(bool, Connect, (), ());
+  MOCK_METHOD(int, GetCount, (), ());
+};
+
+TEST(DatabaseTest, QueryCount) {
+  NiceMock<MockDatabase> db;  // suppresses uninteresting call warnings
+
+  ON_CALL(db, Connect()).WillByDefault(Return(true));
+  EXPECT_CALL(db, GetCount()).Times(1).WillOnce(Return(42));
+
+  // test code that calls db.Connect() and db.GetCount()
+}
+```
+
+Run this test with parallel workers:
+
+```shell
+bazel test //tests:database_test --jobs=8
+```
+
+And for debugging unexpected mock calls, temporarily enable verbose info:
+
+```shell
+test_binary --gmock_verbose=info
+```
+
+---
+
+## Related Documentation
+
+- [Mocking Your First Functions](/guides/getting-started/mocking-your-first-functions)
+- [Controlling Mock Strictness](/guides/advanced-testing-patterns/controlling-strictness-of-mocks)
+- [Integrating with Build Systems](/guides/scenarios-and-best-practices/integrating-with-build-systems)
+- [Writing Your First Tests](/guides/getting-started/writing-your-first-tests)
+- [Basic Usage and Troubleshooting FAQ](/faq/getting-started-help/basic-usage-issues)
+- [Debugging & Verbosity Control](docs/gmock_cook_book.md#Controlling-How-Much-Information-gMock-Prints)
+
+---
+
+<Tip>
+For large test suites, focus first on introducing parallel test execution, then optimize mock usage and expectations to reduce runtime overhead. Combining these approaches will deliver the greatest performance gains.
+</Tip>
+
+<Warning>
+Avoid setting excessive strict mock expectations on every method; use `ON_CALL` for default behaviors where verification is not critical to prevent slowing down test runs.
+</Warning>
+
+<Check>
+Confirm your tests are safe for parallel execution by checking for shared state and dependencies.
+</Check>
+
+---
+
+## Troubleshooting
+
+- **Tests run slowly despite parallelization:** Ensure your tests don't use shared resources or global state causing contention. Refactor for independence.
+
+- **Too many warnings for uninteresting calls:** Use `NiceMock` or add explicit `EXPECT_CALL(...).Times(AnyNumber())` for often-called methods.
+
+- **Leaked mocks warnings slowing down test shutdown:** Use `Mock::AllowLeak` only if intentional; otherwise, explicitly verify and clear expectations.
+
+- **Verbose logging slows down tests:** Lower verbosity with `--gmock_verbose=warning` or `error`.
+
+- **Test flakes when running tests concurrently:** Check for race conditions or static variables shared across tests.
+
+---
+
+## Summary
+
+Performance in GoogleTest and GoogleMock hinges on parallel execution, lean mocks, minimized runtime logging, and well-structured tests. Applying the recommendations here will reduce test run time significantly and accelerate your development feedback loop.
+
+### Local Resources
+
+- [GoogleMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html)
+- [gMock Cookbook - Performance](docs/gmock_cook_book.md#Making-the-Compilation-Faster)
+
+---
+

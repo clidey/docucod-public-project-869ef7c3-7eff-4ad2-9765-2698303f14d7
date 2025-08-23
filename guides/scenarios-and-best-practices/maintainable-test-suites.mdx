@@ -1,0 +1,279 @@
+---
+title: "Building Maintainable, Scalable Test Suites"
+description: "Adopt proven techniques for keeping test code clean, maintainable, and fast. Topics include organizing tests, managing fixtures, reducing test flakiness, and leveraging assertions and mocks for clarity and intent."
+---
+
+# Building Maintainable, Scalable Test Suites
+
+## Introduction
+
+Writing tests that scale effectively as your codebase grows is essential to maintaining a high-quality software project. This page guides you through practical strategies to organize your tests, manage shared resources efficiently, minimize flakiness, and write clear, intent-revealing assertions and mocks. By applying these proven techniques, you ensure your test suites remain clean, maintainable, and fast, helping you confidently evolve your code.
+
+---
+
+## 1. Organizing Your Tests
+
+### Group Tests Logically
+
+- **Use Test Suites to Reflect Code Structure**: Create test suites that group related tests, aligning the test suite name with the code class or module under test. This makes it easier to locate tests and understand coverage.
+
+- **Prefer Descriptive Test Names Without Underscores**: Follow idiomatic GoogleTest naming conventions by avoiding underscores in test suite and test names. This ensures compatibility and prevents unexpected naming conflicts.
+
+- **Use TEST and TEST_F Macros Appropriately**: Use `TEST()` for simple independent tests and `TEST_F()` when tests share a fixture (common setup/teardown or member objects).
+
+### Organize Tests To Minimize Dependencies and Side Effects
+
+- Tests must be independent so they can run in isolation and in any order.
+
+- Avoid using mutable global or static variables that affect test outcomes.
+
+- Clean up side effects properly to prevent cascading failures.
+
+### Use Test Fixtures for Shared Setup
+
+- Define a test fixture class inheriting from `testing::Test`.
+
+- Initialize common objects/resources in the constructor or `SetUp()`.
+
+- Clean up in destructor or `TearDown()`.
+
+- Create fresh fixture instances per test to avoid cross-test contamination.
+
+```cpp
+class FooTest : public testing::Test {
+ protected:
+  FooTest() { /* init */ }
+  void SetUp() override { /* per-test setup */ }
+  void TearDown() override { /* per-test cleanup */ }
+  ~FooTest() override { /* cleanup */ }
+
+  SomeClass common_resource_;
+};
+
+TEST_F(FooTest, DoesSomething) {
+  EXPECT_TRUE(common_resource_.DoIt());
+}
+```
+
+> **Tip:** Always use `override` for `SetUp()` and `TearDown()` to catch typos.
+
+---
+
+## 2. Managing Shared Resources Efficiently
+
+### Use Per-Test-Suite Setup and Teardown
+
+- Place expensive resource initialization in `static void SetUpTestSuite()` and cleanup in `static void TearDownTestSuite()` inside your fixture class.
+
+- GoogleTest invokes these methods once per test suite around the first and last tests respectively.
+
+- This keeps tests fast and avoids expensive setup costs for each test.
+
+```cpp
+class BarTest : public testing::Test {
+ protected:
+  static DatabaseConnection* db_;
+
+  static void SetUpTestSuite() {
+    db_ = new DatabaseConnection("connection_string");
+  }
+
+  static void TearDownTestSuite() {
+    delete db_;
+    db_ = nullptr;
+  }
+
+  void SetUp() override {
+    // Reset state if required
+  }
+};
+
+DatabaseConnection* BarTest::db_ = nullptr;
+
+TEST_F(BarTest, QueryReturnsExpected) {
+  EXPECT_TRUE(db_->Query("SELECT * FROM foo"));
+}
+```
+
+<Warning>
+Be sure that shared resources are thread-safe if tests run in parallel, or serialize access appropriately.
+</Warning>
+
+### Avoid Leaking Resources in SetUpTestSuite
+
+- If your test suite has subclasses, `SetUpTestSuite()` may be called multiple times.
+
+- Guard initialization code to prevent double allocation and corresponding memory leaks.
+
+### Use Global Environments for Cross-Test-Program Setup
+
+- For setup that spans multiple test suites or the entire test program, subclass `::testing::Environment`.
+
+- Register with `::testing::AddGlobalTestEnvironment()` before `RUN_ALL_TESTS()`.
+
+- Use `SetUp()` and `TearDown()` to manage global state.
+
+```cpp
+class MyEnvironment : public ::testing::Environment {
+ public:
+  void SetUp() override {
+    InitializeSharedResources();
+  }
+  void TearDown() override {
+    CleanupSharedResources();
+  }
+};
+
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  ::testing::AddGlobalTestEnvironment(new MyEnvironment());
+  return RUN_ALL_TESTS();
+}
+```
+
+---
+
+## 3. Reducing Test Flakiness
+
+Flaky tests undermine trust in your test suite. To avoid them:
+
+- **Avoid Global Mutable State**: Don't share mutable variables between tests without proper synchronization.
+
+- **Use Fresh Test Fixtures**: GoogleTest creates a new fixture instance per test.
+
+- **Avoid Dependencies on External Resources**: Use mocks or test doubles to isolate the unit under test.
+
+- **Control Randomness and Timing**: Seed random number generators consistently; avoid tests dependent on timing unless specifically testing behavior under timing constraints.
+
+- **Use `SCOPED_TRACE` to Aid Debugging**: When a failure happens deep in helper functions or loops, use `SCOPED_TRACE` with contextual info to understand which invocation caused it.
+
+```cpp
+void Helper(int n) {
+  SCOPED_TRACE(testing::Message() << "Helper called with n=" << n);
+  EXPECT_EQ(Factorial(n), SomeExpectedValue(n));
+}
+
+TEST(FactorialTest, VariousInputs) {
+  for(int i = 0; i < 5; ++i) {
+    Helper(i);
+  }
+}
+```
+
+- **Limit Use of Fatal Assertions in Helper Functions**: Fatal failures abort the current function only, not the whole test—use `HasFatalFailure()` to detect and handle them if needed.
+
+---
+
+## 4. Writing Clear, Intent-Revealing Assertions
+
+### Choose the Right Assertion Macros
+
+- Use `EXPECT_*` macros when you want test execution to continue after failure to gather multiple errors.
+
+- Use `ASSERT_*` macros when further code depends on the assertion being true (e.g., dereferencing pointers).
+
+- Stream additional messages with `<<` for clarity.
+
+```cpp
+ASSERT_NE(ptr, nullptr) << "Failed to allocate buffer";
+EXPECT_EQ(result, expected) << "Processing result mismatch";
+```
+
+### Use Specialized Assertions for Better Diagnostics
+
+- Use typed assertions such as `EXPECT_STREQ` for C strings, `EXPECT_FLOAT_EQ` for floats, and `EXPECT_THROW` for exception expectations.
+
+- Use `EXPECT_THAT` with matchers from GoogleMock for expressive assertions.
+
+### Compose Custom Assertions for Complex Logic
+
+- Define predicate assertions returning `testing::AssertionResult` with detailed messages.
+
+- Use `EXPECT_PRED_FORMAT*` variants for predicate formatters that provide custom assertion messages.
+
+---
+
+## 5. Using Mocks to Clarify Test Intent
+
+- Use GoogleMock mocks to isolate dependencies, control interactions, and verify behavior.
+
+- Define mock classes with `MOCK_METHOD` for the interfaces you depend on.
+
+- Set expectations using `EXPECT_CALL` with matching argument matchers.
+
+- Specify behavior via `.WillOnce()`, `.WillRepeatedly()`, or `.WillByDefault()`.
+
+- Control strictness levels with `NiceMock`, `NaggyMock`, or `StrictMock` to manage noise or enforce strictness.
+
+Example:
+
+```cpp
+class MockDatabase {
+ public:
+  MOCK_METHOD(bool, Connect, (), ());
+  MOCK_METHOD(int, Query, (const std::string&), ());
+};
+
+TEST(DatabaseClientTest, ReturnsValue) {
+  MockDatabase mock_db;
+  EXPECT_CALL(mock_db, Connect()).WillOnce(testing::Return(true));
+  EXPECT_CALL(mock_db, Query("SELECT 1")).WillOnce(testing::Return(42));
+
+  DatabaseClient client(&mock_db);
+  EXPECT_EQ(client.GetAnswer(), 42);
+}
+```
+
+---
+
+## 6. Best Practices Summary
+
+- Keep tests **independent**, **repeatable**, and **fast**.
+- Group them into logical suites aligned to the application structure.
+- Use fixtures for shared setup and clearly separate shared state using `SetUpTestSuite` and `TearDownTestSuite`.
+- Apply `SCOPED_TRACE` for better debugging context.
+- Prefer non-fatal assertions `EXPECT_*` to reveal multiple failures, escalate to `ASSERT_*` if subsequent code depends on passed assertions.
+- Use mocks to isolate units and precisely express intent.
+- Avoid creating flakiness by controlling environment, state, and randomness.
+
+---
+
+## Troubleshooting & Tips
+
+### Common Issues
+
+- **Tests Fail Indeterminately**: Check for shared mutable state or external dependencies. Use fixtures properly.
+
+- **Unexpected Test Name Collisions**: Avoid underscore `_` in test suite and test names.
+
+- **Memory Leaks in Fixtures**: Properly clean up in `TearDown` and `TearDownTestSuite`.
+
+- **Assertion Macros in Constructors or Destructors**: Not allowed for fatal assertions (`ASSERT_*`, `FAIL()`). Use `SetUp()` / `TearDown()` instead.
+
+- **Death Tests Hangs or Fails**: Run death tests isolated; avoid multi-threading outside death test scopes.
+
+### Performance Considerations
+
+- Minimize expensive setup by using `SetUpTestSuite()`.
+
+- Use mock objects to avoid costly real dependencies.
+
+- Use parameterized tests to cover more scenarios with less duplicated code.
+
+### Alternative Approaches
+
+- Use **Typed Tests** and **Type-Parameterized Tests** for verifying behavior across multiple types with shared logic (see related documentation).
+
+- Use **Value-Parameterized Tests** (`TEST_P`) to run the same test over different inputs without code duplication.
+
+---
+
+## Next Steps & Related Content
+
+- **For Writing Parameterized and Typed Tests**: See [Parameterized and Typed Tests Guide](../advanced-testing-patterns/parameterized-and-typed-tests).
+- **For Custom Assertions and Matchers**: See [Creating Custom Assertions and Matchers](../advanced-testing-patterns/custom-assertions-and-matchers).
+- **For Handling Strictness of Mocks**: See [Controlling Mock Strictness of Mocks](../advanced-testing-patterns/controlling-strictness-of-mocks).
+- **For Understanding Assertions Macros**: Refer to [Assertions Reference](reference/assertions.md).
+- **For Learning About Test Fixtures**: Refer to [GoogleTest Primer](primer.md) section on test fixtures.
+
+---
