@@ -1,0 +1,241 @@
+---
+title: "Performance and Scalability Best Practices"
+description: "Actionable strategies for minimizing test runtime and engineering cost with GoogleTest and GoogleMock. Advice on structuring fast and robust tests, avoiding common pitfalls, and scaling tests for large codebases with parallelization and smarter dependency mocks."
+---
+
+# Performance and Scalability Best Practices
+
+Optimize your GoogleTest and GoogleMock test suites to minimize runtime and reduce engineering costs, making test execution faster, more robust, and easy to scale in large projects. This guide provides clear, actionable strategies for designing efficient tests, structuring mocks smartly, leveraging parallelization, and avoiding common pitfalls that degrade performance.
+
+---
+
+## Workflow Overview
+
+### Task Description
+This guide helps you build high-performance and scalable tests with GoogleTest and GoogleMock. It covers techniques to write fast tests, manage dependencies efficiently, and scale testing over large codebases or CI systems.
+
+### Prerequisites
+- Familiarity with basic GoogleTest and GoogleMock usage.
+- Your project must have GoogleTest and GoogleMock integrated.
+- Basic understanding of C++ testing and mocking principles.
+
+### Expected Outcome
+By following this guide, you will:
+- Write faster, more reliable tests
+- Use mocks effectively to reduce external dependencies
+- Organize tests for parallel execution
+- Avoid common performance traps
+
+### Time Estimate
+15-30 minutes to read and apply the main techniques; more time if refactoring existing test suites for scalability.
+
+### Difficulty Level
+Intermediate to Advanced
+
+---
+
+## Step-by-Step Best Practices
+
+### 1. Structure Tests for Speed and Robustness
+
+- **Keep tests atomic and focused:** Design each test to cover one behavior or feature, avoiding large, complex tests that take longer to run and are brittle.
+
+- **Use mocks to isolate dependencies:** Replace slow or unreliable dependencies (like databases, networks, or file systems) with GoogleMock mocks to keep tests deterministic and fast.
+
+- **Avoid over-mocking:** Too many mocks add complexity and slow compilation. Mock only what you own or have direct influence on.
+
+  <Tip>
+  Remember, your mock objects should have virtual destructors to prevent leaks and undefined behavior.
+  </Tip>
+
+### 2. Create Efficient and Maintainable Mocks
+
+- Use `MOCK_METHOD` macros to define mocks succinctly in **public** sections regardless of the original method's access level.
+
+- Use matchers like `_` to specify flexible expectations and avoid brittle argument matching.
+
+- Use `ON_CALL()` to set default behaviors for mock methods that you expect to be called but don’t need to verify explicitly. This reduces the need for excessive `EXPECT_CALL`s.
+
+- For expected calls, prefer ordered sequences (`InSequence`) only when order matters; unordered calls are more flexible and less prone to brittleness.
+
+- Use `.RetiresOnSaturation()` to allow expectations to retire once satisfied, enabling smoother handling of repeated but limited calls.
+
+- To suppress warnings about uninteresting calls, wrap mocks with `NiceMock<>` or explicitly add catch-all expectations with `.Times(AnyNumber())`.
+
+### 3. Control Call Counts and Behavior
+
+- Be explicit about cardinalities using `.Times()`, `AtLeast()`, `AtMost()`, or `Between()`. Let GoogleMock infer call counts when appropriate to reduce maintenance.
+
+- Chain `.WillOnce()` and `.WillRepeatedly()` to define precise mock method behaviors, and avoid returning move-only objects incorrectly by using lambdas or actions that create new instances each call.
+
+- Use `.With()` and additional matchers to specify argument constraints without overspecification.
+
+### 4. Optimize Test Execution and Parallelization
+
+- Organize tests into smaller units to enable fast parallel execution (
+  e.g., via CTest, Bazel, or your CI pipeline).
+
+- Avoid global or static state in test setup to prevent contention or ordering issues.
+
+- Use GoogleTest’s filtering (`--gtest_filter=`) and sharding flags (`--gtest_shard_index` and `--gtest_total_shards`) to distribute tests across parallel jobs efficiently.
+
+- When using mocks in parallel tests, ensure thread safety by following GoogleMock’s thread usage guidelines:
+  - Set all expectations and mock behaviors before spawn of multiple threads.
+  - Allow concurrent calls but avoid mutation of mocks once test execution begins.
+
+### 5. Minimize Compilation and Build Overhead
+
+- Move mock class constructor and destructor definitions into `.cc` files to reduce redundant compilation costs across translation units.
+
+- Avoid mocking very large or complex types unless necessary.
+
+- For repeated mock behaviors, define reusable actions and matchers to improve maintainability and slightly reduce compile time.
+
+### 6. Verify and Maintain Expectations
+
+- Use `Mock::VerifyAndClearExpectations()` to explicitly verify mocks when lifetime management is complex or to catch leaks early.
+
+- Avoid setting new expectations after code execution, as it causes undefined behavior.
+
+- If you see warnings about uninteresting calls, use `NiceMock` or catch-all expectations instead of adding redundant `EXPECT_CALL`s.
+
+---
+
+## Practical Examples
+
+### Creating a Fast Mock with Default Action
+
+```cpp
+#include <gmock/gmock.h>
+
+class Foo {
+ public:
+  virtual ~Foo() = default;
+  virtual int Compute(int x) = 0;
+};
+
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, Compute, (int x), (override));
+};
+
+TEST(FooTest, FastCompute) {
+  MockFoo mock;
+
+  // Set default to return 42 when Compute is called with any value.
+  ON_CALL(mock, Compute(::testing::_))
+      .WillByDefault(::testing::Return(42));
+
+  // Expect exactly 3 calls with any argument.
+  EXPECT_CALL(mock, Compute(::testing::_)).Times(3);
+
+  // Exercise mock
+  EXPECT_EQ(mock.Compute(1), 42);
+  EXPECT_EQ(mock.Compute(2), 42);
+  EXPECT_EQ(mock.Compute(3), 42);
+}
+```
+
+### Using Sequences to Enforce Call Order
+
+```cpp
+using ::testing::InSequence;
+
+TEST(FooTest, OrderedCalls) {
+  MockFoo mock;
+  {
+    InSequence s;
+
+    EXPECT_CALL(mock, Compute(1));
+    EXPECT_CALL(mock, Compute(2));
+  }
+
+  mock.Compute(1);
+  mock.Compute(2);
+}
+```
+
+### Delegating to a Fake Inside a Mock
+
+```cpp
+class FakeFoo : public Foo {
+ public:
+  int Compute(int x) override { return x * 2; }
+};
+
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, Compute, (int x), (override));
+
+  void DelegateToFake() {
+    ON_CALL(*this, Compute(::testing::_))
+        .WillByDefault([this](int x) { return fake_.Compute(x); });
+  }
+
+ private:
+  FakeFoo fake_;
+};
+
+TEST(FooTest, Delegating) {
+  MockFoo mock;
+  mock.DelegateToFake();
+
+  EXPECT_CALL(mock, Compute(10));
+
+  EXPECT_EQ(mock.Compute(10), 20);
+}
+```
+
+---
+
+## Troubleshooting & Tips
+
+### Common Issues
+
+- **Uninteresting call warnings:** Use `NiceMock<>` or add general expectations like `.Times(AnyNumber())` to suppress noise.
+
+- **Upper bound violations:** Occur when a mocked method is called more times than expected. Fix by adjusting `.Times()`, `.WillRepeatedly()`, or using `.RetiresOnSaturation()`.
+
+- **Unexpected call errors:** Make sure your `EXPECT_CALL`s cover all expected usage patterns.
+
+- **Memory leaks due to mocks:** Ensure all mocks have virtual destructors and get deleted properly, or mark intended leaks with `Mock::AllowLeak()`.
+
+### Best Practices
+
+- Set `EXPECT_CALL`s before exercising mocks.
+- Use `ON_CALL` for default behaviors, reserve `EXPECT_CALL` for verifying calls.
+- Keep expectations as general as possible to avoid brittle tests.
+- Leverage `--gmock_verbose=info` to debug call matching and ordering.
+
+### Performance Considerations
+
+- Organize tests to run in parallel, minimizing single-threaded bottlenecks.
+- Avoid expensive setup inside tests; use lightweight mocks where possible.
+- Cache or reuse mock definitions across tests when appropriate.
+
+### Alternative Approaches
+
+- Use fakes instead of mocks when simple behavior simulation is sufficient and faster.
+- Consider refactoring code to smaller interfaces that are easier and faster to mock.
+
+---
+
+## Next Steps & Related Content
+
+- Explore [Mocking Dependencies with GoogleMock](https://google.github.io/googletest/guides/gmock_cook_book.html) to deepen knowledge on effective mocking.
+- Review [Running and Interpreting Test Results](/getting-started/first-use/running-tests) to improve test execution workflows.
+- Consult [Integration with Build Systems and CI](/guides/real_world_patterns_advanced/integration_with_build_systems_ci) for scaling tests in continuous integration.
+- Dive into [Advanced Matchers and Actions](https://google.github.io/googletest/gmock_cook_book.html) for more customized and performant mock behaviors.
+
+---
+
+## References
+
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html) - Beginner-friendly introduction
+- [Mocking Reference](https://google.github.io/googletest/reference/mocking.html) - API details and best practices
+- [GoogleTest Primer](https://github.com/google/googletest/blob/main/docs/primer.md) - Core GoogleTest tutorial
+- [Guides: Setup and Building](https://google.github.io/googletest/guides/getting_started_core_workflows/setup_and_build)
+
+---
+
+> *For detailed API usage on mocks and expectations, refer to the `docs/reference/mocking.md` page. For typical troubleshooting scenarios, consult the troubleshooting guides under Getting Started.*
