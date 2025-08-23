@@ -1,0 +1,299 @@
+---
+title: "Defining and Using Mocks"
+description: "Provides an in-depth description of how to declare and implement mock classes and methods, including the use of primary macros and the FunctionMocker utility. Explains key patterns for mocking free functions and member functions with different qualifiers."
+---
+
+# Defining and Using Mocks
+
+This page provides an in-depth guide on declaring and implementing mocks in GoogleMock (gMock). Mocking is a core capability in gMock that enables you to simulate and control the behavior of objects in tests by specifying what methods are expected to be called, how many times, with which arguments, and what they should return or do.
+
+---
+
+## Overview
+
+In gMock, *mock classes* are created by defining methods with the `MOCK_METHOD` macro. These mock methods replace virtual functions from the base class or interface and support writing expectations on how they are invoked. Behind the scenes, gMock uses the `FunctionMocker` utility template to track expectations, invocations, and to manage default behaviors.
+
+This page focuses specifically on:
+
+- Defining mock classes and methods (member functions, with various qualifiers)
+- Using the main macros: `MOCK_METHOD`, `ON_CALL`, `EXPECT_CALL`
+- Overview of the `FunctionMocker` mechanism
+- Patterns for mocking free functions
+
+---
+
+## MOCK_METHOD: Defining Mock Methods
+
+### Syntax
+
+```cpp
+MOCK_METHOD(ReturnType, MethodName, (Args...), (Specs...));
+```
+
+The macro receives 3 or 4 parameters:
+
+- `ReturnType` — The method's return type.
+- `MethodName` — The name of the method.
+- `Args...` — The argument types inside parentheses.
+- `Specs...` (optional) — A comma-separated list of qualifiers and specifiers applied to the method.
+
+### Qualifiers and Specifiers Supported
+
+| Specifier               | Description                                                 |
+|-------------------------|-------------------------------------------------------------|
+| `const`                 | Marks the mock method as const, e.g., for overriding `const` methods. |
+| `override`              | Indicates the method overrides a virtual method. Recommended for virtual overrides. |
+| `noexcept`              | Marks the method as `noexcept`. Must match the base method. |
+| `Calltype(...)`         | Specifies calling convention, e.g., `Calltype(STDMETHODCALLTYPE)` for Windows COM functions. |
+| `ref(&)`, `ref(&&)`     | Marks the method with lvalue/rvalue reference qualifiers as appropriate. |
+
+### Example
+
+```cpp
+class MockTurtle : public Turtle {
+ public:
+  MOCK_METHOD(void, PenUp, (), (override));
+  MOCK_METHOD(void, PenDown, (), (override));
+  MOCK_METHOD(void, Forward, (int distance), (override));
+  MOCK_METHOD(void, Turn, (int degrees), (override));
+  MOCK_METHOD(void, GoTo, (int x, int y), (override));
+  MOCK_METHOD(int, GetX, (), (const, override));
+  MOCK_METHOD(int, GetY, (), (const, override));
+};
+```
+
+### Handling Commas in Template Arguments
+
+A common pitfall is that unprotected commas inside argument or return types confuse the macro parsing. For example:
+
+```cpp
+class MockFoo {
+ public:
+  MOCK_METHOD(std::pair<bool, int>, GetPair, ());  // Won't compile!
+  MOCK_METHOD(bool, CheckMap, (std::map<int, double>, bool)); // Won't compile!
+};
+```
+
+**Solutions:**
+
+- Wrap the return or argument types with parentheses:
+
+  ```cpp
+  MOCK_METHOD((std::pair<bool, int>), GetPair, ());
+  MOCK_METHOD(bool, CheckMap, ((std::map<int, double>), bool));
+  ```
+
+- Use `using` declarations or type aliases:
+
+  ```cpp
+  using BoolAndInt = std::pair<bool, int>;
+  MOCK_METHOD(BoolAndInt, GetPair, ());
+  using MapIntDouble = std::map<int, double>;
+  MOCK_METHOD(bool, CheckMap, (MapIntDouble, bool));
+  ```
+
+### Visibility Requirement
+
+`MOCK_METHOD` must be declared in the **public** section of the mock class, even if the base method is `protected` or `private`. This design allows `EXPECT_CALL` and `ON_CALL` to access the mock methods externally.
+
+---
+
+## Setting Behaviors and Expectations
+
+### ON_CALL: Specifying Default Behavior
+
+`ON_CALL` defines the *default action* for a mock method when called with matching arguments but does *not* set any expectation of invocation.
+
+#### Syntax
+
+```cpp
+ON_CALL(mock_object, Method(matchers...))
+    .With(multi_argument_matcher)?
+    .WillByDefault(action);
+```
+
+- `.With()` is optional and restricts the matching by a multi-argument matcher.
+- `.WillByDefault()` **must** appear exactly once to specify the behavior.
+
+### EXPECT_CALL: Setting Call Expectations
+
+`EXPECT_CALL` both specifies what should happen *and* sets the expectation that the method will be called.
+
+#### Syntax
+
+```cpp
+EXPECT_CALL(mock_object, Method(matchers...))
+    .With(multi_argument_matcher)?
+    .Times(cardinality)?
+    .InSequence(sequences...)*
+    .After(expectations...)*
+    .WillOnce(action)*
+    .WillRepeatedly(action)?
+    .RetiresOnSaturation()?;
+```
+
+Clauses marked with `?` are optional. Clauses marked with `*` can be repeated.
+
+- `.With()` restricts the matching to calls whose tuple of arguments match a custom matcher.
+- `.Times()` specifies the call count expectations.
+- `.InSequence()` and `.After()` specify call order constraints.
+- `.WillOnce()` and `.WillRepeatedly()` specify what the mock method does on calls.
+- `.RetiresOnSaturation()` indicates the expectation retires when saturated.
+
+For full details on cardinalities and clauses, see the related sections on [Cardinalities](#cardinalities) and [Ordering](#ordered-calls).
+
+---
+
+## The FunctionMocker Utility
+
+Behind the scenes, each mock method declared with `MOCK_METHOD` is implemented using an instance of `FunctionMocker`, a gMock internal template that manages expectations and default actions for a specific method signature.
+
+### Responsibilities
+
+- Tracking all `EXPECT_CALL` expectations on the method.
+- Tracking all `ON_CALL` default actions.
+- Selecting the correct expectation on each invocation based on call arguments and call count.
+- Enforcing call sequence, call ordering, and call count constraints.
+- Providing thread-safe invocation and verification.
+
+### Thread Safety
+
+`FunctionMocker` internally uses a mutex to serialize access to expectations and assure consistent behavior in multi-threaded tests.
+
+### Usage by Mock Classes
+
+When you write `MOCK_METHOD(ReturnType, Name, (Args...), (Specs))` in a mock class, gMock generates a private `FunctionMocker` instance and implements your mock method by forwarding invocations to the mocker which returns the expected return value or performs specified actions.
+
+---
+
+## Mocking Free Functions
+
+Free (non-member) functions cannot be mocked directly using `MOCK_METHOD` as they are not methods of a class. To mock them, the recommended pattern is:
+
+- Define an interface class with virtual functions representing the free functions.
+- Use this interface throughout your code instead of calling free functions directly.
+- Mock the interface using `MOCK_METHOD` in a derived mock class.
+
+Alternatively, for function pointers or `std::function` objects, gMock provides `MockFunction<F>` which creates a mock function with a single `Call()` method:
+
+```cpp
+MockFunction<int(int)> mock_func;
+EXPECT_CALL(mock_func, Call(42)).WillOnce(Return(84));
+EXPECT_EQ(mock_func.AsStdFunction()(42), 84);
+```
+
+---
+
+## Additional Notes
+
+### Mocking Const and Overloaded Methods
+
+To mock overloaded methods or const methods, specify `const` and fully disambiguate the overload via argument matchers or use `Const()` helper:
+
+```cpp
+MOCK_METHOD(int, GetValue, (), (const, override));
+EXPECT_CALL(Const(mock_obj), GetValue());
+```
+
+### Mocking Methods with Move-Only Types
+
+gMock supports mocking methods that take or return move-only types (e.g., `std::unique_ptr`). You can declare and set expectations as usual, but beware some built-in actions or chained actions may require workarounds.
+
+### Visibility Control
+
+Sometimes you may want to suppress warnings on uninteresting calls, or convert them to failures. Use `NiceMock<T>`, `NaggyMock<T>`, or `StrictMock<T>` wrappers over your mock classes to control this behavior.
+
+### Beware of Comma and Parentheses Pitfalls
+
+Pay attention to method signatures with template arguments containing commas; always protect them using parentheses or type aliases.
+
+---
+
+## References
+
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html) — Getting started with mocks in gMock
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) — Recipes for common mocking scenarios
+- [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html) — Quick syntax and usage reference
+- [Mocking Reference (ON_CALL, EXPECT_CALL)](reference/mocking.md) — Detailed reference
+
+---
+
+**Example: Mocking a Class**
+
+```cpp
+#include <gmock/gmock.h>
+
+class Foo {
+ public:
+  virtual ~Foo() {}
+  virtual int GetSize() const = 0;
+  virtual std::string Describe(const char* name) = 0;
+};
+
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, GetSize, (), (const, override));
+  MOCK_METHOD(std::string, Describe, (const char* name), (override));
+};
+```
+
+**Example: Setting Expectations**
+
+```cpp
+using ::testing::Return;
+using ::testing::_;
+
+TEST(FooTest, Sample) {
+  MockFoo foo;
+
+  ON_CALL(foo, GetSize()).WillByDefault(Return(10));
+
+  EXPECT_CALL(foo, Describe(_))
+      .Times(1)
+      .WillOnce(Return("Expected description"));
+
+  EXPECT_EQ(foo.GetSize(), 10);
+  EXPECT_EQ(foo.Describe("test"), "Expected description");
+}
+```
+
+---
+
+**Example: Mocking a Free Function via MockFunction**
+
+```cpp
+#include <gmock/gmock.h>
+
+using ::testing::Return;
+using ::testing::_;
+
+TEST(FreeFunctionTest, Basic) {
+  ::testing::MockFunction<int(int)> mock_func;
+
+  EXPECT_CALL(mock_func, Call(42)).WillOnce(Return(84));
+
+  int result = mock_func.AsStdFunction()(42);
+  EXPECT_EQ(result, 84);
+}
+```
+
+---
+
+## Common Pitfalls and Tips
+
+- Always define mock methods in the public section, even if the base method is protected or private.
+- Protect template argument lists containing commas using parentheses or type aliases.
+- Use `ON_CALL` to specify default behavior without setting an expectation.
+- Use `EXPECT_CALL` to specify both behavior and expectations of method calls.
+- Control strictness and warning behavior with `NiceMock`, `NaggyMock`, and `StrictMock` wrappers.
+- When mocking overloaded or const methods, use `Const()` or specify exact argument types to resolve ambiguities.
+- Verify and clear expectations explicitly using `Mock::VerifyAndClearExpectations(&mock_obj)` when needed.
+- Avoid setting expectations after the mock methods are exercised, as behavior becomes undefined.
+
+---
+
+## Summary
+
+Defining and using mocks in gMock empowers you to write precise, flexible, and maintainable unit tests by specifying expected interactions with dependencies. The `MOCK_METHOD` macro simplifies mocking member functions of interfaces or base classes, while `ON_CALL` and `EXPECT_CALL` allow you to tailor behaviors and expectations. The internal `FunctionMocker` supports sophisticated call matching and concurrency safety. For mocking free functions, use interfaces or `MockFunction`. Proper use of qualifiers, managing strictness, and awareness of macro parsing subtleties will help ensure robust tests.
+
+---
