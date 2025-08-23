@@ -1,0 +1,449 @@
+---
+title: "General Usage FAQ"
+description: "Answers to the most frequently asked questions about setup, running tests, and basic usage of GoogleTest and GoogleMock. Ideal for new users and those troubleshooting standard issues during adoption."
+---
+
+# General Usage FAQ
+
+This FAQ addresses the most common questions and concerns users face when setting up, running tests, and using GoogleTest and GoogleMock. It is crafted to help new users and those troubleshooting standard issues during early adoption.
+
+---
+
+## 1. Why is my mock object calling the real method instead of the mock method?
+
+For GoogleMock to override and mock a method, the original method **must be declared virtual**. Non-virtual methods cannot be mocked through GoogleMock's mechanisms.
+
+If you want to mock a non-virtual method, consider the high-performance dependency injection approach, which uses unrelated mock classes with matching method signatures (see the gMock Cookbook).
+
+---
+
+## 2. Can I mock variadic functions (functions with ellipsis `...`)?
+
+No. Variadic functions cannot be mocked directly in GoogleMock because it cannot infer the number or types of arguments passed at runtime.
+
+As a workaround, provide overloaded function versions or redesign to avoid variadic arguments in interfaces to be mocked.
+
+---
+
+## 3. I get warnings from MSVC about const parameters in mocked methods. How do I fix them?
+
+Microsoft Visual C++ sometimes warns about overriding virtual functions differing only in const qualifications for top-level parameters.
+
+This warning is due to MSVC's incorrect handling of `const` on parameter declarations (where top-level const is ignored in C++).
+
+**Recommended solution:** Remove the top-level `const` qualifier from parameters in both your base and mock classes to silence these warnings.
+
+Note that const pointer/reference parameters are unaffected and should retain `const` as intended.
+
+---
+
+## 4. How can I debug when GoogleMock thinks my expectations are not satisfied?
+
+Run your tests with the flag `--gmock_verbose=info`. This produces a detailed trace of all mock calls, which expectation each call matches, and detailed reasoning about any mismatches.
+
+This detailed output will help identify typos, incorrect matchers, ordering issues, or other causes for expectation failures.
+
+If you see messages about missing default actions for methods, consider adding appropriate default behaviors using `ON_CALL`.
+
+---
+
+## 5. What does the warning "Uninteresting function call encountered - default action taken" mean? Should I worry?
+
+No. This warning means a mock method was called without any `EXPECT_CALL` expectation set on it. GoogleMock treats these as "uninteresting calls" with no expectation and performs the method's default behavior.
+
+If you expect the method may be called but don't care about the calls, this warning is harmless.
+
+If you want to silence this warning, consider one of these approaches:
+
+- Use a `NiceMock<T>` wrapper for the mock class to suppress warnings on such calls.
+- Add an `EXPECT_CALL(mock, Method).Times(AnyNumber())` to declare that calls to the method are expected but not constrained.
+
+Avoid adding empty or unnecessary `EXPECT_CALL` without purpose just to silence warnings.
+
+---
+
+## 6. How do I specify how many times a mock method should be called?
+
+Use the `.Times(cardinality)` clause with `EXPECT_CALL`. Cardinalities include:
+
+- `Exactly(n)` or simply `n`: Expect exactly `n` calls.
+- `AtLeast(n)`: Expect at least `n` calls.
+- `AtMost(n)`: Expect at most `n` calls.
+- `Between(m, n)`: Expect calls between `m` and `n` inclusive.
+- `AnyNumber()`: Allow any number of calls.
+
+If you omit `.Times()`, GoogleMock infers the times from provided actions (`WillOnce`, `WillRepeatedly`) or defaults to one call.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Foo()).Times(2);  // Foo expected twice
+```
+
+To expect a method is never called:
+
+```cpp
+EXPECT_CALL(mock, Foo()).Times(0);
+```
+
+---
+
+## 7. How do I set default behaviors for mock methods without forcing an expectation?
+
+Use `ON_CALL(mock, Method(matchers...)).WillByDefault(action);` to specify the default behavior when the method is called, but without requiring it to be called.
+
+This sets how the mock will behave for all calls matching the arguments, but does not make the test fail if the method is not called.
+
+---
+
+## 8. How can I make sure mock calls occur in a specific order?
+
+By default, mock expectations can be matched in any order. To enforce call order:
+
+- Use the `InSequence` class to group expectations within a scope. Expectations declared inside this scope must be matched in order.
+
+Example:
+
+```cpp
+{
+  InSequence seq;
+  EXPECT_CALL(mock, Foo());
+  EXPECT_CALL(mock, Bar());
+}
+```
+
+- Alternatively, use the `.InSequence(s1, s2, ...)` clause on each `EXPECT_CALL` with `Sequence` objects to declare a partial order.
+
+- To establish dependencies, use `.After(expectation)` to specify that a call happens after other calls.
+
+---
+
+## 9. How do I handle mock methods that are overloaded or `const`? How do I disambiguate them in expectations?
+
+- For overloaded methods, GoogleMock requires you to specify arguments explicitly or use helper wrappers like `Const(mock)` to select the const overload.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, GetBar()).WillOnce(ReturnRef(bar1));
+EXPECT_CALL(Const(mock), GetBar()).WillOnce(ReturnRef(bar2));
+```
+
+- If the method is overloaded on argument types, you may need to specify the precise matcher type explicitly via `Matcher<T>`, `TypedEq<T>`, or `SafeMatcherCast<T>`.
+
+---
+
+## 10. How can I suppress warnings for mock methods that I don’t care about?
+
+Use the `NiceMock<T>` wrapper for your mock object. It suppresses warnings on uninteresting calls.
+
+Example:
+
+```cpp
+NiceMock<MockFoo> mock_foo;
+```
+
+Alternatively, use `NaggyMock<T>` to generate warnings (default behavior) or `StrictMock<T>` to treat uninteresting calls as errors.
+
+---
+
+## 11. What should I do if I need to provide actions for move-only types like `std::unique_ptr`?
+
+- Use `MOCK_METHOD` macros as usual; GoogleMock now supports move-only types in arguments and return types.
+
+- For return values, prefer specifying lambdas or `WillOnce` with a lambda that creates a new object each invocation, rather than using `Return(std::move(...))` repeatedly.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, MakeBuzz(_))
+    .WillRepeatedly([](auto) {
+      return std::make_unique<Buzz>(...);
+    });
+```
+
+- For arguments, lambdas can accept and process move-only parameters.
+
+- If using older GoogleMock versions or for complicated scenarios, consider the legacy workaround of delegating to a helper mocked method with non-move-only arguments.
+
+---
+
+## 12. How can I force GoogleMock to verify expectations before mock destruction?
+
+Use `Mock::VerifyAndClearExpectations(&mock_object)` to manually verify that all expectations on the mock have been met and clear them.
+
+Returns `true` if verification succeeds.
+
+Example:
+
+```cpp
+ASSERT_TRUE(Mock::VerifyAndClearExpectations(&mock_foo));
+```
+
+Avoid setting new expectations after verification, as behavior is undefined.
+
+---
+
+## 13. Why do newer `EXPECT_CALL` statements override older ones?
+
+GoogleMock searches expectations in reverse order to allow establishing general default behaviors early (e.g., in constructors) and overriding these behaviors later (e.g., in specific tests).
+
+To avoid confusion, if order of matching or invocation is important, prefer sequences or combine multiple actions in the same expectation.
+
+---
+
+## 14. How do I handle warnings about "too many" or "too few" actions vs. the expected cardinality?
+
+GoogleMock warns when the number of `WillOnce()` or `WillRepeatedly()` calls does not align with the specified `.Times()` cardinality.
+
+- If you experience these warnings, ensure the number of actions matches the expected call count.
+- Adjust `.Times()`, `WillOnce()`, and `WillRepeatedly()` clauses accordingly.
+
+---
+
+## 15. How can I mock methods with complex or lengthy argument lists?
+
+Use adapter methods in your mock class that delegate to a simpler mock method that can be easily mocked.
+
+Example:
+
+```cpp
+class MockLog : public LogSink {
+ public:
+  void send(...) override {
+    Log(...);
+  }
+  MOCK_METHOD(void, Log, (LogSeverity, const string&, const string&));
+};
+```
+
+This makes writing expectations more manageable.
+
+---
+
+## 16. How can I test mock objects in multithreaded scenarios?
+
+- Your test code should run mostly in a single thread to avoid race conditions.
+- Setting expectations and destroying mocks must happen when no other thread uses them.
+- Calls to mock methods can come from multiple threads; GoogleMock is thread-safe.
+- Actions run in the calling thread of the mock method.
+- Use synchronization in your test code if ordering of calls across threads matters.
+
+---
+
+## 17. What is the difference between `EXPECT_CALL` and `ON_CALL`?
+
+- `EXPECT_CALL` sets both **behavior** and **expectation** (the method must be called as specified).
+- `ON_CALL` sets default **behavior** only, without enforcing that the method is called.
+
+Use `ON_CALL` for common default behaviors and `EXPECT_CALL` when you want to verify that calls happen.
+
+---
+
+## 18. How can I mock or verify a destructor call?
+
+Since destructors cannot be mocked directly, add a `MOCK_METHOD(void, Die, ())` and call it from your destructor:
+
+```cpp
+class MockFoo {
+ public:
+  MOCK_METHOD(void, Die, ());
+  ~MockFoo() override { Die(); }
+};
+```
+
+Then verify that `Die()` is called at the correct time using `EXPECT_CALL` with ordering.
+
+---
+
+## 19. How does GoogleMock handle calls that exceed the expected number?
+
+Calls that exceed the specified `.Times()` cardinality (over-saturation) are considered failures. GoogleMock:
+
+- Reports the failure immediately.
+- Performs the default action or the action specified in `ON_CALL` for the method.
+
+This lets your test catch unexpected excessive calls promptly.
+
+---
+
+## 20. How can I suppress or customize the verbosity of GoogleMock's output?
+
+Use the command-line flag `--gmock_verbose=LEVEL` where `LEVEL` can be:
+
+- `info`: Show detailed informational messages (most verbose).
+- `warning`: Show warnings and errors (default).
+- `error`: Show errors only (least verbose).
+
+You can set this flag programmatically:
+
+```cpp
+::testing::FLAGS_gmock_verbose = "error";
+```
+
+Adjust according to whether you want more debug info or cleaner test output.
+
+---
+
+## 21. What do "Uninteresting calls" and "Unexpected calls" mean?
+
+- **Uninteresting calls:** Calling mock methods without any `EXPECT_CALL` set. These calls are allowed but generate warnings unless suppressed by `NiceMock`.
+
+- **Unexpected calls:** Calls that do not match **any** existing expectation (`EXPECT_CALL`) but where such expectations exist. These always generate test failures.
+
+Choose mock strictness wrappers (`NiceMock`, `NaggyMock`, `StrictMock`) accordingly.
+
+---
+
+## 22. How to correctly mock overloaded methods?
+
+You need to disambiguate the overload either by:
+
+- Using argument matchers or types explicitly.
+- Wrapping the mock object with `Const()` when mocking const overloads.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Overloaded(An<int>()));
+EXPECT_CALL(Const(mock), Overloaded(5));
+```
+
+---
+
+## 23. How can I test asynchronous behavior with GoogleMock?
+
+Use synchronization constructs like `Notification` in combination with `EXPECT_CALL` actions:
+
+```cpp
+const int kEventId = 123;
+absl::Notification done;
+EXPECT_CALL(mock, DispatchEvent(kEventId))
+    .WillOnce([&done] { done.Notify(); });
+
+// Code triggers DispatchEvent asynchronously.
+done.WaitForNotification();
+```
+
+This allows deterministic testing of asynchronous code.
+
+---
+
+## 24. Can I use matchers inside googletest assertions?
+
+Yes. Use `EXPECT_THAT(value, matcher)` and `ASSERT_THAT(value, matcher)` for expressive assertions with matchers.
+
+Example:
+
+```cpp
+EXPECT_THAT(value, StartsWith("Hello"));
+EXPECT_THAT(num, AllOf(Ge(5), Le(10)));
+```
+
+See the [Matchers Reference](reference/matchers.md) for more details.
+
+---
+
+## 25. What is the best way to set expectations that involve complex argument matching?
+
+Write expectations with matchers that specify only necessary details, combining them with `_` where arguments are not important.
+
+Use `With()` when matching multiple arguments as a whole, or define custom matchers.
+
+If argument verification is complex, save arguments using `SaveArg<N>` and verify them separately.
+
+Avoid over-specifying arguments to keep tests maintainable.
+
+---
+
+## 26. How can I handle move-only arguments or return values in mock methods?
+
+- Use lambdas in `WillOnce` or `WillRepeatedly` that create or process move-only values explicitly.
+- Avoid returning the same moved object multiple times as it will be invalid after the first move.
+- Mocking support for move-only types has improved; check your GoogleMock version.
+
+---
+
+## Tips and Best Practices
+
+- **Set all your expectations before exercising code that calls the mocks.** Setting expectations afterward results in undefined behavior.
+- **Use sequences to clearly document expected call orders.**
+- **Suppress warnings for uninteresting calls with `NiceMock` only when appropriate.**
+- **Add catch-all `EXPECT_CALL`s with `.Times(AnyNumber())` where partial expectation coverage is needed.**
+- **Use `ON_CALL` for default behavior and reserve `EXPECT_CALL` for calls you want to verify.**
+- **Delegate to fakes or real objects to reuse verified logic.**
+- **Manually call `Mock::VerifyAndClearExpectations` when needed to force early verification.**
+- **Test move-only return values using lambdas, not repeated `Return(std::move(...))`.**
+
+---
+
+## Further Help
+
+For in-depth explanations and advanced recipes, see:
+
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html) - beginner-friendly introduction.
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) - practical patterns.
+- [Mocking Reference](reference/gmock-mocking-api/mock-object-definition.md) - detailed API.
+- [Expectations Specification](reference/gmock-mocking-api/expectations-specification.md) - usage of `EXPECT_CALL` and modifiers.
+- [Nice, Naggy, and Strict Mocks](reference/gmock-mocking-api/nice-strict-mocks.md) - for controlling warning vs failure behavior.
+- [Matchers Reference](reference/gmock-mocking-api/matchers-library.md).
+
+If you encounter issues:
+
+- Run tests with `--gmock_verbose=info` for maximum diagnostic output.
+- Consult [Legacy gMock FAQ](gmock_faq.md) for common problems.
+
+---
+
+## Sample FAQ Excerpt (Usage)
+
+```cpp
+// Creating a mock and setting expectations
+MockTurtle mock_turtle;
+EXPECT_CALL(mock_turtle, PenDown()).Times(AtLeast(1));
+ON_CALL(mock_turtle, GetX()).WillByDefault(Return(10));
+
+// Using NiceMock to suppress uninteresting call warnings
+NiceMock<MockTurtle> nice_mock;
+EXPECT_CALL(nice_mock, PenDown());
+
+// Enforcing call order
+{
+  InSequence s;
+  EXPECT_CALL(mock_turtle, PenDown());
+  EXPECT_CALL(mock_turtle, Forward(100));
+  EXPECT_CALL(mock_turtle, PenUp());
+}
+
+// Returning different values on subsequent calls
+EXPECT_CALL(mock_turtle, GetX())
+    .WillOnce(Return(1))
+    .WillOnce(Return(2))
+    .WillRepeatedly(Return(3));
+```
+
+---
+
+# Troubleshooting Checklist
+
+- **Mock methods called real methods:** Ensure methods are virtual.
+- **Uninteresting call warnings:** Use `NiceMock` or add catch-all `EXPECT_CALL`.
+- **Expectations not met:** Use `--gmock_verbose=info` for trace.
+- **Call order failures:** Use sequences or `.After()` clauses.
+- **Move-only arguments:** Use lambdas for actions.
+- **Excessive call errors:** Check `.Times()` cardinality and action counts.
+
+---
+
+This FAQ equips new and intermediate GoogleTest users with clear guidance to understand common scenarios, avoid pitfalls, and leverage GoogleMock effectively.
+
+---
+
+# Related Topics
+
+- [Writing Your First Test](../getting-started/first-use/writing-first-test.md)
+- [Mocking Dependencies](../guides/getting_started_core_workflows/mocking_dependencies.md)
+- [Test Discovery & Execution](../api-reference/gtest-core-api/test-discovery-execution.md)
+- [Matchers Reference](../api-reference/gmock-mocking-api/matchers-library.md)
+- [Actions and Side Effects](../api-reference/gmock-mocking-api/mock-actions.md)
+- [Nice, Naggy, and Strict Mocks](../api-reference/gmock-mocking-api/nice-strict-mocks.md)
