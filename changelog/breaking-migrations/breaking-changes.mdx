@@ -1,204 +1,282 @@
 ---
 title: "Breaking Changes"
-description: "Details major breaking changes introduced in recent versions, including API removals, behavioral shifts, and supported platform adjustments. Users receive clear information about the impact on existing tests and dependencies."
+description: "A clear list of backward-incompatible changes with practical examples, directly addressing upgrade pain points for users and offering guidance for resolving common issues."
 ---
 
 # Breaking Changes
 
-This documentation page provides detailed information on the major breaking changes introduced in recent GoogleTest and GoogleMock versions. It highlights API removals, behavioral shifts, and adjustments in supported platforms that affect existing tests and dependencies. Users will gain clear guidance on the impact of these changes and how to adapt their test infrastructure accordingly.
+This page provides a clear, practical list of backward-incompatible changes in GoogleTest and GoogleMock. Designed to directly assist users upgrading between versions, it highlights common upgrade pain points and offers concrete examples and actionable guidance to resolve typical issues arising from breaking changes.
 
 ---
 
-## Understanding Breaking Changes
+## Overview
 
-Breaking changes refer to modifications in the framework that are not backward compatible. These changes may cause previously working tests to fail or require updates in mock definitions, expectations, or test setups. This page focuses on those critical changes so that developers can anticipate, identify, and update their tests proactively.
+When upgrading GoogleTest, you may encounter changes that break compatibility with your existing tests or mock classes. This document outlines those breaking changes explicitly, focusing on **what behavior or usage has changed from a user's perspective**, along with how to adapt your code.
 
+Our goal is to save you debugging time and provide clear migration instructions by demonstrating the impact of each breaking change and typical resolutions.
 
-## Major API Removals and Behavioral Adjustments
+---
 
-### Mocking Interface Updates
-GoogleMock’s API for defining mocks and setting expectations has been refined, which may require changes:
+## 1. Test and Test Suite Naming Restrictions
 
-- **MOCK_METHOD Syntax Standardization:** The modern `MOCK_METHOD` macro is now the primary mechanism for defining mock methods. Legacy macros such as `MOCK_METHODn` and related variants have been deprecated. Users must update mock class definitions to use the unified `MOCK_METHOD` syntax, supporting qualifiers such as `(const, override)` and call type specifications like `(Calltype(STDMETHODCALLTYPE))` where required.
+Due to internal implementation constraints involving generated class names, test suite and test names must **avoid underscores (`_`)** in specific ways.
 
-- **Strictness Modifiers Clarification:** The default strictness for mocks remains as "naggy" (warnings on uninteresting calls), but a future default shift to "nice" mocks is planned. Users should explicitly specify `NiceMock` or `StrictMock` wrappers to control uninteresting call behaviors and avoid unexpected warnings or failures.
+- Test suite and test names **cannot start or end with an underscore**.
+- Names **cannot contain consecutive underscores (`__`)**.
+- Avoid underscores anywhere in the name to prevent ambiguous class names.
 
-- **Expectation Ordering and Cardinalities:** Expectation matching order continues to be reverse chronological, meaning the latest matching expectation takes precedence. Usage of `.RetiresOnSaturation()` is recommended when expectations should no longer be active after being saturated to avoid upper-bound violation failures.
+### What happens if you violate this?
+Your tests might compile and run initially but lead to subtle failures or compiler errors in future versions or different compilers.
 
-### Default Actions and ON_CALL Behavior
+### Example and Recommendation
+```cpp
+// Problematic:
+TEST(Time_Flies, Like_An_Arrow) {
+  ...
+}
 
-- The behavior of default actions specified via `ON_CALL` remains consistent; however, a reminder that uninteresting calls without expectations generate warnings unless suppressed by using `NiceMock`.
+// This generates class name: Time_Flies_Like_An_Arrow_Test, which conflicts
+// with
+TEST(Time, Flies_Like_An_Arrow) {
+  ...
+}
 
-- `ON_CALL` requires exactly one `WillByDefault` clause. Users attempting to chain `.With()` multiple times or missing `WillByDefault` will see errors.
+// Recommended:
+TEST(TimeFlies, LikeAnArrow) {
+  ...
+}
+```
 
-### Support for Move-Only Types
+For a detailed explanation, see the [FAQ: Why should test suite names and test names not contain underscore?](../docs/faq.md#why-should-test-suite-names-and-test-names-not-contain-underscore)
 
-- Improved support for mocking methods which accept or return move-only types (like `std::unique_ptr`), allowing clean and idiomatic `MOCK_METHOD` declarations.
+---
 
-- Legacy workarounds that redirected move-only arguments to pointer-based mock methods should be phased out in favor of the direct approach.
+## 2. Default Constructor Requirements for Test Fixtures
 
-### Mock Verification and Lifetime
+GoogleTest requires that your test fixture classes have accessible **default constructors**.
 
-- Automatic verification on mock destruction remains in place, but users can force verification explicitly with `Mock::VerifyAndClearExpectations(&mock_object)`, especially useful when mock lifetime may not be deterministic.
+- If you declare any non-default constructors, you must explicitly declare a default constructor for the fixture.
+- This is mandatory even if your default constructor is empty.
 
-- Calling verification functions disables further expectation settings on that mock to avoid undefined behavior.
+### Common Error
+```plaintext
+no matching function for call to `FooTest::FooTest()`
+```
 
-### Obsolete or Removed APIs
+### Resolution
+Add an explicit default constructor:
+```cpp
+class FooTest : public ::testing::Test {
+ public:
+  FooTest() = default;  // Explicit default constructor
+  FooTest(int x);       // Example non-default constructor
+};
+```
 
-- Old `MOCK_METHODn` macros (
-`MOCK_METHOD0`, `MOCK_CONST_METHOD1`, etc.) and similar older mock APIs are phased out.
+For more info, see [FAQ: I have a fixture class `FooTest`, but `TEST_F(FooTest, Bar)` gives me error "no matching function for call to FooTest::FooTest()". Why?](../docs/faq.md#i-have-a-fixture-class-foo-test-but-test_ffoo-test-bar-gives-me-error-no-matching-function-for-call-to-foo-test-foo-test)
 
-- Renamed or reorganized classes in internal mock handling or expectation APIs must be checked and updated if directly referenced.
+---
 
+## 3. Assertion Macros Restrictions in Constructors and Destructors
 
-## Impact on Existing Tests and Dependencies
+GoogleTest restriction: **Fatal assertions such as `ASSERT_*` and `FAIL()` cannot be used inside constructors or destructors of test fixtures**.
 
-- Tests relying on deprecated mocking macros or unspecified default mock behaviors may fail, triggering warnings or errors at runtime.
+### Why?
+This is due to C++ language rules and the way GoogleTest handles assertions without exceptions.
 
-- Changing expectations order, cardinalities, or strictness modifiers can alter which expectations match calls, possibly producing unexpected failures or false positives.
+Attempting to use them will cause compiler errors or undefined behavior.
 
-- Mock destructors must be virtual for `NiceMock` and `StrictMock` to work correctly; non-virtual destructors can cause silent verification omissions and test inconsistencies.
+### Recommended Practice
+Put initialization logic that can fail into `SetUp()` and cleanup logic requiring assertions into `TearDown()` instead.
 
-- Overloaded mock methods require explicit disambiguation using `Const()` or specifying parameter matchers to avoid ambiguity or compiler errors.
+### Example
+```cpp
+class MyTest : public ::testing::Test {
+ protected:
+  MyTest() {
+    // WRONG! Do NOT use ASSERT_* here
+  }
+  void SetUp() override {
+    ASSERT_TRUE(Initialize());  // Correct
+  }
+};
+```
 
+More details in [FAQ: My compiler complains "void value not ignored as it ought to be." What does this mean?](../docs/faq.md#my-compiler-complains-void-value-not-ignored-as-it-ought-to-be)
 
-## Migration Strategies and Best Practices
+---
 
-### Migrating to the New Mocking Macros
+## 4. Changes to Mock Method Declaration and Use
 
-1. Replace all legacy mock macros (`MOCK_METHODn`, `MOCK_CONST_METHODn`) with the modern `MOCK_METHOD` macro.
+### 4.1 Transition to New `MOCK_METHOD` Macro
 
-2. Use the fourth parameter of `MOCK_METHOD` to specify qualifiers such as `const`, `override`, or `Calltype` as needed.
+Older macro families `MOCK_METHODn` and `MOCK_CONST_METHODn` are deprecated. You **must use** the new unified `MOCK_METHOD` macro in all new and updated code:
 
-3. Ensure `MOCK_METHOD` declarations are in the `public:` section of mock classes to allow proper mocking access.
+```cpp
+// Old style (deprecated):
+MOCK_METHOD1(Foo, bool(int));
+MOCK_CONST_METHOD1(Bar, int(double));
 
+// New style (recommended):
+MOCK_METHOD(bool, Foo, (int), (override));
+MOCK_METHOD(int, Bar, (double), (const, override));
+```
 
-### Managing Uninteresting Calls
+- This change provides better support for qualifiers, ref-qualifiers, and noexcept.
+- See the [Mocking Reference](../docs/reference/mocking.md#MOCK_METHOD) for detailed syntax.
 
-- Wrap mocks with `NiceMock` if you want to suppress warnings on uninteresting calls.
+### 4.2 Qualifications Must Match Exactly
 
-- Use a catch-all expectation (`EXPECT_CALL(mock, Method(_)).Times(AnyNumber())`) to explicitly allow calls to specific mocks.
+`MOCK_METHOD` now requires that qualifiers (e.g. `const`, `override`, `noexcept`) match the overridden method’s qualifiers exactly.
 
+Failing to specify the right qualifiers will cause compilation errors.
 
-### Controlling Expectation Lifetimes
+```cpp
+// If base class method is const
+virtual int GetValue() const;
 
-- Use `.RetiresOnSaturation()` on expectations that should be deactivated after fulfilling the call count limit.
+// Mock method MUST include (const):
+MOCK_METHOD(int, GetValue, (), (const, override));
+```
 
-- Specify call order using sequences (`Sequence`) or `.After()` clauses for partial ordering.
+### 4.3 Handling Commas in Types
 
+Unparenthesized commas in return or parameter types will cause macro parsing errors.
 
-### Delegating Calls
+Wrap such types in parentheses or use typedefs/using aliases.
 
-Use delegation to fakes or real objects where appropriate via `ON_CALL` with lambdas.
+Example:
+```cpp
+MOCK_METHOD((std::pair<int, int>), GetPair, ());
+// Or with alias
+using IntPair = std::pair<int, int>;
+MOCK_METHOD(IntPair, GetPair, ());
+```
 
+### 4.4 Move-Only Types Supported
 
-### Verifying Mocks Early
+Methods accepting or returning move-only types like `std::unique_ptr` are now fully supported with `MOCK_METHOD`.
 
-Call `Mock::VerifyAndClearExpectations` to enforce verification before test teardown when mock deletion timing is uncertain.
+Example:
+```cpp
+MOCK_METHOD(std::unique_ptr<Buzz>, MakeBuzz, (std::string text), (override));
+```
 
+- When returning move-only types repeatedly, prefer using lambdas instead of `Return()`.
 
-## Troubleshooting Common Issues
+More info in the [Mocking Cookbook](../docs/gmock_cook_book.md#mocking-methods-that-use-move-only-types).
 
-### Unexpected or Uninteresting Calls
+---
 
-- Unexpected calls occur when no matching expectation exists for the mock method with the given arguments. These cause test failures.
+## 5. `EXPECT_CALL` Must Precede Mock Method Calls
 
-- Uninteresting calls occur when a mock method with no explicit expectations is called. These generate warnings by default but can be suppressed via `NiceMock`.
+Setting expectations **after** a mock method has been called leads to **undefined behavior**.
 
+Always write `EXPECT_CALL()` before the code under test calls the mock methods.
 
-### Compiler Errors on Mock Method Definitions
+Additionally, when multiple `EXPECT_CALL`s target the same method, the last matching expectation overrides earlier ones.
 
-- Check for commas in argument types; wrap return/argument types with parentheses or use type aliases to avoid parsing errors.
+Arrange expectations carefully, from generic to specific, so that unintended shadowing does not occur.
 
-- Ensure virtual destructors exist on classes you mock.
+See [FAQ: My GoogleMock expectations are not working as expected. What should I do?](../faq/troubleshooting/mocking-problems.md) for troubleshooting.
 
-### Ambiguous Overloaded Methods
+---
 
-- Disambiguate using `Const()` or explicit matchers in `EXPECT_CALL` and `ON_CALL`.
+## 6. Mock Objects Verification Behavior
 
+Mock objects automatically verify expectations when destructed. However, if your mock object is heap-allocated and ownership is transferred, the destructor may be delayed or never called—leading to missed verification.
 
-## Reference and Resources
+### Action:
+- Use `Mock::VerifyAndClearExpectations(&mock_object)` to force verification explicitly.
+- Do not set expectations after calling `VerifyAndClearExpectations`.
 
-- [gMock Cheat Sheet](https://github.com/google/googletest/blob/main/docs/gmock_cheat_sheet.md): Quick overview of mocking macros and concepts.
+Example:
+```cpp
+MockFoo* foo = new MockFoo;
+EXPECT_CALL(*foo, Bar());
+foo->DoWork();
+EXPECT_TRUE(Mock::VerifyAndClearExpectations(foo));
+```
 
-- [gMock for Dummies](https://github.com/google/googletest/blob/main/docs/gmock_for_dummies.md): Beginner-friendly guide to mocking.
+More details in the [Mocking Cookbook](../docs/gmock_cook_book.md#forcing-a-verification).
 
-- [gMock Cookbook](https://github.com/google/googletest/blob/main/docs/gmock_cook_book.md): Recipes for mocking techniques.
+---
 
-- [Mocking Reference](https://github.com/google/googletest/blob/main/docs/reference/mocking.md): Detailed reference for mocking APIs.
+## 7. Death Test Naming and Thread Safety
 
-- [Legacy gMock FAQ](https://github.com/google/googletest/blob/main/docs/gmock_faq.md): Historical questions and migration insights.
+To avoid unexpected test ordering and threading issues, test suites containing death tests should be named ending with `DeathTest`.
 
-- [GoogleTest Assertions Reference](https://github.com/google/googletest/blob/main/docs/reference/assertions.md): For understanding assertion macros.
+If a test fixture class is used for both death and non-death tests, use `using` or `typedef` aliases to separate the suites while sharing code.
 
+Example:
+```cpp
+class FooTest : public ::testing::Test {};
+using FooDeathTest = FooTest;
+TEST_F(FooTest, NormalTest) { ... }
+TEST_F(FooDeathTest, DeathTest) { EXPECT_DEATH(...); }
+```
+
+Ensure your program is safe to run multiple instances side-by-side due to the death test implementation style.
+
+See [Guide on Death Tests](../guides/advanced-and-best-practices/death-tests.md) and [FAQ Section](../docs/faq.md#my-death-test-hangs-or-seg-faults-how-do-i-fix-it) for details.
+
+---
+
+## 8. Removal of Deprecated Macros and Features
+
+Some old macros and patterns have been deprecated and removed:
+
+- `MOCK_METHODn` family replaced by unified `MOCK_METHOD`
+- Legacy death test styles deprecated; configure `--gtest_death_test_style` to use modern modes.
+- Deprecated GoogleMock action macros superseded by lambda or functor actions.
+
+Please update your code accordingly to avoid compilation errors.
+
+---
+
+## Troubleshooting Common Issues Post-Upgrade
+
+### Failure: No default constructor on test fixture
+**Cause:** Your fixture defines a non-default constructor and lacks an explicit default one.
+**Fix:** Add a default constructor as shown in section 2.
+
+### Compilation error: MOCK_METHOD macro parsing fails
+**Cause:** Unparenthesized commas in argument or return types.
+**Fix:** Wrap complex types in parentheses or use `using` aliases as in section 4.3.
+
+### Unexpected behavior: Mock methods invoked without matching EXPECT_CALL
+**Cause:** `EXPECT_CALL` not defined before mock method invocation.
+**Fix:** Move `EXPECT_CALL` calls before exercising mocks.
+
+### Death tests hanging or crashing
+**Cause:** Multiple threads running when death test starts.
+**Fix:** Follow the death test naming and style guidance, avoid threads outside death tests.
+
+---
 
 ## Summary
+This document empowers you to identify and resolve backward-incompatible changes impacting GoogleTest and GoogleMock usage. By adhering to the naming conventions, updating mock declarations, and respecting lifecycle rules, you can smoothly transition to newer GoogleTest versions without disruption.
 
-This page is an essential resource outlining breaking changes that influence how users define and interact with mocks in GoogleTest and GoogleMock. By addressing major API transitions, clarifying expected behaviors, and providing migration advice, it empowers users to maintain reliable, up-to-date test suites.
+Always consult the relevant sections of the [GoogleTest FAQ](../docs/faq.md) and [Mocking Reference](../docs/reference/mocking.md) for further details.
 
-
----
-
-<Check>
-Ensure your mock classes use modern `MOCK_METHOD` syntax for future compatibility.
-Use `NiceMock` and `StrictMock` consciously to manage uninteresting call behavior.
-Explicitly disambiguate overloaded methods in expectations.
-Utilize `.RetiresOnSaturation()` for managing expectation lifetimes.
-Verify mocks explicitly if their lifetimes are uncertain.
-</Check>
-
+If you encounter complex migration scenarios, please reach out on the GoogleTest community forums or check existing migration guides linked below.
 
 ---
 
-## Example: Migrating a Mock Class from Legacy to Modern Syntax
-
-```cpp
-// Legacy style
-class MockFoo : public Foo {
- public:
-  MOCK_CONST_METHOD1(FooMethod, int(int));
-  MOCK_METHOD2(BarMethod, void(int, const std::string&));
-};
-
-// Modern replacement
-class MockFoo : public Foo {
- public:
-  MOCK_METHOD(int, FooMethod, (int), (const, override));
-  MOCK_METHOD(void, BarMethod, (int, const std::string&), (override));
-};
-```
-
-
-## Example: Controlling Mock Strictness
-
-```cpp
-using ::testing::NiceMock;
-using ::testing::StrictMock;
-
-// A nice mock suppresses warnings on uninteresting calls
-NiceMock<MockFoo> nice_mock;
-
-// A strict mock treats uninteresting calls as errors
-StrictMock<MockFoo> strict_mock;
-```
+## Additional Resources
+- [FAQ: Naming Rules and Test Discovery](../docs/faq.md#why-should-test-suite-names-and-test-names-not-contain-underscore)
+- [Mocking Reference](../docs/reference/mocking.md#MOCK_METHOD)
+- [Mocking Cookbook](../docs/gmock_cook_book.md#mocking-methods-that-use-move-only-types)
+- [Death Tests Guide](../guides/advanced-and-best-practices/death-tests.md)
+- [FAQ: Mock Expectations Not Working](../faq/troubleshooting/mocking-problems.md)
+- [Migration Guides](../changelog/breaking-migrations/migration-guides.md)
 
 ---
 
-## Frequently Asked Questions
+<Tip>
+Always back up your tests before upgrading. Run incremental tests to isolate breakages and refer to this page for actionable guidance.
+</Tip>
 
-### Q: What happens if I set expectations after a mock is verified and cleared?
-A: Setting new expectations after calling `VerifyAndClearExpectations` leads to undefined behavior. Always set expectations before exercising the mock.
-
-### Q: Are uninteresting calls always warnings?
-A: By default, yes. You can suppress warnings with `NiceMock` or treat uninteresting calls as errors with `StrictMock`.
-
-### Q: Why do I get ambiguous mock method errors with overloaded methods?
-A: Overloaded methods must be disambiguated using `Const()` or explicit matcher types in your expectations.
-
----
-
-For further assistance or to report issues, visit the [GoogleTest GitHub repository](https://github.com/google/googletest).
-
----
-
-[Back to Changelog Overview](../release-history/version-overview)
+<Warning>
+Breaking changes can disrupt test suites. Follow the guidance carefully and consult community channels if migration issues persist.
+</Warning>
