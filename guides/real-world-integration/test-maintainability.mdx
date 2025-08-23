@@ -1,0 +1,367 @@
+---
+title: "Patterns for Maintainable and Reliable Tests"
+description: "Presents advanced patterns for organizing tests, sharing fixtures, minimizing duplication, and ensuring reliability over time. Includes recommendations for cross-team consistency and review."
+---
+
+# Patterns for Maintainable and Reliable Tests
+
+## Overview
+
+This page presents advanced patterns to help you organize your GoogleTest test code for maintainability, reduce duplication, share resources effectively, and ensure long-term reliability. It includes recommendations to standardize test practices across teams and provides strategies that support scaling test suites efficiently.
+
+---
+
+## Intent and Value
+
+Well-organized test patterns not only make your tests easier to maintain and understand but also improve execution speed and reliability over time. By applying these patterns, teams achieve consistency, reduce technical debt in tests, and enable smoother collaboration, especially in large projects.
+
+---
+
+## Key Patterns and Their Application
+
+### 1. Sharing Fixtures Across Tests
+
+#### What it Achieves
+Reuses expensive setup and teardown work across multiple tests within a test suite, reducing overall test runtime and simplifying resource management.
+
+#### How to Apply
+
+1. Define static members in your test fixture to hold shared resources.
+2. Implement `static void SetUpTestSuite()` to initialize shared resources before any tests run.
+3. Implement `static void TearDownTestSuite()` to release shared resources after all tests complete.
+4. Ensure individual tests do not modify shared resources permanently, or reset shared state appropriately.
+
+#### Example
+```cpp
+class FooTest : public testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    shared_resource_ = new ResourceExpensiveToCreate();
+  }
+
+  static void TearDownTestSuite() {
+    delete shared_resource_;
+    shared_resource_ = nullptr;
+  }
+
+  void SetUp() override { /* per-test setup if needed */ }
+  void TearDown() override { /* per-test cleanup */ }
+
+  static ResourceExpensiveToCreate* shared_resource_;
+};
+
+ResourceExpensiveToCreate* FooTest::shared_resource_ = nullptr;
+
+TEST_F(FooTest, UsesSharedResource) {
+  ASSERT_NE(shared_resource_, nullptr);
+  // perform test using shared_resource_
+}
+```
+
+#### Best Practices
+- Make `SetUpTestSuite()` and `TearDownTestSuite()` **public** if you use `TEST_P` or parameterized test fixtures.
+- Avoid modifying shared resources permanently in any test.
+- Carefully manage shared state to prevent leaks or cross-test interference.
+
+---
+
+### 2. Skipping Tests Dynamically
+
+#### What it Achieves
+Allows tests or test suites to skip execution during runtime when preconditions are not met (e.g., required resources missing, environment not ready).
+
+#### How to Apply
+
+- Use the `GTEST_SKIP()` macro to skip execution within individual tests or `SetUp()` methods.
+- Stream a custom message for clarity.
+
+#### Example
+```cpp
+TEST(MyFeatureTest, SkipIfNoNetwork) {
+  if (!NetworkIsAvailable()) {
+    GTEST_SKIP() << "Skipping due to lack of network.";
+  }
+  // Test code assuming network connectivity
+}
+
+class DatabaseTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    if (!DatabaseIsReady()) {
+      GTEST_SKIP() << "Skipping all tests: database not ready.";
+    }
+  }
+};
+
+TEST_F(DatabaseTest, TestQuery) {
+  // Test code assuming database is ready
+}
+```
+
+#### Notes
+- Skipped tests are reported explicitly and are neither successes nor failures.
+
+---
+
+### 3. Enhancing Assertion Messages with Predicate Assertions
+
+#### What it Achieves
+Improves clarity of failure messages for complex Boolean conditions, especially when default assertions do not provide enough context.
+
+#### How to Apply
+
+- Write custom predicate functions returning `testing::AssertionResult` that generate informative success/failure messages.
+- Use predicate assertion macros like `EXPECT_PRED_FORMAT1`.
+
+#### Example
+```cpp
+// Predicate function returning detailed failure message.
+testing::AssertionResult IsEven(int n) {
+  if ((n % 2) == 0) {
+    return testing::AssertionSuccess() << n << " is even";
+  } else {
+    return testing::AssertionFailure() << n << " is odd";
+  }
+}
+
+TEST(NumberTest, IsEvenCheck) {
+  int val = GetValueUnderTest();
+  EXPECT_PRED_FORMAT1(IsEven, val);
+}
+```
+
+This produces detailed error messages showing values involved.
+
+#### Tips
+- Avoid constructing predicates with side effects or expensive operations inside assertions.
+- Use predicate-formatters when you need to customize the message format extensively.
+
+---
+
+### 4. Using `SCOPED_TRACE` for Contextual Failure Tracing
+
+#### What it Achieves
+Provides contextual information in test failure messages indicating where a failure occurred in nested or common subroutines, making debugging easier.
+
+#### How to Apply
+
+- Insert `SCOPED_TRACE("message")` in function scopes where you want trace context attached to failures.
+
+#### Example
+```cpp
+void Helper(int val) {
+  SCOPED_TRACE(testing::Message() << "val=" << val);
+  EXPECT_EQ(FunctionUnderTest(val), expected_value);
+}
+
+TEST(ComplexTest, MultipleCases) {
+  Helper(1);  // Traces help identify failing invocation
+  Helper(2);
+}
+```
+
+---
+
+### 5. Propagating Fatal Failures from Helper Functions
+
+#### Common Pitfall
+`ASSERT_*` failures in helper functions abort the helper, not the whole test, potentially leading to continued execution and crashes.
+
+#### Solutions
+- Use exceptions with a custom listener to throw upon fatal failure.
+- Use `ASSERT_NO_FATAL_FAILURE(helper());` to ensure the helper did not fail fatally.
+- Check `HasFatalFailure()` after calling helper functions and return early if true.
+
+#### Example
+```cpp
+void HelperFunction() {
+  ASSERT_EQ(1, 2);  // Will abort only HelperFunction
+}
+
+TEST(PropagateTest, Example) {
+  HelperFunction();
+  if (testing::Test::HasFatalFailure()) return;
+  // Safe to continue
+}
+```
+
+---
+
+### 6. Logging Additional Test Information
+
+#### What it Achieves
+Allows you to add custom key-value properties to tests that are recorded in XML or JSON output.
+
+#### How to Apply
+
+- During test execution, call `::testing::Test::RecordProperty("key", value)`.
+- Can be called inside tests, fixtures, or environments.
+
+#### Example
+```cpp
+TEST(MyTestSuite, PropertyLogging) {
+  ::testing::Test::RecordProperty("MaxMemoryUsedMB", 512);
+  // Test assertions
+}
+```
+
+#### Notes
+- Keys must not conflict with reserved attribute names such as `name`, `status`, `time`, etc.
+- Only the last recorded value for a given key is kept in output.
+
+---
+
+### 7. Managing Global and Test Suite Setup and Teardown
+
+#### Global Setup/Teardown
+- Subclass `::testing::Environment` and override `SetUp()` and `TearDown()`.
+- Register environment with `AddGlobalTestEnvironment()` before tests run.
+
+Example:
+```cpp
+class MyEnv : public ::testing::Environment {
+ public:
+  void SetUp() override { /* global setup code */ }
+  void TearDown() override { /* global teardown code */ }
+};
+
+int main(int argc, char** argv) {
+  ::testing::AddGlobalTestEnvironment(new MyEnv);
+  ::testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
+}
+```
+
+#### Test Suite Setup/Teardown
+- Use `static void SetUpTestSuite()` and `static void TearDownTestSuite()` in test fixtures to manage shared resources for the test suite.
+
+---
+
+### 8. Parameterized Testing Patterns
+
+Prepare flexible tests by parameterizing input values or types (covered in detail in [Parameterized and Typed Tests](../advanced.md#value-parameterized-tests)).
+
+Key macros:
+- `TEST_P` — define parameterized test.
+- `INSTANTIATE_TEST_SUITE_P` — instantiate tests with parameter sets.
+- `TYPED_TEST` and `INSTANTIATE_TYPED_TEST_SUITE_P` — for typed tests.
+
+---
+
+### Troubleshooting Common Issues
+
+- **Shared resources leaking or corrupted:** Ensure proper cleanup in `TearDownTestSuite()`.
+- **Fatal failures not stopping tests:** Remember that `ASSERT_*` aborts current function only. Use `HasFatalFailure()` to catch.
+- **Tests not recognized or instantiated:** Use `GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST` to suppress instantiation warnings when appropriate.
+- **Skipping tests unexpectedly:** Confirm environment preconditions or `GTEST_SKIP()` calls.
+
+---
+
+## Patterns Summary
+
+| Pattern                         | Purpose                                         | Key Points                                         |
+|--------------------------------|-------------------------------------------------|---------------------------------------------------|
+| Sharing Fixtures               | Reuse resources per test suite                   | Static members; public `SetUpTestSuite()`          |
+| Dynamic Skipping              | Skip tests when conditions unmet                  | Use `GTEST_SKIP()`; inside test or `SetUp()`       |
+| Predicate Assertions           | Detailed failure messages for complex predicates | Return `AssertionResult` with informative message  |
+| SCOPED_TRACE                   | Add context to nested test failures               | Lexical scoped; attach message to failures         |
+| Fatal Failure Propagation      | Ensure helper failures abort whole test           | Use exceptions, `ASSERT_NO_FATAL_FAILURE()`, `HasFatalFailure()` |
+| Logging Additional Info       | Add custom key-value data to test reports          | Use `RecordProperty` with valid XML keys           |
+| Global & Suite Setup/TearDown | Manage setup outside indiv tests                    | Use global Environment or `SetUpTestSuite`          |
+| Parameterized Tests            | Test same logic with multiple data sets/types      | Use `TEST_P`, `INSTANTIATE_TEST_SUITE_P`, `TYPED_TEST` |
+
+---
+
+## Related Topics
+
+- [Value-Parameterized Tests](../advanced.md#value-parameterized-tests)
+- [Typed Tests](../advanced.md#typed-tests)
+- [Assertion Macros and Predicate Assertions](reference/assertions.md#predicates)
+- [Writing and Running Your First Test](guides/gtest-core-workflows/writing-and-running-tests)
+- [Death Tests](guides/gtest-core-workflows/death-tests)
+
+---
+
+## Practical Tips
+
+- Make sure your shared resources are safely initialized and cleaned to avoid flaky tests.
+- Use `SCOPED_TRACE` liberally in helper functions called from many places.
+- Prefer meaningful predicate assertions over generic `EXPECT_TRUE`.
+- Use `GTEST_SKIP()` to avoid false failures when preconditions are not met.
+- Use `RecordProperty()` to record dynamic metadata useful for test reporting and diagnostics.
+
+---
+
+## Summary
+
+Master these patterns to keep your test suite maintainable and reliable, enabling smooth evolution, fast execution, and clear debugging insights.
+
+---
+
+<Accordion title="Additional Examples">
+
+### Example: Sharing Test Fixture Resource Across Multiple Tests
+
+```cpp
+class DatabaseTest : public ::testing::Test {
+ protected:
+  static DatabaseConnection* db_;
+
+  static void SetUpTestSuite() {
+    db_ = new DatabaseConnection("test.db");
+    db_->Connect();
+  }
+
+  static void TearDownTestSuite() {
+    db_->Disconnect();
+    delete db_;
+    db_ = nullptr;
+  }
+
+  void SetUp() override {
+    // Reset db state before each test if necessary
+    db_->Clear();
+  }
+};
+
+DatabaseConnection* DatabaseTest::db_ = nullptr;
+
+TEST_F(DatabaseTest, InsertRecords) {
+  EXPECT_TRUE(db_->InsertRecord(...));
+}
+
+TEST_F(DatabaseTest, QueryRecords) {
+  EXPECT_EQ(0, db_->RecordCount());
+}
+```
+
+### Example: Using `SCOPED_TRACE` to Provide Invocation Context
+
+```cpp
+void VerifyValue(int val) {
+  SCOPED_TRACE(testing::Message() << "Checking val = " << val);
+  EXPECT_GT(val, 0);
+}
+
+TEST(ValueCheckTest, MultipleChecks) {
+  for (int i = -1; i <= 1; ++i) {
+    VerifyValue(i);
+  }
+}
+```
+
+This will include which `val` caused the failure in the output.
+
+</Accordion>
+
+<Accordion title="Common Pitfalls and How to Avoid Them">
+
+- **Testing internal details instead of public interfaces:** Try refactoring into implementation classes and test those directly. Use `FRIEND_TEST` judiciously if needed.
+- **Forgot to instantiate parameterized tests:** Always follow `TEST_P` with `INSTANTIATE_TEST_SUITE_P` unless intentionally suppressed.
+- **Assuming `ASSERT_*` aborts the entire test:** It aborts only current function; propagate fatal failure detection explicitly.
+- **Modifying shared fixtures state:** Protect or reset mutable state to prevent cross-test interference.
+- **Ignoring skipped tests:** Monitor test reports for any skipped tests as they may indicate problems.
+
+</Accordion>
+
+---
