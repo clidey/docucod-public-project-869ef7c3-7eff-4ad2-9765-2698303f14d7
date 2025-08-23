@@ -1,0 +1,210 @@
+---
+title: "Compilation & Runtime Errors"
+description: "Guidance for interpreting, diagnosing, and fixing typical build and runtime errors occurring during integration or execution of tests. Includes tips on compiler flags, resolving version mismatches, and dealing with C++ standard issues."
+---
+
+# Compilation & Runtime Errors FAQ
+
+This FAQ provides practical guidance on understanding, diagnosing, and resolving common compilation and runtime errors encountered when integrating or executing tests with GoogleTest and GoogleMock. It emphasizes actionable solutions from the user's perspective—focusing on what you need to do to get your tests building and running correctly.
+
+---
+
+## 1. Common Build and Compilation Issues
+
+### Why am I seeing errors related to `MOCK_METHOD` or `EXPECT_CALL` macros?
+- **Problem:** Improper syntax around `MOCK_METHOD` or missing parentheses around types containing commas.
+- **Explanation:** `MOCK_METHOD` macro requires careful use of parentheses if your return type or argument types include commas (e.g., templated types like `std::pair<bool, int>`).
+- **Solution:** Wrap types containing commas with extra parentheses or use type aliases.
+
+```cpp
+// Incorrect
+MOCK_METHOD(std::pair<bool, int>, GetPair, ());  // Fails due to unprotected comma
+
+// Correct
+MOCK_METHOD((std::pair<bool, int>), GetPair, ());
+
+// Or use alias
+using BoolInt = std::pair<bool, int>;
+MOCK_METHOD(BoolInt, GetPair, ());
+```
+
+### Why do I get errors about overriding methods without the correct qualifiers?
+- **Problem:** Your `MOCK_METHOD` declarations are missing qualifiers such as `(const)`, `(override)`, or `(noexcept)` necessary to match the base class methods.
+- **Solution:** Verify the base class method signature and ensure the same qualifiers are used in `MOCK_METHOD`. For example:
+
+```cpp
+MOCK_METHOD(int, GetSize, (), (const, override));
+```
+
+### Errors about overloaded mock methods or ambiguous calls?
+- **Problem:** Mocked overloaded methods without disambiguation cause compiler errors or warnings about hidden functions.
+- **Solution:** Use `using BaseClass::Method;` in your mock class to bring unmocked overloads into scope.
+
+```cpp
+class MockFoo : public Foo {
+  using Foo::Add;  // Bring base overloads into scope
+  MOCK_METHOD(int, Add, (Element x), (override));
+};
+```
+
+### Compilation fails with move-only types used as mock method parameters or return types?
+- **Explanation:** GoogleMock supports move-only types (like `std::unique_ptr`) directly since 2017.
+- **Tip:** Use lambdas with `WillOnce` or `WillRepeatedly` to return new move-only objects on each call instead of `Return` on a moved instance.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, MakeBuzz(_))
+  .WillRepeatedly([](StringPiece) {
+    return std::make_unique<Buzz>(AccessLevel::kInternal);
+  });
+```
+
+### My test does not compile and gives errors related to mock strictness wrappers like `NiceMock`, `StrictMock`?
+- **Cause:** Applying these wrappers to a mock class that already has such a wrapper or to mocks with base classes can cause static assertions.
+- **Advice:** Apply only one strictness wrapper per mock. Also, verify that the mocked methods are defined directly in the mock class, not only inherited.
+
+---
+
+## 2. Runtime and Linker Errors
+
+### Errors related to missing definitions of mock constructors or destructors?
+- **Cause:** Mock classes implicitly generate constructors and destructors that can be expensive and cause long compile/link times.
+- **Best Practice:** Define mock constructors and destructors in source files (*.cc) rather than header-only.
+
+```cpp
+// In mock_foo.h
+class MockFoo : public Foo {
+ public:
+  MockFoo();
+  ~MockFoo();
+  MOCK_METHOD(...);
+};
+
+// In mock_foo.cc
+MockFoo::MockFoo() {}
+MockFoo::~MockFoo() {}
+```
+
+### Linking errors complaining of missing symbols from GoogleMock?
+- **Likely cause:** GoogleMock libraries not linked or linked in incorrect order.
+- **Resolution:** Ensure that your build system links with GoogleMock and GoogleTest libraries, in that order, and that include paths point to correct headers.
+
+---
+
+## 3. Handling C++ Standard and Compiler Flag Issues
+
+### Errors mention C++17 features or compiler version mismatches?
+- **Cause:** GoogleTest requires at least C++17 standard.
+- **Solution:** Configure your compiler flags accordingly. For example, with GCC or Clang:
+
+```bash
+-std=c++17
+```
+
+and verify your compiler supports C++17 (e.g., GCC 7+, Clang 5+, MSVC 2017+).
+
+### MSVC errors like "At least Visual C++ 2015 (14.0) is required"?
+- **Solution:** Upgrade your MSVC compiler to 2015 or later.
+
+---
+
+## 4. Diagnosing Runtime Failures and Mock Behavior
+
+### Why do I get "Uninteresting mock function call" warnings?
+- **Explanation:** Your test calls mock methods that have no `EXPECT_CALL` expectations set.
+- **What to do:** If you want to allow these calls silently, wrap your mock with `NiceMock<MockClass>` or add an `EXPECT_CALL(mock, Method(_)).Times(AnyNumber())`.
+
+### Unexpected call failures?
+- Your test sets strict expectations (via `EXPECT_CALL`) but the code under test calls methods or with parameters not matching expectations.
+- Review your expectations to cover all calls or adjust to allow unexpected calls by using `NiceMock` if strictness is not required.
+
+### Calls reported with "called more times than expected"?
+- Most likely you wrote `EXPECT_CALL(mock, Method()).Times(1);` but the code called it more than once.
+- Either relax `Times` or verify code behavior calls the method expected times.
+
+### "Actions ran out in EXPECT_CALL" warnings?
+- You defined a limited number of `.WillOnce()` actions but test calls more times than the actions defined.
+- Solution: add a `.WillRepeatedly()` action to handle extra calls or increase `.WillOnce()` count or adjust expectations.
+
+---
+
+## 5. Working with Mock Strictness Modes
+
+### What are `NiceMock`, `NaggyMock`, and `StrictMock`?
+- `NiceMock`: Suppresses warning on uninteresting calls.
+- `NaggyMock` (default): Warns on uninteresting calls.
+- `StrictMock`: Fails tests on uninteresting calls.
+
+### When to use which strictness mode?
+- Use `NiceMock` to reduce warnings during development or when uninteresting calls are expected and safe.
+- Use `NaggyMock` when you want to be alerted of potential missing expectations.
+- Use `StrictMock` to enforce strict verification, failing on any unplanned call.
+
+<Tip>
+Use strict mocks sparingly as they increase test maintenance effort and brittleness. Prefer nice mocks during test authoring and switch to stricter modes only if needed for robustness.
+</Tip>
+
+---
+
+## 6. Tips for Troubleshooting Compilation and Runtime Errors
+
+- Always check that your `MOCK_METHOD` declarations match the method signature exactly.
+- Add parentheses around template types containing commas in `MOCK_METHOD` to avoid parsing errors.
+- Verify that your compiler supports the required C++ standard (at least C++17).
+- Link GoogleMock and GoogleTest libraries correctly and ensure their versions are compatible.
+- Use `NiceMock` wrappers to reduce noise from warnings on uninteresting calls.
+- For tighter verification, use `StrictMock` but expect to maintain expectations rigorously.
+- Use the `--gmock_verbose` command line flag to increase verbosity and get detailed logs for unexpected or uninteresting calls.
+- Validate your mock setup by writing minimal tests invoking mocked methods and observing expected warnings or errors.
+
+---
+
+## 7. Further Reading and Related Documentation
+
+- [Mocking Reference](../reference/mocking.md): Full API details about mocking macros, classes, and strictness modes.
+- [gMock Cookbook](../gmock_cook_book.md): Practical recipes, examples, and common usage patterns.
+- [Mock Methods & Classes API Reference](../../api-reference/gmock-mocking-framework/mock-methods-and-classes.md)
+- [Expectations, Actions & Sequences](../../api-reference/gmock-mocking-framework/expectations-actions-and-sequences.md)
+- [Strictness Modes & Behaviors](../../api-reference/gmock-mocking-framework/strictness-modes-and-behaviors.md)
+- [Getting Started Guides](../../guides/getting-started/setup-environment.md, ../../guides/getting-started/writing-first-test.md)
+
+---
+
+# Sample Compiler Flag Setup
+
+Example CMake snippet to set C++17 and link properly:
+
+```cmake
+cmake_minimum_required(VERSION 3.10)
+project(MyTests LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+find_package(GTest REQUIRED)
+find_package(GMock REQUIRED)
+
+add_executable(MyTest my_test.cc)
+target_link_libraries(MyTest GTest::gtest GMock::gmock GTest::gtest_main)
+```
+
+---
+
+# Troubleshooting Quick Checklist
+
+- Is your compiler version and settings compatible with GoogleMock's C++17 requirement?
+- Did you wrap types containing commas inside parentheses in `MOCK_METHOD`?
+- Are you linking with the correct GoogleMock libraries?
+- Have you matched method qualifiers exactly in mocks?
+- Are you suppressing uninteresting call warnings with `NiceMock` if desired?
+- Do your `.WillOnce()` and `.WillRepeatedly()` action counts cover all expected calls?
+- Are constructors and destructors of mocks defined outside header files for faster compilation?
+- Use `--gmock_verbose=info` to get detailed diagnostics on mock call matching.
+
+---
+
+# Summary
+This FAQ page is dedicated to helping users uncover and resolve build and runtime errors encountered while setting up and running GoogleTest and GoogleMock. The advice progresses logically from common syntax pitfalls, compiler compatibility, linker setup, runtime unexpected call errors, to best practices with mock strictness modes.
+
+Refer to the linked Mocking Reference and CookBook for deeper guidance on advanced mocking scenarios.
+
+---

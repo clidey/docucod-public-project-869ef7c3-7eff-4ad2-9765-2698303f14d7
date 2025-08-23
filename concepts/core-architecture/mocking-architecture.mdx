@@ -1,193 +1,319 @@
 ---
-title: "Mocking Architecture: GoogleMock Internals"
-description: "Unpack the architecture behind GoogleMock's dynamic mock object generation and call interception. This page outlines the interplay of core headers and macros that make up GoogleMock's ability to simulate interfaces and handle expectations, cardinalities, and actions."
+title: "Mocking Framework Design"
+description: "Dive into the architecture of GoogleMock, including how it enables the creation of mock objects, manages expectations, and integrates with GoogleTest. Explore the flow from specification of mocks to verification and assertion of mock behavior."
 ---
 
-# Mocking Architecture: GoogleMock Internals
+# Mocking Framework Design
 
-GoogleMock (gMock) provides a powerful mechanism for generating mock objects dynamically and intercepting calls at runtime within C++ tests. This document unveils the core architecture behind gMock's ability to simulate interfaces and manage expectations, cardinalities, and actions with precision and flexibility.
+Understanding how GoogleMock (gMock) works under the hood gives users crucial insights into how mock objects, expectations, and assertions are managed to deliver reliable and efficient test validations in C++. This guide dives into the architecture of gMock, illustrating its core components, flow of mock specification, behavior verification, and integration with GoogleTest.
 
-## Overview of GoogleMock's Dynamic Mocking
+---
 
-At its core, GoogleMock transforms abstract or virtual interfaces into mock classes that can verify behavior via *expectations* and *actions*. The fundamental pieces that enable this functionality include:
+## Introduction to GoogleMock's Architecture
 
-- **Mock Class Generation** — Automatically produced mock classes using macros like `MOCK_METHOD` that define mock methods simulating the real interface.
-- **Call Interception** — Mechanisms that capture calls to mock methods and route them through GoogleMock’s expectation and action matching system.
-- **Expectation Matching and Cardinality Control** — Infrastructure to match incoming calls against predefined expectations, track call counts, and enforce constraints.
-- **Action Invocation** — Executing user-specified behaviors or default actions when method calls occur.
-- **Mock Strictness Policies** — Wrappers such as `NiceMock`, `NaggyMock`, and `StrictMock` control how uninteresting calls are handled (ignored, warned, or treated as failures).
+At its core, GoogleMock is designed to help developers create mock objects effortlessly, specify expected behaviors, and verify these expectations automatically during test execution. It seamlessly integrates with the GoogleTest framework to provide a unified experience.
 
-Each of these components collaborates seamlessly to offer a rich DSL for mocking while ensuring tests remain readable, maintainable, and precise.
+The key architectural goals of gMock are:
+
+- Allow mocking of arbitrary C++ functions, including overloaded and templated methods.
+- Support flexible specification of default actions (`ON_CALL`) and explicit expectations (`EXPECT_CALL`).
+- Handle ordering constraints using sequences and prerequisites.
+- Manage strictness levels of mocks (NiceMock, NaggyMock, StrictMock).
+- Ensure thread-safe interaction and atomic execution of mock functions.
+- Deliver detailed failure diagnostics with rich context.
 
 ---
 
 ## Core Components and Their Roles
 
-### 1. Mock Class Generation
+### 1. Mock Classes and Mock Methods
 
-GoogleMock uses the `MOCK_METHOD` macro to generate mock method implementations for virtual functions. When you write:
+GoogleMock leverages C++ templates and macros to generate mock classes from user interfaces. Each mock class contains _mock methods_ that replace real implementations during testing. These methods are created using the `MOCK_METHOD` macros that generate all necessary plumbing to intercept calls, check arguments, and delegate to specified actions.
+
+### 2. FunctionMocker
+
+Each mocked method internally uses a `FunctionMocker` instance templated by the function signature. This handles:
+- Registering expectations and default actions.
+- Matching calls against expectations.
+- Selecting and invoking the appropriate actions.
+- Reporting uninteresting or excessive calls.
+
+### 3. Expectation Objects
+
+Expectations represent individual mock call specifications created using `EXPECT_CALL`. They:
+- Store argument matchers and action sequences (`WillOnce`, `WillRepeatedly`).
+- Track call counts to verify cardinality constraints.
+- Support chaining via `.InSequence()` and `.After()` for ordering.
+- Provide human-readable diagnostics on failures.
+
+### 4. OnCallSpec Objects
+
+These capture default behaviors declared by `ON_CALL`. Matching calls without explicit expectations trigger the actions specified here.
+
+### 5. Mock Object Registry
+
+GoogleMock maintains a global registry to:
+- Track mock objects and their mock methods.
+- Manage strictness levels and reactions to uninteresting calls.
+- Support leak detection and verification.
+
+### 6. Strictness Wrappers: NiceMock, NaggyMock, StrictMock
+
+These wrappers specialize mock objects to control handling of uninteresting calls:
+- **NiceMock**: Silences warnings, ignores uninteresting calls.
+- **NaggyMock**: (Default) Warns on uninteresting calls.
+- **StrictMock**: Treats uninteresting calls as errors.
+
+They derive from the mock class and register appropriate call reactions during construction.
+
+---
+
+## User Workflow and Data Flow
+
+The following narrative maps the typical user interaction through gMock's core mechanisms.
+
+### Step 1: Creating Mock Classes and Objects
+
+Users define mock classes by inheriting interfaces and declaring mock methods using `MOCK_METHOD`. Mock objects are instantiated like regular C++ objects, optionally wrapped in strictness wrappers like `NiceMock`.
 
 ```cpp
 class MockFoo : public Foo {
  public:
-  MOCK_METHOD(int, GetSize, (), (const, override));
-  MOCK_METHOD(std::string, Describe, (const char* name), (override));
+   MOCK_METHOD(void, DoThis, (), (override));
+   MOCK_METHOD(int, DoThat, (bool flag), (override));
 };
+
+NiceMock<MockFoo> mock;
 ```
 
-this macro expands to generate boilerplate code that:
+### Step 2: Defining Default Actions with `ON_CALL`
 
-- Overrides the base virtual method.
-- Interfaces with GoogleMock’s runtime to check expectations, record calls, and trigger behaviors.
-
-This automated generation vastly reduces user effort and improves consistency.
-
-**Important details:**
-
-- Mock methods must be defined in the public section, even if mocking protected or private methods.
-- Mocking class templates and overloaded methods is fully supported.
-
-For more about mock class creation, see the [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html#MockClass) and [gMock Cookbook - Creating Mock Classes](https://google.github.io/googletest/gmock_cook_book.html#CreatingMockClasses).
-
-### 2. Call Interception and Routing
-
-When a mock method is invoked during a test, the generated mock method passes control to the internal mocking framework. This involves:
-
-- Looking up the registered expectations for the mock object and method.
-- Determining which, if any, expectations match the call (based on argument matchers and state).
-- Executing the corresponding action defined for that expectation.
-
-This dynamic dispatch enables:
-
-- Validation of call counts and argument correctness.
-- Customizable behavior through actions like `Return()`, `Invoke()`, or user-defined lambdas.
-
-This interception layer ensures immediate feedback and fine-grained control during test runs.
-
-### 3. Expectation Matching and Cardinalities
-
-Each expectation defined via `EXPECT_CALL` comprises:
-
-- **Matchers:** Criteria specifying expected method arguments.
-- **Cardinality:** Number of expected calls (e.g., exactly once, any number, at least N).
-- **Ordering Constraints:** Sequences and prerequisites controlling call order (`InSequence`, `After`).
-
-The matcher infrastructure evaluates runtime calls against these constraints. The matching follows these rules:
-
-- Expectations are checked in reverse declaration order (“newer rules override older”).
-- Calls that satisfy an expectation perform its associated action.
-- Calls that violate expectations produce immediate failure reports.
-
-Cardinalities are carefully tracked to detect too few or too many calls. Expectations can retire after saturation if requested, allowing for complex call sequences.
-
-(See [Mocking Reference - EXPECT_CALL](https://google.github.io/googletest/reference/mocking.html#EXPECT_CALL) and [Advanced Mocking Features - Cardinalities](https://google.github.io/googletest/api/gmock_cardinalities_8md.html) for details.)
-
-### 4. User-Defined Actions
-
-An expectation not only specifies which calls are expected but also what should happen when matched. Actions define behaviors like:
-
-- Returning values (`Return()`, `ReturnRef()`)
-- Setting output arguments (`SetArgPointee()`)
-- Calling user functions or lambdas (`Invoke()`)
-- Performing side effects or combining multiple actions (`DoAll()`)
-
-Users can chain `WillOnce()` and `WillRepeatedly()` to define sequences of behaviors. When explicit actions run out, default or fallback actions apply.
-
-Custom actions can be implemented as lambdas or functors, giving maximum flexibility.
-
-(Learn more from the [Actions Reference](https://google.github.io/googletest/reference/actions.html) and [gMock Cookbook - Using Actions](https://google.github.io/googletest/gmock_cook_book.html#UsingActions).)
-
-### 5. Mock Strictness Policies
-
-Mock objects can be wrapped in strictness wrappers to control handling of *uninteresting calls* (calls without explicit expectations):
-
-- **NaggyMock**: Default mode, warns on uninteresting calls.
-- **NiceMock**: Suppresses warnings on uninteresting calls.
-- **StrictMock**: Treats all uninteresting calls as test failures.
-
-These wrappers inherit from the original mock class and adjust behavior via internal registration with the mocking framework. Usage looks like:
+`ON_CALL` is used to specify default behaviors when a method is called without an explicit expectation. These actions keep tests maintainable by defining common behavior centrally without enforcing call counts.
 
 ```cpp
-using ::testing::NiceMock;
-NiceMock<MockFoo> nice_foo;
+ON_CALL(mock, DoThat(_)).WillByDefault(Return(42));
 ```
 
-This mechanism balances flexibility and strictness in verifying interactions.
+Internally, this adds an `OnCallSpec` to the corresponding `FunctionMocker` of the mock method.
 
-See the [Behavior Strictness Reference](https://google.github.io/googletest/reference/advanced_mocking_features/behavior_strictness.html) and the [gMock Nice, Strict, Naggy recipe](https://google.github.io/googletest/gmock_cook_book.html#NiceStrictNaggy) for details.
+### Step 3: Setting Expectations with `EXPECT_CALL`
+
+`EXPECT_CALL` establishes explicit expectations, including argument matchers, cardinality, ordering, and actions (like `WillOnce` or `WillRepeatedly`).
+
+```cpp
+EXPECT_CALL(mock, DoThis())
+  .Times(2)
+  .WillOnce(Invoke([] { std::cout << "First call"; }))
+  .WillRepeatedly(Return());
+```
+
+This creates a `TypedExpectation` object associated with the function mocker.
+
+### Step 4: Mock Method Invocation
+
+When a mock method is called:
+1. It packages the arguments into a tuple and passes them to its `FunctionMocker`.
+2. The `FunctionMocker` locks the global mutex to ensure thread safety.
+3. It searches expectations in reverse order (newest first) for a matching and active expectation.
+4. If a matching expectation is found, it verifies order constraints and call counts.
+5. If excessive calls occur, it reports failures.
+6. If no expectation matches, the system consults default actions added via `ON_CALL`.
+7. If uninteresting calls occur, GoogleMock reacts according to the mock's registered strictness mode.
+8. It unlocks the mutex and performs the selected action.
+
+### Step 5: Verification and Teardown
+
+Upon destruction or explicit invocation (`Mock::VerifyAndClearExpectations()`), all mock objects are verified for expected call counts and proper order satisfaction.
 
 ---
 
-## Interaction Flow Diagram
+## Strictness Modes: Handling Uninteresting Calls
 
-The following flowchart illustrates the runtime interaction when a mock method is called:
+GoogleMock defines distinct mock strictness modes, which affect behavior when a mock method with no matching expectation is called:
+
+- **NaggyMock (Default)**: Prints a warning message about uninteresting calls but otherwise lets the program continue.
+- **NiceMock**: Suppresses warnings, silently ignoring uninteresting calls.
+- **StrictMock**: Treats uninteresting calls as test failures.
+
+This behavior is controlled by internal call registrations performed during construction of these wrappers via `NiceMockImpl`, `NaggyMockImpl`, and `StrictMockImpl` classes that call internal registration API:
+
+- `Mock::AllowUninterestingCalls` (Nice)
+- `Mock::WarnUninterestingCalls` (Naggy)
+- `Mock::FailUninterestingCalls` (Strict)
+
+Example usage:
+
+```cpp
+NiceMock<MockFoo> nice_mock;
+NaggyMock<MockFoo> naggy_mock;
+StrictMock<MockFoo> strict_mock;
+```
+
+Within tests, these wrappers allow fine control over warning verbosity and error sensitivity.
+
+---
+
+## Ordering Constraints: Sequences and Prerequisites
+
+GoogleMock supports ordering calls using:
+
+- **Sequence objects**: Pack expectations into sequences whose calls must happen sequentially.
+- **`After` clause**: Specify that an expectation should only match after another expectation or set thereof has been satisfied.
+
+Example:
+
+```cpp
+Sequence s1, s2;
+EXPECT_CALL(mock, Init()).InSequence(s1);
+EXPECT_CALL(mock, Start()).After(s1);
+```
+
+The internal representation tracks sequence membership and prerequisite expectations, ensuring that expectations only match when their order relative to others is valid.
+
+---
+
+## Thread Safety & Synchronization
+
+Given that mock functions may be invoked from multiple threads in concurrent test environments, GoogleMock:
+
+- Uses a global mutex `g_gmock_mutex` to serialize expectation matching and call counting.
+- Ensures that actions are performed outside the lock to avoid deadlocks.
+- Enforces the rule that setting expectations and default actions (`EXPECT_CALL` / `ON_CALL`) is not done concurrently with mock method calls.
+
+This design guarantees correctness without exposing the user to complex thread management.
+
+---
+
+## Diagnostic and Logging Support
+
+GoogleMock provides detailed diagnostic output for failures and warnings, including:
+
+- File and line number of expectation definitions.
+- Call count summaries.
+- Argument mismatches with detailed matcher expectations.
+- Stack traces (optionally, controlled by `--gmock_verbose` flag).
+
+Users can adjust verbosity with `--gmock_verbose=info|warning|error`.
+
+---
+
+## Integrating Mocks into Test Suites
+
+GoogleMock integrates seamlessly with GoogleTest. When mock objects are destroyed at the end of a test or explicitly verified:
+
+- All expectations are checked.
+- Failures result in GoogleTest non-fatal or fatal failures depending on the context.
+
+GoogleMock also allows explicitly verifying and clearing expectations:
+
+```cpp
+ASSERT_TRUE(Mock::VerifyAndClearExpectations(&mock_obj));
+```
+
+This enables flexible and fine-grained test designs.
+
+---
+
+## Diagram: GoogleMock Mocking Framework Interaction
 
 ```mermaid
 flowchart TD
-  Call["User calls Mock Method"] --> FindExpectation["Find matching EXPECT_CALL"]
-  FindExpectation -->|Found| ValidateCall["Check argument matchers and cardinality"]
-  FindExpectation -->|No Match| UninterestingOrUnexpected["Uninteresting or Unexpected Call"]
-  ValidateCall -->|Matches & Active| ExecuteAction["Execute associated action"]
-  ValidateCall -->|Cardinality exceeded| Fail["Report failure: Too many calls"]
-  UninterestingOrUnexpected -->|Uninteresting| WarnOrIgnore["Warn or ignore based on strictness"]
-  UninterestingOrUnexpected -->|Unexpected| FailUnexpected["Report failure: Unexpected call"]
-  ExecuteAction --> ReturnToCaller["Return result or void"]
-  Fail --> End["Fail Test"]
-  FailUnexpected --> End
-  WarnOrIgnore --> ReturnToCaller
 
-  classDef fail fill:#f88,stroke:#800,stroke-width:2px;
-  class Fail,FailUnexpected fail;
+  subgraph User Test
+    UT[User Test Code]
+  end
+
+  subgraph Mock Object
+    MO[Mock Object] -->|Contains| MM[Mock Method (FunctionMocker)]
+  end
+
+  UT -->|Calls mock method| MM
+
+  subgraph Core gMock Framework
+    Mutex[Global Mock Mutex g_gmock_mutex]
+    ExpectList[Expectations List]
+    OnCallList[Default Actions List]
+    Strictness[Strictness Mode (Nice/Naggy/Strict)]
+    Verification[Verify & Clear Expectations]
+  end
+
+  MM --> Mutex
+  Mutex --> ExpectList
+  Mutex --> OnCallList
+  ExpectList -->|Find Matching Expectation| Match[Matching Expectation]
+  OnCallList -->|Find Matching ON_CALL| DefaultAction
+
+  Match -->|Select & Perform Action| ActionOut((Action Performed))
+  DefaultAction -->|Perform Default Action| ActionOut
+
+  Strictness -->|Determine reaction| Reaction[Warning/Ignore/Failure]
+  MM -->|Trigger Reaction on uninteresting calls| Reaction
+
+  Verification -->|Triggered at Mock Destruction or Explicit Call| ExpectList
+
+  ActionOut --> UT
+
+  classDef userfill fill:#bbf,stroke:#333,stroke-width:2px,color:#000;
+  class UT userfill;
+
+  classDef systemfill fill:#eef,stroke:#036,stroke-width:2px,color:#036;
+  class Mock Object,Core gMock Framework systemfill;
 ```
 
 ---
 
-## Key Headers and Macros
+## Best Practices and Tips
 
-GoogleMock’s core functionality is organized into key headers and macros:
-
-- **`gmock/gmock.h`**: The main include that brings in all mocking features.
-- **`MOCK_METHOD` macro**: Defines mock methods dynamically replicating virtual methods.
-- **`EXPECT_CALL` macro**: Sets expectations on mock methods with matchers and actions.
-- **`ON_CALL` macro**: Defines default behavior without expectations.
-- **Strictness wrappers**: `NiceMock`, `NaggyMock`, and `StrictMock` templates.
-
-The macros help generate code that interacts with the internal mocking engine, which maintains expectation sets, call counts, and dispatches actions.
-
----
-
-## Practical Tips and Best Practices
-
-- **Define mocks for virtual methods only**: Only virtual or interface methods can be mocked via `MOCK_METHOD`.
-- **Always specify expected calls before invoking code** to avoid undefined behavior.
-- **Use `ON_CALL` to define common default behaviors** and `EXPECT_CALL` to assert strict expectations.
-- **Leverage strictness wrappers** according to your test needs: prefer `NiceMock` to suppress unnecessary warnings, use `StrictMock` to enforce strict call verification.
-- **Use sequences and `After` clauses** to assert call ordering precisely.
-- **Retire expectations on saturation** to handle repeated calls cleanly.
-- **For overloaded functions, disambiguate using `Const()` or more specific matchers.**
+- **Use `ON_CALL` for common default behaviors** to reduce boilerplate and maintain flexible tests.
+- **Reserve `EXPECT_CALL` for actual verification** of call sequences, counts, and arguments.
+- **Use `NiceMock` for tests where uninteresting calls are expected and should not clutter output.**
+- **Use `StrictMock` sparingly, mainly when you need to catch unexpected calls as errors.**
+- **Specify ordering explicitly using `InSequence` or `After` to avoid brittle tests and unclear call order failures.**
+- **Avoid nesting strictness wrappers; it's not supported and can lead to undefined behaviors.**
+- **Verify and clear expectations before reusing mocks in a test.**
+- **Understand that expectations are evaluated in reverse order, so place more specific ones after general catch-alls.**
 
 ---
 
 ## Troubleshooting Common Issues
 
-- **Uninteresting function call warnings:** Use `NiceMock` or add a catch-all `EXPECT_CALL` with `Times(AnyNumber())`.
-- **Unexpected call failures:** Verify that `EXPECT_CALL` matches the call arguments correctly and consider ordering.
-- **Too many/few calls errors:** Check cardinalities and the usage of `WillOnce` / `WillRepeatedly`.
-- **Mocking non-virtual or static functions:** Refactor to interfaces or use alternative approaches (e.g., `MockFunction`).
+- **Uninteresting call warnings:** Use `NiceMock` or add `EXPECT_CALL` with `Times(AnyNumber())` to suppress.
+- **Unexpected calls:** Review argument matchers and ordering constraints.
+- **Mock methods calling real functions:** Ensure mocked methods are virtual.
+- **Compilation errors with mock methods:** Check correct use of `MOCK_METHOD` and parentheses around complex types.
+- **Destructor-related warnings or errors:** Confirm destructors are virtual.
+
+For further troubleshooting, consult [Legacy gMock FAQ](https://google.github.io/googletest/gmock_faq.html).
 
 ---
 
-## References and Further Reading
+## Conclusion
 
-- [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html): Quick reference for mock class definitions.
-- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html): Beginner-friendly guide.
-- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html): Deep dive into using actions, matchers, and advanced features.
-- [Mocking Reference](https://google.github.io/googletest/reference/mocking.html): API reference for mocking macros and classes.
-- [Behavior Strictness](https://google.github.io/googletest/reference/advanced_mocking_features/behavior_strictness.html): Guide to `NiceMock`, `NaggyMock`, and `StrictMock`.
+GoogleMock's architecture elegantly balances flexibility, power, and usability. Through a combination of generated mock classes, expectation objects, and strictness wrappers, it supports detailed specification and verification of interactions. Its thread-safe design and rich diagnostics provide trustworthy and insightful testing even for complex C++ systems.
+
+By leveraging strictness modes and ordering constraints, users can control test precision and maintainability, ensuring that GoogleMock fits diverse testing needs.
 
 ---
 
-This page fits into the broader GoogleTest documentation as a technical concept guide revealing how GoogleMock dynamically generates mocks and controls call behavior to empower effective, interaction-based testing in C++.
+## Further Reading
 
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html): Get practical recipes for mocking patterns and usage.
+- [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html): Concise syntax guide.
+- [Mocking Reference](https://google.github.io/googletest/reference/mocking.md): Detailed API reference.
+- [Strictness Modes & Behaviors](https://google.github.io/googletest/api/gmock_mocker_8h.html): Control mock strictness.
+- [Using Parameterized and Typed Tests](https://google.github.io/googletest/gmock_for_dummies.html#advanced-feature-parameterized-tests): Extend your tests with parameterization.
 
-<Source url="https://github.com/google/googletest" branch="main" paths={[{"path": "googlemock/gmock.h", "range": "1-200"},{"path": "googlemock/gmock-nice-strict.h", "range": "1-180"},{"path": "googlemock/gmock-spec-builders.h", "range": "1-500"}]} />
+---
+
+## Source Code
+
+See the core implementation files that power specification and behavior of mocks:
+
+- `gmock/include/gmock/gmock-spec-builders.h`
+- `gmock/include/gmock/gmock-nice-strict.h`
+- `googlemock/test/gmock-spec-builders_test.cc`
+- `googlemock/test/gmock-nice-strict_test.cc`
+
+These files illustrate how expectations are represented, how strictness wrappers are implemented, and how invocation flows to verification.
+
+---
