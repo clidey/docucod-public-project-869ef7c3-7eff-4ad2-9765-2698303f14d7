@@ -1,0 +1,331 @@
+---
+title: "Mocking Best Practices and Common Pitfalls"
+description: "Highlights best practices for clean, maintainable mocks and test code. Warns about over-mocking, brittle expectations, and how to use 'nice', 'naggy', and 'strict' mocks to manage warnings or failures. Includes actionable guidance for teams."
+---
+
+# Mocking Best Practices and Common Pitfalls
+
+This guide offers expert advice on producing clean, maintainable mocks and test code using GoogleMock. It warns against over-mocking, brittle expectations, and explains strategies to manage uninteresting calls using the `NiceMock`, `NaggyMock`, and `StrictMock` wrappers. Teams adopting GoogleMock will find actionable guidance for writing robust and efficient mock-based tests.
+
+---
+
+## 1. Understanding Uninteresting Calls and Mock Strictness Modes
+
+When a mock method is called without a matching `EXPECT_CALL`, this is an **uninteresting call**. By default, gMock prints warnings for such calls, which can clutter test output. However, uninteresting calls are not necessarily errors.
+
+### Available Mock Types
+
+GoogleMock provides three wrapper classes to modify how uninteresting calls are handled:
+
+- **NaggyMock**: Prints warnings on uninteresting calls (default mock behavior).
+- **NiceMock**: Suppresses warnings on uninteresting calls.
+- **StrictMock**: Treats uninteresting calls as test failures.
+
+These wrappers are subclasses of the original mock class and can be used with any constructor variations supported by the mock.
+
+### Usage Example
+
+```cpp
+using ::testing::NiceMock;
+using ::testing::NaggyMock;
+using ::testing::StrictMock;
+
+// Create a naggy mock (default) that warns on uninteresting calls
+NaggyMock<MockFoo> naggy_mock;
+
+// Create a nice mock that ignores uninteresting call warnings
+NiceMock<MockFoo> nice_mock;
+
+// Create a strict mock that fails tests on uninteresting calls
+StrictMock<MockFoo> strict_mock;
+```
+
+### Recommendation
+
+Most teams should use **NiceMock** by default to avoid brittle tests and noise. Use **NaggyMock** while developing or debugging tests to get warnings, and **StrictMock** sparingly — only when you want to catch unexpected mock calls aggressively.
+
+---
+
+## 2. Avoiding Over-Mocking and Brittle Tests
+
+### Use `ON_CALL` Wisely
+
+- Prefer `ON_CALL` to define default mock behavior **without** requiring that the method must be called.
+- Use `EXPECT_CALL` **only** when you want to verify that a method is called with specific arguments or a specific number of times.
+
+This approach helps maintain your tests resilient to implementation changes that should not affect external behavior.
+
+### Common Pitfall: Overusing `EXPECT_CALL`
+
+Example of brittle expectations:
+
+```cpp
+EXPECT_CALL(mock, Foo(42));
+EXPECT_CALL(mock, Foo(43));
+```
+
+If the code under test changes to call `Foo(44)`, the test fails even though functionality is correct.
+
+### Best Practice
+
+```cpp
+ON_CALL(mock, Foo(_)).WillByDefault(Return(true));  // Set default behavior
+EXPECT_CALL(mock, Foo(42)).Times(1);               // Verify specific calls
+```
+
+This way, the test verifies important interactions, but is tolerant to uninteresting calls.
+
+### Suppressing Uninteresting Call Warnings
+
+If you want to keep `EXPECT_CALL`s but allow any other calls without spam warnings, do:
+
+```cpp
+EXPECT_CALL(mock, Foo(_)).Times(testing::AnyNumber());
+```
+
+---
+
+## 3. Managing Expectations for Overloaded and Complex Methods
+
+- When mocking overloaded methods, ensure you either mock **all** overloads or bring others into scope with `using BaseClass::Method;` to avoid hiding.
+
+- For functions with many arguments or complicated types, consider:
+  - Defining helper mock methods with simplified argument lists.
+  - Delegating calls from real methods to simpler mock methods within your mock class.
+
+### Example: Simplifying a Verbose Interface
+
+```cpp
+class MockLogger : public Logger {
+ public:
+  void Log(int level, const char* file, int line, const char* message) override {
+    LogSimple(level, std::string(file), std::string(message));
+  }
+
+  MOCK_METHOD(void, LogSimple, (int level, const std::string& file, const std::string& message));
+};
+```
+
+---
+
+## 4. Delegation Patterns
+
+### Delegating to Fakes
+
+When you have a non-trivial fake implementation, you can delegate un-stubbed calls from your mock to this fake:
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, Compute, (int x), (override));
+
+  void DelegateToFake() {
+    ON_CALL(*this, Compute).WillByDefault([this](int x) {
+      return fake_.Compute(x);
+    });
+  }
+
+ private:
+  FakeFoo fake_;
+};
+```
+
+Invoke `DelegateToFake()` before setting other expectations.
+
+### Delegating to Real Objects
+
+Similarly, you can delegate to a real object:
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MockFoo() {
+    ON_CALL(*this, Compute).WillByDefault([this](int x) {
+      return real_.Compute(x);
+    });
+  }
+  MOCK_METHOD(int, Compute, (int x), (override));
+
+ private:
+  Foo real_;
+};
+```
+
+This ensures your mock behaves like the real for calls you don't explicitly mock.
+
+### Delegating to Parent Class
+
+You may want to call the base class implementation from a mock:
+
+```cpp
+ON_CALL(mock, ConcreteMethod).WillByDefault([&mock](int x) {
+  return mock.Foo::ConcreteMethod(x);  // Avoid infinite recursion
+});
+```
+
+---
+
+## 5. Dealing with Mock Methods Returning Non-Copyable or Move-Only Types
+
+- GoogleMock supports mocking methods with move-only arguments and return types like `std::unique_ptr`.
+- Use lambdas in actions to generate fresh instances each call.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Create())
+    .WillRepeatedly([]() { return std::make_unique<MyObject>(); });
+```
+
+- Avoid using `Return(std::move(...))` repeatedly, as the moved object is consumed after the first call.
+
+---
+
+## 6. Using NiceMock, NaggyMock, and StrictMock with Constructors
+
+All three wrappers support forwarding constructors of the base mock class.
+
+Example:
+
+```cpp
+NiceMock<MockBar> nice_bar("hello");
+NaggyMock<MockBar> naggy_bar('a', 'b', "c", "d", 1, 2, "e", "f", true, false);
+StrictMock<MockBar> strict_bar("strict");
+```
+
+---
+
+## 7. Common Troubleshooting Scenarios
+
+### Unexpected Calls
+
+These occur when a method call has no matching `EXPECT_CALL`, but at least one expectation was set on the method. They produce test failures.
+
+### Uninteresting Calls
+
+Calls without any matching `EXPECT_CALL`. By default, they generate warnings. Use `NiceMock` to suppress warnings or `StrictMock` to fail the test.
+
+### Actions Exhausted
+
+If all `WillOnce()` actions have been performed and no `WillRepeatedly()` exists, calls will fall back to default actions, potentially producing warnings.
+
+### Compilation Slowness
+
+Large mock classes with many mock methods can slow compilation. Move mock class constructors and destructors into `.cc` files to speed up build times.
+
+### Mock Method Access
+
+Always define `MOCK_METHOD` macros in the `public:` section of your mock class, even if the original method is private or protected.
+
+### Non-Virtual Methods
+
+Mocking methods that are not virtual requires unrelated mock classes that mimic the interface and templated injection of the streamlining code.
+
+---
+
+## 8. Best Practices Summary
+
+- **Use `ON_CALL`** for defining default mock behavior; reserve `EXPECT_CALL` for setting expectations.
+- **Prefer `NiceMock`** for suppressing noise in tests.
+- **Avoid over-mocking** and brittle expectations; only assert on essential interactions.
+- **Delegate to fakes or real objects** when applicable.
+- **Use `RetiresOnSaturation()`** on expectations to avoid sticky expectation errors.
+- **Verify expectations by destruction or explicitly** with `Mock::VerifyAndClearExpectations()`.
+- **Capture and analyze warnings and verbose logs** with `--gmock_verbose` levels.
+
+---
+
+## 9. Additional Resources
+
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html)
+- [Mocking Reference](https://google.github.io/googletest/reference/mocking.html)
+- [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html)
+- [Writing Your First Test](https://google.github.io/googletest/getting-started/first-test-experience/writing-your-first-test.html)
+- [Basics of Mocking Functions and Classes](https://google.github.io/googletest/guides/mocking-best-practices/basics-of-mocking.html)
+
+---
+
+<Tip>
+Customizing the strictness of mocks using `NiceMock`, `NaggyMock`, or `StrictMock` helps you balance test noise and rigor. For most projects, starting with `NiceMock` produces less brittle and more maintainable tests.
+</Tip>
+
+<Note>
+Always define mock methods in the `public` section of your mock classes to ensure proper behavior with GoogleMock tools and wrappers.
+</Note>
+
+<Warning>
+Avoid over-specifying expectations with too many `EXPECT_CALL`s. This leads to brittle tests that fail unnecessarily when implementation details change.
+</Warning>
+
+<Check>
+When you delete a mock object manually or its lifetime isn't guaranteed, call `Mock::VerifyAndClearExpectations()` to force immediate verification of expectations.
+</Check>
+
+---
+
+## 10. Quick Reference Examples
+
+### Using NiceMock
+
+```cpp
+using ::testing::NiceMock;
+
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(void, DoWork, (), (override));
+};
+
+TEST(MyTest, NiceMockExample) {
+  NiceMock<MockFoo> mock;
+  EXPECT_CALL(mock, DoWork()).Times(1);
+
+  mock.DoWork();  // No warnings for other uninteresting calls.
+}
+```
+
+### Suppressing Uninteresting Call Warnings on Specific Methods
+
+```cpp
+EXPECT_CALL(mock, Foo(_)).Times(testing::AnyNumber());  // Allow any calls
+EXPECT_CALL(mock, Foo(42)).Times(1);                     // Verify specific call
+```
+
+### Retiring Expectations on Saturation
+
+```cpp
+EXPECT_CALL(mock, Foo(42))
+    .Times(2)
+    .RetiresOnSaturation();
+```
+
+This prevents the expectation from matching after two calls and avoids errors on further calls.
+
+### Delegating to a Fake
+
+```cpp
+class FakeThing {
+ public:
+  int Do(int x) { return x * 2; }
+};
+
+class MockThing : public Thing {
+ public:
+  MOCK_METHOD(int, Do, (int x), (override));
+
+  void DelegateToFake() {
+    ON_CALL(*this, Do).WillByDefault([this](int x) { return fake_.Do(x); });
+  }
+
+ private:
+  FakeThing fake_;
+};
+
+TEST(FakeDelegateTest, CallsFake) {
+  MockThing mock;
+  mock.DelegateToFake();
+  EXPECT_CALL(mock, Do(5)).Times(1);
+  EXPECT_EQ(mock.Do(5), 10);
+}
+```
+
+---
