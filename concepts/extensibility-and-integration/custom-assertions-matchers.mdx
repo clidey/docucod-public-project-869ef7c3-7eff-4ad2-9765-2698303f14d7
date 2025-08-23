@@ -1,0 +1,356 @@
+---
+title: "Custom Assertions and Matchers"
+description: "Learn how to extend the assertion and matcher ecosystem to fit domain-specific needs. Covers extension points, best practices, and how to keep customizations composable and maintainable."
+---
+
+# Custom Assertions and Matchers
+
+Extending GoogleTest's assertion and matcher ecosystem is essential when you want your tests to express domain-specific logic clearly and succinctly. This guide helps you understand how to create custom assertions and matchers that fit your needs, maintain readability, composability, and integrate seamlessly with GoogleTest’s powerful checking framework.
+
+---
+
+## Why Extend Assertions and Matchers?
+
+While GoogleTest offers a rich set of built-in assertions and matchers, sometimes your application's domain or complex test requirements necessitate more expressive or specialized checks. Custom assertions and matchers let you:
+
+- Express complex conditions clearly with descriptive failure messages
+- Avoid duplicating predicate logic across multiple tests
+- Compose easily with existing matchers for flexible conditions
+- Provide meaningful failure explanations to speed up debugging
+
+Consider custom matchers as an effective way to package predicate logic alongside self-explanatory diagnostics.
+
+---
+
+## Overview of Custom Matcher Types
+
+GoogleTest supports defining custom matchers in multiple ways, from quick and simple macros to full-fledged matcher classes:
+
+| Approach                          | Description                                               | When to Use                                   |
+| -------------------------------- | --------------------------------------------------------- | --------------------------------------------- |
+| `MATCHER` Macros                 | Quick, concise way to define a polymorphic matcher         | For straightforward predicates                  |
+| Parameterized `MATCHER_P*` Macros | Define matchers with parameters for added flexibility       | When your condition depends on input values    |
+| Monomorphic Matcher Classes      | Full control over the matcher interface, supports explicit types | For reusable, performant, or complex matchers |
+| Polymorphic Matcher Classes      | Template-based polymorphic matchers similar to standard ones | When you want to support multiple argument types |
+
+### The `MATCHER` Macro Family
+
+The simplest way to create a custom matcher is by using the `MATCHER` family of macros. They allow you to define a matcher with an intuitive syntax and provide customized descriptions.
+
+#### Basic Usage
+
+```cpp
+MATCHER(IsEven, "") {
+  return (arg % 2) == 0;
+}
+```
+
+This matcher checks that the argument `arg` is even. It can then be used directly in assertions and expectations:
+
+```cpp
+EXPECT_CALL(mock_foo, Bar(IsEven()));
+EXPECT_THAT(expression, IsEven());
+```
+
+If a test fails, GoogleTest automatically generates descriptive messages, e.g.,
+
+```
+Value of: expression
+Expected: is even
+  Actual: 7
+```
+
+#### Parameterized Matchers
+
+For matchers that require parameters, use `MATCHER_P` or its variants (`MATCHER_P2`, ..., up to `MATCHER_P10`).
+
+Example:
+
+```cpp
+MATCHER_P(HasAbsoluteValue, value, "") {
+  return abs(arg) == value;
+}
+```
+
+This matcher checks if `arg`’s absolute value equals the given `value`.
+
+Usage:
+
+```cpp
+EXPECT_THAT(some_expression, HasAbsoluteValue(10));
+```
+
+This prints a failure message such as:
+
+```
+Value of: some_expression
+Expected: has absolute value 10
+  Actual: -9
+```
+
+The parameter `value`’s type can be referenced as `value_type` inside the matcher for type constraints or operations.
+
+#### Custom Description Strings
+
+The last parameter in the `MATCHER*` macros allows you to specify a description string that can reference matcher parameters and a special `negation` boolean. This string frames the matcher's positive and negative descriptions, improving message clarity.
+
+Example:
+
+```cpp
+using testing::PrintToString;
+
+MATCHER_P2(InClosedRange, low, hi,
+    std::string(negation ? "is not" : "is") + " in range [" +
+    PrintToString(low) + ", " + PrintToString(hi) + "]") {
+  return low <= arg && arg <= hi;
+}
+
+EXPECT_THAT(3, InClosedRange(4, 6));
+EXPECT_THAT(3, Not(InClosedRange(2, 4)));  
+```
+
+These result in:
+
+```
+Expected: is in range [4, 6]
+Expected: is not in range [2, 4]
+```
+
+#### Explaining Match Results
+
+You can enhance failure diagnostics by streaming extra explanations to the `result_listener`.
+
+```cpp
+MATCHER_P(EqualsLongString, str, "") {
+  if (arg == str) return true;
+  *result_listener << "the difference: " << DiffStrings(str, arg);
+  return false;
+}
+```
+
+This additional info helps users quickly understand why a match failed.
+
+### Why Prefer `MATCHER*` Over Manual Matcher Interface?
+
+- Easier and quicker to write
+- Polymorphic by default, usable for multiple types
+- Auto-generated descriptive error messages
+- Clean integration with GoogleTest’s macros
+
+If you need advanced features like overloading on parameter types or more precise compiler errors, consider implementing the matcher interface directly.
+
+---
+
+## Defining Monomorphic and Polymorphic Matcher Classes
+
+When your matcher needs more control, performance, or reusability, define a matcher *class*.
+
+- **Monomorphic matcher:** matches one specific argument type `T`. Implements the following required interface:
+
+```cpp
+class MyMatcher {
+ public:
+  using is_gtest_matcher = void;  // identifies it as a matcher
+
+  bool MatchAndExplain(const T& value, std::ostream* os) const;
+
+  void DescribeTo(std::ostream* os) const;
+  void DescribeNegationTo(std::ostream* os) const;
+};
+```
+
+- **Polymorphic matcher:** supports matching multiple types through a templated `MatchAndExplain`.
+
+Example - Polymorphic matcher for non-null pointers:
+
+```cpp
+class NotNullMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  template <typename T>
+  bool MatchAndExplain(T* p, std::ostream* /*unused*/) const {
+    return p != nullptr;
+  }
+
+  void DescribeTo(std::ostream* os) const { *os << "isn't NULL"; }
+  void DescribeNegationTo(std::ostream* os) const { *os << "is NULL"; }
+};
+
+inline testing::PolymorphicMatcher<NotNullMatcher> NotNull() {
+  return testing::MakePolymorphicMatcher(NotNullMatcher());
+}
+```
+
+You then use `NotNull()` just like built-in polymorphic matchers.
+
+---
+
+## Composing Matchers
+
+You can combine matchers for more expressive tests using: 
+
+- `AllOf()`, `AnyOf()`: match when all or any of multiple matchers succeed
+- `Not()`: negates a matcher
+- `Conditional()`: chooses a matcher based on a boolean condition
+- Array variants like `AllOfArray()` or `AnyOfArray()`
+
+Example:
+
+```cpp
+EXPECT_THAT(value, AllOf(Ge(0), Le(100), Ne(50)));  // Between 0 and 100, not 50
+EXPECT_THAT(value, AnyOf(Lt(0), Gt(100)));  // Outside [0,100]
+```
+
+---
+
+## Matcher Type Casting
+
+Sometimes type mismatch prevents direct reuse of matchers. Use:
+
+- `MatcherCast<T>(m)`: casts a matcher `m` to accept type `T` (unsafe; ensure compatibility).
+- `SafeMatcherCast<T>(m)`: safer cast; compiles only if conversion conforms to strict rules.
+
+Example:
+
+```cpp
+class MockFoo {
+ public:
+  MOCK_METHOD(void, DoThis, (Derived*), (override));
+};
+
+Matcher<Base*> base_matcher = ...;
+EXPECT_CALL(mock, DoThis(SafeMatcherCast<Derived*>(base_matcher)));
+```
+
+---
+
+## Multi-Argument Matchers
+
+Sometimes you need to match multiple arguments together, checking relations among them.
+
+- Use the `.With()` clause in `EXPECT_CALL` or `ON_CALL` to match the entire argument tuple.
+- Use multi-argument matcher helpers like `AllArgs(m)` and `Args<N1, N2, ...>(m)` to select tuples of arguments.
+- GoogleTest provides tuple matchers like `Lt()`, `Eq()`, etc., to compare arguments as pairs.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, SetPosition(_, _)).With(Lt());  // First arg < second arg
+```
+
+---
+
+## Custom Predicate Assertions
+
+GoogleTest provides `EXPECT_PRED*` and `EXPECT_PRED_FORMAT*` macros allowing you to assert arbitrary predicates with detailed failure messages.
+
+Example simple predicate:
+
+```cpp
+bool IsEven(int n) { return (n % 2) == 0; }
+EXPECT_PRED1(IsEven, value);
+```
+
+Example predicate-formatter for richer messages:
+
+```cpp
+testing::AssertionResult AssertIsEven(const char* expr, int n) {
+  if (IsEven(n)) return testing::AssertionSuccess();
+  return testing::AssertionFailure() << expr << " evaluates to " << n << ", which is not even.";
+}
+EXPECT_PRED_FORMAT1(AssertIsEven, value);
+```
+
+Use the `{EXPECT|ASSERT}_PRED{1..5}` macros according to your predicate arity.
+
+---
+
+## Additional Tips and Best Practices
+
+- **Keep Custom Matchers Pure:** Matchers must be free of side effects and deterministic in their output based only on the actual argument and parameters.
+- **Use Descriptive Messages:** Include meaningful descriptions for both positive and negative cases to aid in debugging.
+- **Reference Types Carefully:** When passing parameters by reference to matchers, note that error messages will reflect value, not reference address.
+- **Explain Failures:** Use `result_listener` in matchers to stream additional details on why a match failed or succeeded.
+- **Prefer Macros for Quick Matchers:** `MATCHER` macros cover most needs without complex boilerplate.
+- **Use Matcher Composition:** Combine matchers rather than creating monolithic ones for clarity and reusability.
+
+---
+
+## Common Pitfalls
+
+- Defining matchers inside functions or classes (not allowed by `MATCHER` macros).
+- Non-pure matchers that cause flaky test runs.
+- Overusing expectations in mocks instead of `ON_CALL` for default behavior.
+- Forgetting to specify matcher types in overloaded functions.
+
+---
+
+## Related Concepts
+
+For comprehensive understanding, refer to:
+
+- [Matchers Reference](reference/matchers.md): detailed built-in matchers and usage examples.
+- [Assertions Reference](reference/assertions.md): how to use `EXPECT_THAT` and integrate matchers in assertions.
+- [gMock Cookbook](guides/mocking-patterns/advanced-mocking-features.md): in-depth recipes for writing custom matchers and actions.
+- [Advanced GoogleTest Topics](guides/advanced-usage/customization-and-internals.md): more on extending and customizing GoogleTest and GoogleMock.
+
+---
+
+## Next Steps
+
+- Practice writing simple custom matchers using `MATCHER` macros.
+- Use parameterized `MATCHER_P` when matchers depend on external values.
+- Escalate to matcher classes if you need control over types or performance.
+- Compose and combine matchers to keep tests expressive but maintainable.
+- Debug failing tests using extended descriptions and explanations provided by matchers.
+
+---
+
+## Example: Defining a Custom Parameterized Matcher
+
+```cpp
+MATCHER_P(IsDivisibleBy, divisor, 
+          std::string(negation ? "isn't divisible by " : "is divisible by ") + 
+          testing::PrintToString(divisor)) {
+  if (arg % divisor == 0) return true;
+
+  *result_listener << "where remainder is " << (arg % divisor);
+  return false;
+}
+
+// Usage:
+EXPECT_THAT(value, IsDivisibleBy(7));
+```
+
+This matcher will print:
+
+```
+Value of: value
+Expected: is divisible by 7
+  Actual: 23 (where remainder is 2)
+```
+
+---
+
+## Summary
+
+Creating custom assertions and matchers in GoogleTest dramatically improves test clarity and diagnostic quality. Use `MATCHER` macros for quick definitions, escalate to explicit matcher classes for complex cases, and combine matchers to keep tests expressive yet modular. Proper descriptions and explanation generation aid debugging and promote maintainability. Always maintain purity and refer to existing matchers to build on proven patterns.
+
+---
+
+<AccordionGroup title="Additional Resources">
+<Accordion title="Matchers Reference">
+See the [Matchers Reference](../reference/matchers.md) for details on built-in matchers and composition.
+</Accordion>
+<Accordion title="Assertions Reference">
+Learn how to use matchers inside assertions like `EXPECT_THAT` and `ASSERT_THAT` in the [Assertions Reference](../reference/assertions.md).
+</Accordion>
+<Accordion title="gMock Cookbook">
+Explore practical recipes for defining custom matchers and actions in the [gMock Cookbook](../guides/mocking-patterns/advanced-mocking-features.md).
+</Accordion>
+</AccordionGroup>
+
+<Callout>
+Tip: Always write custom matchers to be side-effect free and provide clear, detailed messages for both success and failure. Use GoogleTest’s facilities like `result_listener` and description strings generously.
+</Callout>
