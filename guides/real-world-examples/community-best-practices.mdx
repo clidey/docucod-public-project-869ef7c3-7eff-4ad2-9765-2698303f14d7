@@ -1,0 +1,283 @@
+---
+title: "Community Best Practices and Pitfalls"
+description: "Crowd-sourced wisdom and actionable advice from seasoned GoogleTest users. Highlights anti-patterns, workarounds, and strategies for difficult situations, informed by a broad base of community documentation and active projects."
+---
+
+# Community Best Practices and Pitfalls
+
+Welcome to the gathering of seasoned insights and practical advice from the GoogleTest user community. This page collects the collective wisdom of experienced developers who have unlocked the full potential of GoogleTest through shared best practices and have navigated around common pitfalls. By embedding these insights into your workflows, you position your tests for robustness, maintainability, and clarity.
+
+---
+
+## 1. Maximizing Test Reliability with Thoughtful Mocking
+
+### 1.1 Coding to Interfaces, Not Concrete Classes
+
+A foundational principle embraced by the community is the separation between usage and implementation through interfaces. Rather than mocking concrete classes directly, which tightly couples tests to implementation details and hampers maintainability, define abstract interfaces that capture the intent of interactions.
+
+**Why?**
+- **Flexibility:** Interfaces let you adapt or swap implementations without breaking tests.
+- **Readability:** Custom interfaces can be designed around your domain needs, making tests expressive.
+- **Maintainability:** Changes to the underlying concrete classes are absorbed by adapters, not your test code.
+
+**Example:**
+
+```cpp
+class IDataFetcher {
+ public:
+   virtual ~IDataFetcher() {}
+   virtual std::string FetchData(int id) = 0;
+};
+
+class RealDataFetcher : public IDataFetcher {
+ public:
+   std::string FetchData(int id) override { ... }
+};
+
+class MockDataFetcher : public IDataFetcher {
+ public:
+   MOCK_METHOD(std::string, FetchData, (int id), (override));
+};
+```
+
+Use `MockDataFetcher` in tests instead of mocking `RealDataFetcher`.
+
+<Tip>
+This intermediary approach keeps your tests focused on behavior and reduces brittleness caused by internal changes.
+</Tip>
+
+### 1.2 Cautious Use of NiceMock and StrictMock
+
+GoogleMock provides special wrappers: `NiceMock` to suppress warnings on unexpected calls and `StrictMock` to treat unexpected calls as errors.
+
+**Community wisdom:**
+- Use **`NiceMock`** mostly *(default recommended)* to keep test noise low while quickly catching meaningful mistakes.
+- Use **`StrictMock`** sparingly to enforce very specific interactions.
+
+<Tip>
+Avoid overusing `StrictMock` as it can make tests brittle, forcing maintenance on minor refactors without surface behavior changes.
+</Tip>
+
+### 1.3 Use ON_CALL for Default Behavior, EXPECT_CALL for Verification
+
+Avoid overly strict tests by setting default behaviors with `ON_CALL` and reserving `EXPECT_CALL` for actual verification.
+
+```cpp
+ON_CALL(mock_obj, Method(_)).WillByDefault(Return(default_value));
+EXPECT_CALL(mock_obj, Method(expected_arg)).Times(1);
+```
+
+**Benefit:**
+- Reduces test breakage from unimportant calls
+- Makes intentions explicit
+
+### 1.4 Handling Complex Method Signatures
+
+- Wrap argument or return types with commas in extra parentheses or define convenient type aliases to avoid macro failures.
+
+```cpp
+using IntDoubleMap = std::map<int, double>;
+MOCK_METHOD(bool, CheckMap, (IntDoubleMap, bool));
+```
+
+- For methods with numerous parameters or overloaded methods, consider simplifying interface in mocks or delegate to a helper method.
+
+### 1.5 Managing Overloaded Methods
+
+Mock **all** overloaded variants to prevent hidden method warnings or use `using BaseClass::MethodName;` to bring in unmocked overloads.
+
+```cpp
+class MockFoo : public Foo {
+ public:
+   using Foo::Add;
+   MOCK_METHOD(int, Add, (int x), (override));
+};
+```
+
+---
+
+## 2. Strategies for Robust Expectations and Actions
+
+### 2.1 Use `.RetiresOnSaturation()` to Prevent Sticky Expectations
+
+Community experience has shown expectations are "sticky" by default, meaning they remain active even after maximal allowed calls, often causing unexpected failures on extra calls.
+
+Use `.RetiresOnSaturation()` to automatically retire an expectation once saturated:
+
+```cpp
+EXPECT_CALL(mock, Foo(42))
+    .Times(2)
+    .RetiresOnSaturation();
+```
+
+This avoids false positive failures when multiple calls with the same params happen.
+
+### 2.2 Use Sequences or Partial Orders to Manage Call Ordering
+
+When test logic requires strict call order, use `InSequence` or `Sequence` objects.
+
+```cpp
+{
+  InSequence s;
+  EXPECT_CALL(mock, Init());
+  EXPECT_CALL(mock, Process());
+}
+```
+
+For partial ordering, use explicit `Sequence` objects and assign expectations to multiple sequences.
+
+### 2.3 Avoid Over Specification of Arguments
+
+Use wildcards (`_`) or matchers to specify only what's necessary:
+
+```cpp
+EXPECT_CALL(mock, DoSomething(_)); // Matches any argument
+```
+
+Focus on verifying the contract rather than exact parameter values, which improves test resilience.
+
+### 2.4 Use Matchers to Validate Complex Arguments
+
+Matchers let you write rich assertions on method arguments, including containers, pointers, or properties of objects.
+
+```cpp
+EXPECT_CALL(mock, ProcessData(ElementsAre(1, 2, 3)));
+EXPECT_CALL(mock, UpdatePtr(Pointee(Eq(5))));
+```
+
+Take advantage of `Field()`, `Property()`, or custom matchers for deep validations.
+
+---
+
+## 3. Delegation and Hybrid Mocking Approaches
+
+### 3.1 Delegate to Fakes When Useful
+
+Sometimes you have a complicated fake implementation you want to reuse for default behavior while retaining mocking capabilities.
+
+Define your mock to delegate missing calls to the fake:
+
+```cpp
+void DelegateToFake() {
+  ON_CALL(*this, SomeMethod).WillByDefault([this](ArgType arg) {
+    return fake_.SomeMethod(arg);
+  });
+}
+```
+
+This preserves expected behavior with flexibility to override.
+
+### 3.2 Delegate to Real Objects to Avoid Behavioral Drift
+
+When you want to verify interactions but maintain real logic, delegate calls to a real instance inside your mock to ensure faithful behavior.
+
+### 3.3 Overriding Concrete Methods and Destructors
+
+- To mock a non-pure virtual method, mock methods shadow concrete base class implementations.
+
+- If you need to test when an object is destructed, mock a `Die()` method called inside the destructor and observe that.
+
+---
+
+## 4. Best Practices and Common Pitfalls
+
+### 4.1 Expectations Must Precede Calls
+
+Always set all `EXPECT_CALL` expectations before code exercising mocks runs to ensure reliable verification.
+
+### 4.2 Avoid Overly Granular Expectations
+
+Overconstraining expectations (too many, overly specific ones) leads to brittle tests. Keep expectations focused.
+
+### 4.3 Beware of Side Effects in Actions
+
+Remember that actions specified in `WillOnce()` or `WillRepeatedly()` are evaluated once during expectation setup, not at every call. Use lambdas for live or varying behaviors.
+
+### 4.4 Clean Up Mock Objects Properly
+
+Mocks verify expectations upon destruction. If you allocate mocks on the heap, ensure they are properly destroyed to avoid false positives.
+
+### 4.5 Multi-threading Considerations
+
+- Set expectations and verify mocks in single-threaded contexts.
+- gMock is thread safe for method calls, but setting expectations concurrently is unsafe.
+- Actions execute in the calling thread.
+
+---
+
+## 5. Practical Tips for Complex Scenarios
+
+### 5.1 Mocking Non-Virtual Methods
+
+Usually avoid mocking non-virtual methods. If needed, consider template-based mocks or interface wrappers.
+
+### 5.2 Handling Move-Only Types
+
+Use the generic `MOCK_METHOD` and lambdas within actions to return or accept move-only types. Avoid `Return(std::move(...))` repeatedly as it will fail after first use.
+
+### 5.3 Using `ON_CALL` to Suppress No-Op Warning Messages
+
+Suppress "Uninteresting mock function call" warnings for methods you don’t verify by using `NiceMock` or explicit catch-all `EXPECT_CALL(...).Times(AnyNumber())`.
+
+### 5.4 Use Custom Matchers and Actions
+
+Leverage the extensive matcher and action APIs to create intuitive and maintainable tests that express intent clearly.
+
+
+---
+
+## 6. Summary
+
+Community shares these core approaches to harness GoogleTest and GoogleMock powerfully and sustainably:
+
+- Mock interfaces, not concrete classes
+- Use `ON_CALL` and `EXPECT_CALL` mindfully
+- Retire saturated expectations
+- Manage method overloads precisely
+- Prefer matcher flexibility over strictness
+- Delegate to fakes or real objects when appropriate
+- Avoid brittle tests by thoughtful constraint setting
+- Track multithreading and lifecycle nuances
+
+By embedding these practices, you harness community-tested strategies to build resilient, clear, and effective test suites.
+
+---
+
+## 7. Troubleshooting Common Issues
+
+### 7.1 Compilation Errors with `MOCK_METHOD`
+
+- Ensure types with commas are wrapped in parentheses or have aliases.
+- Confirm mocked methods are declared in `public:` even if base methods are not.
+
+### 7.2 Unexpected or Warning Calls
+
+- If warnings about uninteresting calls confuse you, either use `NiceMock` or explicitly specify catch-all expectations with `.Times(AnyNumber())`.
+
+### 7.3 Failing Tests Due to Call Ordering
+
+- Verify call sequences using `InSequence` or `Sequence` objects.
+
+### 7.4 Return Value Issues in Actions
+
+- For dynamic return values, prefer lambdas over `Return()` with variables.
+
+### 7.5 Tests Not Verifying Due to Missing Destruction
+
+- Make sure mocks are destroyed properly to allow verification to occur.
+
+---
+
+## 8. Related Documentation
+
+For further reading, see:
+
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html): Practical recipes and advanced tips.
+- [GoogleTest Primer](../primer.md): For foundational test writing.
+- [Mocking Reference](../reference/mocking.md): In-depth API documentation.
+- [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html): Quick syntax and features overview.
+- [Core Testing Workflows > Using Mocks](../guides/core-testing-workflows/using-mocks.mdx): Best practices on mocking.
+
+You are also encouraged to explore the sections on assertions, parameterized tests, and test fixtures to complement this knowledge.
+
+---
