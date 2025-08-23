@@ -1,0 +1,295 @@
+---
+title: "Optimizing Test Performance in Large Codebases"
+description: "Techniques and practical advice for reducing test suite runtime, parallelizing execution, and managing dependencies as your codebase grows. Provides actionable tips for keeping feedback cycles short."
+---
+
+# Optimizing Test Performance in Large Codebases
+
+## Overview
+When working in large C++ codebases, test suite runtime can quickly become a bottleneck impacting developer feedback cycles and CI throughput. This guide focuses on practical techniques tailored to GoogleTest users aimed at reducing test execution time, efficiently managing inter-test dependencies, and leveraging parallelization to keep tests fast and maintainable as your codebase grows.
+
+---
+
+## 1. Understanding the Challenge
+
+### Why Optimize Test Performance?
+- **Fast feedback**: Developers get immediate validation of changes.
+- **CI efficiency**: Minimizes resource use and wait times.
+- **Scalability**: Ensures testing remains feasible as code grows.
+
+### Common Causes of Slow Tests
+- Large numbers of tests executing sequentially.
+- Tests with heavy setup/teardown that could be shared.
+- Tests with hidden dependencies causing serialization.
+- Tests that consume excessive resources or block unnecessarily.
+
+---
+
+## 2. Key Techniques for Performance Improvement
+
+### a. Parallelizing Test Execution
+GoogleTest supports sharding and environments where tests can be split across multiple processors or hosts.
+
+**How to Enable Parallel Test Sharding:**
+1. Set `GTEST_TOTAL_SHARDS` environment variable to the total number of shards (machines/processors).
+2. Set `GTEST_SHARD_INDEX` to the zero-based index of the current shard.
+
+Example: Running tests on 3 shards:
+
+```bash
+export GTEST_TOTAL_SHARDS=3
+# On first machine
+export GTEST_SHARD_INDEX=0
+./my_test
+
+# On second
+export GTEST_SHARD_INDEX=1
+./my_test
+
+# On third
+export GTEST_SHARD_INDEX=2
+./my_test
+```
+
+Each shard will run a unique subset of the tests, speeding overall test execution proportionally.
+
+<Check>
+Parallel execution only works effectively if tests are independent and do not share state that causes conflicts.
+</Check>
+
+### b. Reusing Resources with Test Suite SetUp/TearDown
+Use per-test-suite (formerly "per-test-case") setup and teardown to share expensive resources rather than recreating them per test.
+
+GoogleTest calls `SetUpTestSuite()` before the **first** test in your fixture runs, and `TearDownTestSuite()` after the **last**.
+
+```cpp
+class MyTestSuite : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    shared_resource_ = new ExpensiveResource();
+  }
+
+  static void TearDownTestSuite() {
+    delete shared_resource_;
+    shared_resource_ = nullptr;
+  }
+
+  static ExpensiveResource* shared_resource_;
+};
+
+ExpensiveResource* MyTestSuite::shared_resource_ = nullptr;
+```
+
+This significantly reduces repeated initialization costs.
+
+<Tip>
+Avoid relying on cross-test order; tests must remain independent even when sharing static resources.
+</Tip>
+
+### c. Selective Test Execution and Filtering
+Use GoogleTest's filtering flag `--gtest_filter` to run only a subset of tests relevant to the changes.
+
+```bash
+./my_test --gtest_filter=MyTestSuite.*  # Runs all tests in MyTestSuite
+./my_test --gtest_filter=*Fast*         # Runs tests with 'Fast' in their name
+./my_test --gtest_filter=-*Slow*        # Runs all tests except those with 'Slow'
+```
+
+Selective execution reduces runtime during iterative development.
+
+### d. Avoid Excessive Assertions in Loops
+Per the `googletest/test/gtest_stress_test.cc` example, running large numbers of assertions in concurrent threads can impact performance.
+
+Balance the need for thorough checks with the cost of frequent failure detection.
+
+### e. Use `SCOPED_TRACE` to Isolate Slow Debugging Failures
+`SCOPED_TRACE` helps identify failing subroutine calls while avoiding redundant detailed diagnostics when parallelizing or retrying.
+
+```cpp
+SCOPED_TRACE("Loop iteration " << i);
+EXPECT_EQ(ComputeValue(i), expected[i]);
+```
+
+---
+
+## 3. Managing Test Dependencies
+
+### Avoid Implicit Dependencies
+Tests that depend on external state or previous tests slow parallelization and increase flakiness.
+
+Always aim for tests that:
+- Initialize their own state.
+- Tear down all state they modify.
+- Use mock objects or scoped resources to isolate changes.
+
+### Using `GTEST_SKIP()` to Reduce Unnecessary Test Runs
+`GTEST_SKIP()` allows skipping tests dynamically based on runtime conditions (e.g., environment variable settings, missing dependencies).
+
+```cpp
+TEST(FooTest, SkipIfNotSupported) {
+  if (!IsFeatureAvailable()) {
+    GTEST_SKIP() << "Skipping as feature is unavailable.";
+  }
+  ...
+}
+```
+
+This reduces wasted time on irrelevant tests.
+
+---
+
+## 4. Practical Workflow to Optimize Large Test Suites
+
+<Steps>
+<Step title="Analyze Test Suite Runtime">
+Use tools (profilers, test logs) to identify longest running and most frequently failing tests.
+</Step>
+<Step title="Enable Sharding and Parallel Runs">
+Configure your CI or local environment to run tests in shards or in parallel on multiple CPU cores using environment variables.
+</Step>
+<Step title="Refactor Shared Resource Initialization">
+Use `SetUpTestSuite()` and `TearDownTestSuite()` to move expensive setup out of individual tests.
+</Step>
+<Step title="Run Subsets During Development">
+Leverage test filtering (`--gtest_filter`) to avoid running irrelevant tests on every build.
+</Step>
+<Step title="Audit Test Independence">
+Check for implicit dependencies and side effects that block parallel execution or cause flakes.
+</Step>
+</Steps>
+
+---
+
+## 5. Troubleshooting Common Issues
+
+<AccordionGroup title="Common Performance Pitfalls">
+<Accordion title="Tests Not Running in Parallel">
+Check that no two tests share mutable global/static state or files that cause serialization.
+Verify usage of `GTEST_SHARD_INDEX` and `GTEST_TOTAL_SHARDS` env variables is correct.
+</Accordion>
+<Accordion title="Resource Contention in Parallel Tests">
+When tests access shared resources (e.g. databases, files, sockets), limit concurrency or mock out such resources.
+</Accordion>
+<Accordion title="Long Setup/Teardown Times">
+Verify that expensive initialization is moved to per-suite setup (`SetUpTestSuite`).
+Profile constructors and teardown methods to find bottlenecks.
+</Accordion>
+<Accordion title="Flaky Tests Due to Dependencies">
+Add explicit setup/reset for any shared state.
+Consider using `SCOPED_TRACE` to pinpoint failure contexts.
+</Accordion>
+</AccordionGroup>
+
+---
+
+## 6. Best Practices & Tips
+
+- Keep tests isolated and side-effect free to maximize parallel scalability.
+- Utilize GoogleTest environment variables for fine control over test execution.
+- Use `RecordProperty()` (see [Assertions Guide](https://google.github.io/googletest/reference/assertions.html#RecordProperty)) to log metrics about test duration or resource usage.
+- Regularly profile large test suites to detect regressions in runtime.
+- Combine GoogleTest features (like parameterized tests) with sharding to maintain test coverage with minimal runtime.
+- Document and mark expensive or slow tests as `DISABLED_` to exclude from default runs.
+
+---
+
+## 7. Next Steps & Related Topics
+
+- Read the [GoogleTest Primer](primer.md) for foundational knowledge.
+- Explore [Using Parameterized and Typed Tests](parameterized-and-typed-tests.md) to modularize test inputs.
+- Review the [Integrating with Build Systems and CI](integration-build-systems.md) guide to automate parallel test runs efficiently.
+- Learn to write effective [Death Tests](death-tests.md) to catch fatal error scenarios without bloating runtime.
+- Dive into the [Advanced Topics](advanced.md) for in-depth techniques on debugging and test suite maintenance.
+
+---
+
+## References
+
+- [GoogleTest Primer](primer.md)
+- [Testing Reference - RUN_ALL_TESTS](reference/testing.md#RUN_ALL_TESTS)
+- [GoogleTest Command-Line Flags](advanced.md#running-test-programs-advanced-options)
+- [Using SCOPED_TRACE for Debugging](advanced.md#adding-traces-to-assertions)
+
+---
+
+<Info>
+This guide focuses specifically on test performance optimization techniques within GoogleTest and does not cover unrelated topics such as API usage or mocking frameworks.
+</Info>
+
+---
+
+### Diagram: Parallel Test Execution Workflow
+```mermaid
+flowchart TD
+  Start["Start Test Run"] --> Init["Init GoogleTest and Flags"]
+  Init --> CheckShard{ "Sharding Enabled?" }
+  CheckShard -->|No| RunAll["Run All Tests Sequentially"]
+  CheckShard -->|Yes| DetermineShard["Determine Shard Index & Total Shards"]
+  DetermineShard --> FilterTests["Filter Tests for Current Shard"]
+  FilterTests --> ParallelRun["Run Tests in Parallel or Sequential on Shard"]
+  ParallelRun --> CollectResults["Aggregate and Report Test Results"]
+  CollectResults --> End["Test Run Complete"]
+
+  classDef decision fill:#f96,stroke:#333,stroke-width:2px;
+  class CheckShard decision;
+```
+
+---
+
+### Code Snippet: Minimal Parallel Shard Setup
+```bash
+# Bash example
+export GTEST_TOTAL_SHARDS=4
+export GTEST_SHARD_INDEX=0
+./my_test_binary &
+
+export GTEST_SHARD_INDEX=1
+./my_test_binary &
+
+export GTEST_SHARD_INDEX=2
+./my_test_binary &
+
+export GTEST_SHARD_INDEX=3
+./my_test_binary &
+
+wait  # Wait for all shards
+```
+
+---
+
+### Practical Example: Sharing Setup in Test Suite
+```cpp
+class DatabaseTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    db_connection_ = InitDatabaseConnection();
+  }
+
+  static void TearDownTestSuite() {
+    CloseDatabaseConnection(db_connection_);
+    db_connection_ = nullptr;
+  }
+
+  void SetUp() override {
+    BeginTransaction(db_connection_);
+  }
+
+  void TearDown() override {
+    RollbackTransaction(db_connection_);
+  }
+
+  static DatabaseConnection* db_connection_;
+};
+
+DatabaseConnection* DatabaseTest::db_connection_ = nullptr;
+
+TEST_F(DatabaseTest, QueryReturnsExpectedResult) {
+  EXPECT_EQ(QueryUserCount(db_connection_), 0);
+}
+```
+
+This configuration runs the costly connection setup once per suite, but resets state between tests.
+
+---
+
+This guide empowers your team to keep your GoogleTest suites performant and scalable as your project grows.
