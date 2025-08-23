@@ -1,0 +1,270 @@
+---
+title: "Customization & Extension Points"
+description: "Guide to supported extension points for custom matchers, actions, and event listeners, including required API hooks and integration strategy. Useful for developers aiming to enhance or adapt the framework to their application's needs."
+---
+
+# Customization & Extension Points
+
+GoogleTest and GoogleMock provide several **supported extension points** that allow you to customize or extend the framework's behavior. These extension points enable you to tailor GoogleTest and GoogleMock to meet specific needs in your testing environment, such as creating **custom matchers**, **custom actions**, or handling **test event listeners**.
+
+This guide focuses on the supported extension mechanisms, detailing the required API hooks, integration strategies, and practical advice for developers aiming to enhance or adapt the framework to their application's needs.
+
+---
+
+## 1. Introduction to Extension Points
+
+GoogleTest and GoogleMock are designed to be extensible while maintaining a stable core API. If the out-of-the-box behavior isn't enough for your testing goals, these extension points provide you with powerful hooks:
+
+- **Custom Matchers:** Define predicates that specify complex or domain-specific argument validations.
+- **Custom Actions:** Specify customized behaviors mock methods should perform when called.
+- **Event Listeners:** Intercept test execution lifecycle events to implement new output formats, logging, or test orchestration logic.
+
+Understanding these points gives you control over how your tests express expectations and how test results are consumed or processed.
+
+---
+
+## 2. Creating Custom Matchers
+
+Matchers allow you to describe the expected properties of mock function arguments precisely. GoogleMock supports **defining your own matchers** to express arbitrary conditions beyond built-in matchers.
+
+### 2.1 Why Create Custom Matchers?
+
+Standard matchers cover many common cases, but sometimes tests need to validate properties that are specific to your domain or data types. Custom matchers let you:
+
+- Simplify test code by encapsulating complex checks.
+- Provide rich, descriptive failure messages tailored to your conditions.
+- Reuse matching logic across multiple tests for consistency.
+
+### 2.2 Defining a Custom Matcher
+
+You can implement matchers either using the convenient `MATCHER` family of macros or by implementing the matcher interface directly for fine control.
+
+#### Example Using `MATCHER` Macro
+```cpp
+MATCHER(IsPositive, "Checks if the value is positive") {
+  return arg > 0;
+}
+
+// Usage in a test:
+EXPECT_CALL(mock_obj, Foo(IsPositive()));
+```
+
+#### Defining a Polymorphic Matcher Class
+```cpp
+class IsEvenMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  template <typename T>
+  bool MatchAndExplain(T value, std::ostream* os) const {
+    if ((value % 2) == 0) {
+      if (os) { *os << "which is even"; }
+      return true;
+    } else {
+      if (os) { *os << "which is odd"; }
+      return false;
+    }
+  }
+
+  void DescribeTo(std::ostream* os) const { *os << "is even"; }
+  void DescribeNegationTo(std::ostream* os) const { *os << "is odd"; }
+};
+
+inline testing::PolymorphicMatcher<IsEvenMatcher> IsEven() {
+  return testing::MakePolymorphicMatcher(IsEvenMatcher());
+}
+
+// Use in tests:
+EXPECT_CALL(mock_obj, Foo(IsEven()));
+```
+
+### 2.3 Best Practices and Tips
+
+- Keep matchers **pure** with no side effects to ensure correctness.
+- Stream meaningful information to the result listener to improve failure messages.
+- Leverage parameterized matcher macros (e.g., `MATCHER_P`, `MATCHER_P2`) to make your matcher flexible.
+
+---
+
+## 3. Writing Custom Actions
+
+Actions control what a mock method does when invoked. Beyond the built-in actions, you can define custom actions for:
+
+- Returning dynamic or context-dependent values.
+- Triggering side effects (e.g., modifying arguments, logging).
+- Invoking callbacks or asynchronous operations.
+
+### 3.1 Defining Actions Using Lambdas or Functors
+
+The simplest way to create custom actions is to use lambdas or callable objects:
+
+```cpp
+EXPECT_CALL(mock_obj, Foo(_))
+    .WillOnce([](int x) {
+      // Custom action: return input multiplied by 2
+      return 2 * x;
+    });
+```
+
+### 3.2 Implementing ActionInterface
+
+For more advanced or reusable actions, implement the `testing::ActionInterface<F>` where `F` is the mock function signature:
+
+```cpp
+template <typename F>
+class ActionInterface {
+ public:
+  virtual ~ActionInterface();
+  virtual typename testing::internal::Function<F>::ResultType Perform(
+    const typename testing::internal::Function<F>::ArgumentTuple& args) = 0;
+};
+```
+
+Then create an `Action<F>` using `MakeAction`:
+```cpp
+class IncrementAction : public testing::ActionInterface<int(int*)> {
+ public:
+  int Perform(const std::tuple<int*>& args) override {
+    int* p = std::get<0>(args);
+    return ++(*p);
+  }
+};
+
+Action<int(int*)> Increment() {
+  return MakeAction(new IncrementAction);
+}
+
+// Usage:
+EXPECT_CALL(mock_obj, Increment(_)).WillOnce(Increment());
+```
+
+### 3.3 Polymorphic Actions
+
+Use `MakePolymorphicAction` to define actions that can operate on multiple function types, improving reusability.
+
+### 3.4 Chaining and Complex Actions
+
+Combine multiple actions using `DoAll()` to perform sequences of side effects and return values.
+
+```cpp
+EXPECT_CALL(mock_obj, Foo(_))
+    .WillOnce(DoAll(
+        testing::SetArgPointee<0>(5),  // Sets output argument
+        testing::Return(true)));      // Returns from mock call
+```
+
+---
+
+## 4. Handling Test Events with Event Listeners
+
+GoogleTest provides an event listener API that allows you to receive callbacks at various stages of test execution.
+
+### 4.1 When to Use Event Listeners
+
+- Customizing or replacing the test output (e.g., producing JSON or database entries).
+- Adding additional logging or telemetry.
+- Implementing resource monitors or external tooling integration.
+
+### 4.2 Defining Event Listeners
+
+Create a subclass of `testing::TestEventListener` or, more conveniently, `testing::EmptyTestEventListener` overriding only the events you want to handle:
+
+```cpp
+class MyCustomListener : public testing::EmptyTestEventListener {
+ public:
+  void OnTestStart(const testing::TestInfo& test_info) override {
+    printf("Starting test %s.%s\n",
+           test_info.test_suite_name(), test_info.name());
+  }
+
+  void OnTestEnd(const testing::TestInfo& test_info) override {
+    printf("Finished test %s.%s\n", 
+           test_info.test_suite_name(), test_info.name());
+  }
+};
+```
+
+### 4.3 Installing Event Listeners
+
+Add your listener to the event listener list in `main()` before running tests:
+
+```cpp
+int main(int argc, char** argv) {
+  testing::InitGoogleTest(&argc, argv);
+
+  auto& listeners = testing::UnitTest::GetInstance()->listeners();
+
+  // Remove default printer if needed
+  delete listeners.Release(listeners.default_result_printer());
+
+  listeners.Append(new MyCustomListener());
+
+  return RUN_ALL_TESTS();
+}
+```
+
+### 4.4 Listener Execution Order
+
+Listeners receive events in order of append for start events and reverse order for end events, allowing stacking listeners for layered behaviors.
+
+### 4.5 Restrictions
+
+- Avoid generating failures within listener callbacks where prohibited (e.g., `OnTestPartResult`).
+
+---
+
+## 5. Other Supported Customizations
+
+### 5.1 Customizing Temporary Directory Location
+
+Override the temporary directory used by GoogleTest by providing your own `GTEST_CUSTOM_TEMPDIR_FUNCTION_` macro.
+
+### 5.2 Using Custom Stack Trace Retrieval
+
+You can specify a custom stack trace retriever by defining `GTEST_OS_STACK_TRACE_GETTER_` to your implementation of `OsStackTraceGetterInterface`.
+
+### 5.3 Replacing Logging and Threading Primitives
+
+GoogleTest exposes macros to override logging (`GTEST_LOG_`, `GTEST_CHECK_`) and threading primitives (`Mutex`, `ThreadLocal`) for adapting to different platforms or embedding in specialized environments.
+
+Refer to the **gtest-port.h** header for all customizable macros.
+
+---
+
+## 6. Integration Strategy
+
+Extensions fit seamlessly within the GoogleTest and GoogleMock ecosystem, leveraging existing lifecycle and configuration hooks:
+
+- **Matchers and Actions** integrate naturally in `EXPECT_CALL` and `ON_CALL` macros.
+- **Event Listeners** can be attached or detached at runtime, allowing flexible reporting.
+- Custom macros for platform-specific customization are detected automatically during build.
+
+To avoid breaking future compatibility:
+
+- Only use documented interfaces and macros.
+- Follow semantic contracts of each extension point.
+- Keep extensions lightweight and focused on test logic.
+
+---
+
+## 7. Practical Tips and Common Pitfalls
+
+- Define matchers and actions close to your domain logic to maximize reuse.
+- Avoid side effects in matchers; keep actions pure functional where possible.
+- When writing event listeners, consider thread-safety and the potential for multiple event callbacks.
+- Manage ownership of listener instances carefully; GoogleTest takes ownership on append.
+- Use the `NiceMock` or `StrictMock` wrappers in combination with custom actions and matchers to control test verbosity and strictness.
+
+---
+
+## 8. Additional References
+
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) — Recipes for creating matchers and actions.
+- [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html) — Reference for macros and usage patterns.
+- [Event Listener API](reference/testing.md#TestEventListener) — Details on test event listener interfaces.
+- [Matchers Reference](reference/matchers.md) — Built-in matchers and extension points.
+- [Actions Reference](reference/actions.md) — Built-in actions and API for custom actions.
+
+---
+
+By mastering these extension points, you can produce concise, expressive, and maintainable tests customized for your complex scenarios, empowering your quality engineering with unmatched precision and control.
