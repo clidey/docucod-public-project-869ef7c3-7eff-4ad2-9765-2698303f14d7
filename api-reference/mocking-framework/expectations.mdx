@@ -1,0 +1,334 @@
+---
+title: "Expectations & Call Ordering"
+description: "Covers declaring expectations on mock objects, defining call order and cardinalities (how many times a method should be called), and handling uninteresting calls using strict, naggy, and nice mocks."
+---
+
+# Expectations & Call Ordering
+
+GoogleMock allows you to specify detailed expectations about how your mock objects will be used during tests, so you can verify that your code interacts with dependencies exactly as intended. This page explains how to declare expectations on mock methods, control the call order and the number of times methods are called (cardinalities), and manage uninteresting calls with various mock types.
+
+---
+
+## Setting Expectations on Mock Methods
+
+To specify that a mock method should be called, use the `EXPECT_CALL` macro. This macro declares that your test expects a certain method of a mock object to be invoked with arguments matching given patterns. It must be called before the code under test exercises the mock.
+
+```cpp
+EXPECT_CALL(mock_object, MethodName(matchers...))
+    .Times(cardinality)
+    .WillOnce(action)
+    .WillRepeatedly(action);
+```
+
+- **matchers...** specify argument expectations (e.g., exact values or predicates).
+- **Times()** controls how many times the method is expected to be called.
+- **WillOnce()** and **WillRepeatedly()** define the method’s behavior upon invocation.
+
+If you omit `Times()`, GoogleMock will usually infer the call cardinality based on the number of `WillOnce()` and `WillRepeatedly()` clauses.
+
+### Chaining Clauses
+
+The clauses you can chain after `EXPECT_CALL` must appear in this order:
+
+- `.With(multi_argument_matcher)` &mdash; Matches all arguments as a tuple.
+- `.Times(cardinality)` &mdash; Specifies expected call counts.
+- `.InSequence(sequence...)` &mdash; Assigns this expectation to one or more sequences for call ordering.
+- `.After(expectations...)` &mdash; Specifies prerequisite expectations that must be satisfied before this one.
+- `.WillOnce(action)` &mdash; Defines action for a single matching call (can be repeated).
+- `.WillRepeatedly(action)` &mdash; Defines action for all subsequent calls after `WillOnce`s are exhausted.
+- `.RetiresOnSaturation()` &mdash; Makes the expectation inactive once its call limit is reached.
+
+### Example
+
+```cpp
+using ::testing::AtLeast;
+using ::testing::Return;
+using ::testing::_;
+
+EXPECT_CALL(mock_turtle, PenDown()).Times(AtLeast(1));
+EXPECT_CALL(mock_turtle, Forward(_))
+    .Times(3)
+    .WillOnce(Return())
+    .WillRepeatedly(Return());
+```
+
+This expects that `PenDown()` is called at least once, and `Forward(...)` is called three times.
+
+---
+
+## Controlling Call Cardinality
+
+Cardinality controls how many times an expectation matches the mocked method calls. Use the `Times()` clause with one of the predefined cardinalities:
+
+| Cardinality      | Meaning                                  |
+|------------------|------------------------------------------|
+| `AnyNumber()`    | Call may happen any number of times.     |
+| `AtLeast(n)`     | Call happens at least n times.            |
+| `AtMost(n)`      | Call happens at most n times.             |
+| `Between(m, n)`  | Call happens between m and n times inclusive. |
+| `Exactly(n)` or `n` | Call happens exactly n times.           |
+
+If `Times()` is omitted, the cardinality is inferred:
+
+- No `WillOnce` or `WillRepeatedly` &rarr; `Times(1)`.
+- `n` `WillOnce` clauses and no `WillRepeatedly` &rarr; `Times(n)`.
+- `n` `WillOnce` clauses and one `WillRepeatedly` &rarr; `Times(AtLeast(n))`.
+
+### Special Case: `Times(0)`
+
+You can explicitly forbid a method call:
+
+```cpp
+EXPECT_CALL(mock_obj, SomeMethod(_)).Times(0);
+```
+
+which causes any call to this method that matches to fail the test.
+
+---
+
+## Controlling Call Order
+
+By default, expectations do not enforce the order of method calls. GoogleMock allows you to manage call order through two mechanisms:
+
+### 1. `InSequence` Object (Scope-based Ordering)
+
+Create an `InSequence` object, and all expectations declared within its scope must occur in the order declared.
+
+```cpp
+using ::testing::InSequence;
+{
+  InSequence s;
+  EXPECT_CALL(mock, Init());
+  EXPECT_CALL(mock, Process());
+  EXPECT_CALL(mock, Cleanup());
+}
+```
+
+These three calls must happen in the declared order.
+
+### 2. `InSequence` Clause (Partial Ordering with Sequences)
+
+You can explicitly associate expectations with one or more `Sequence` objects to form a partial order DAG.
+
+```cpp
+using ::testing::Sequence;
+Sequence s1, s2;
+EXPECT_CALL(mock, A()).InSequence(s1, s2);
+EXPECT_CALL(mock, B()).InSequence(s1);
+EXPECT_CALL(mock, C()).InSequence(s2);
+```
+
+This means `A` must happen before both `B` and `C`, but `B` and `C` can occur in any order relative to each other.
+
+### 3. `After()` Clause (Prerequisite Ordering)
+
+Use `.After()` to specify specific expectations that must complete before this one can happen.
+
+```cpp
+using ::testing::Expectation;
+Expectation e1 = EXPECT_CALL(mock, InitX());
+Expectation e2 = EXPECT_CALL(mock, InitY());
+EXPECT_CALL(mock, Describe()).After(e1, e2);
+```
+
+`Describe()` must be called after both `InitX()` and `InitY()`.
+
+---
+
+## Making Expectations Retire Upon Saturation
+
+An expectation remains *active* until the mock method calls that come *after* it in a sequence occur (or until the test ends). This means expectations are "sticky" by default, even after their call limit has been reached.
+
+If you want an expectation to retire as soon as it reaches its maximum call count (saturation), use:
+
+```cpp
+EXPECT_CALL(mock, Method()).Times(2).RetiresOnSaturation();
+```
+
+Once saturated, the expectation no longer matches further calls and other expectations are considered instead.
+
+This helps avoid upper-bound violations when the same call signature may occur multiple times.
+
+---
+
+## Handling Uninteresting Calls
+
+### What Are Uninteresting Calls?
+
+An *uninteresting call* is a call to a mock method for which no `EXPECT_CALL` has been set. By default, GoogleMock:
+
+- Allows uninteresting calls to succeed by performing the default action (return default values).
+- Prints a warning (`Uninteresting mock function call`) advising you to add expectations if you want to enforce/mock them.
+
+### Mock Types: Strict, Naggy, and Nice
+
+You can control how you treat uninteresting calls by choosing the mock object type:
+
+| Mock Type                  | Behavior on Uninteresting Calls         |
+|----------------------------|----------------------------------------|
+| Default (NaggyMock)        | Warning message                        |
+| `NiceMock<T>`              | Suppresses warnings                    |
+| `StrictMock<T>`            | Treats uninteresting calls as errors (test failures) |
+
+Examples:
+
+```cpp
+using ::testing::NiceMock;
+NiceMock<MockFoo> nice_mock;
+EXPECT_CALL(nice_mock, InterestedMethod());  // Only this expectation
+// No warnings for other uninteresting calls
+```
+
+```cpp
+using ::testing::StrictMock;
+StrictMock<MockFoo> strict_mock;
+EXPECT_CALL(strict_mock, InterestedMethod());
+// Any uninteresting calls cause test failures.
+```
+
+**Important:** These modes only affect uninteresting calls (methods without any expectation). Unexpected calls (methods with an expectation that do not match the arguments or call order) always produce errors.
+
+### Setting Uninteresting Call Behavior Programmatically
+
+You can further control uninteresting call behavior per mock object via:
+
+- `Mock::AllowUninterestingCalls(mock_ptr)` &rarr; suppress warnings
+- `Mock::WarnUninterestingCalls(mock_ptr)` &rarr; warnings (default)
+- `Mock::FailUninterestingCalls(mock_ptr)` &rarr; errors
+
+(Usually you use `NiceMock` or `StrictMock` wrappers instead.)
+
+---
+
+## Best Practices & Common Pitfalls
+
+- **Set Expectations *before* exercising mocks.**
+  Expectations are for future calls, not past calls. Setting expectations after calls leads to undefined behavior.
+
+- **Use `ON_CALL` for default behaviors, `EXPECT_CALL` only when verifying calls.**
+  Overusing `EXPECT_CALL` leads to brittle tests that break from harmless changes.
+
+- **Prefer `NiceMock` to reduce noise.**
+  Strict mocks are useful but can make tests fragile if you don't want to assert every interaction.
+
+- **Use sequences judiciously.**
+  Over-constraining call order can make tests fragile and harder to refactor.
+
+- **Use `.RetiresOnSaturation()` when chaining multiple expectations for the same method.**
+  This ensures expectations retire properly and avoid upper-bound call failures.
+
+- **Avoid ambiguous `EXPECT_CALL`s on overloaded methods.**
+  Use matchers or explicit overload disambiguation to pick the right overload.
+
+---
+
+## Summary Diagram: Expectations & Call Ordering
+
+```mermaid
+flowchart TD
+  A[Define Mock Object]
+  B[Set Expectations via EXPECT_CALL]
+  C[Optionally Assign to Sequence]
+  D[Optionally Define Call Prerequisites After()]
+  E[Set Cardinality via Times()]
+  F[Set Actions with WillOnce()/WillRepeatedly()]
+  G[Optionally Use RetiresOnSaturation()]
+  H[Execute Code Under Test Calling Mock Methods]
+  I[GoogleMock Verifies Calls Against Expectations]
+  J{Call Matches Active Expectation?}
+  K[Perform Mock Action]
+  L[Report Failure: Unexpected Call]
+
+  A --> B
+  B --> C
+  C --> D
+  D --> E
+  E --> F
+  F --> G
+  G --> H
+  H --> J
+  J -- Yes --> K --> I
+  J -- No --> L --> I
+
+  subgraph Call Ordering Control
+    C
+    D
+  end
+
+  subgraph Call Cardinality
+    E
+    G
+  end
+
+  subgraph Call Behavior
+    F
+  end
+
+```
+
+---
+
+## Additional Resources
+
+For a deeper understanding and advanced scenarios, consult these related pages:
+
+- [Mock Object Basics](../mocking-framework/mock-object-basics) &mdash; How to define and use mock classes.
+- [Matchers: Argument Matching & Patterns](../mocking-framework/matchers) &mdash; How to specify argument expectations.
+- [Actions: Custom Responses to Calls](../mocking-framework/actions) &mdash; How to define what mocks do when called.
+- [Mocking Guide](../../guides/mocking-and-advanced-testing/mock-objects) &mdash; Best practices for mock-based tests.
+- [gMock Cookbook](../gmock_cook_book.md) &mdash; Recipes for common mocking tasks.
+
+---
+
+## Troubleshooting Common Issues
+
+- **Unexpected Calls:** Calls not matching any expectation cause immediate test failures.
+  - Verify your matchers and cardinalities.
+
+- **Excessive Calls:** Calls exceeding expected counts will cause failures.
+  - Use `.Times(AnyNumber())` if calls are allowed without strict limits.
+
+- **Uninteresting Call Warnings:** If you see warnings about uninteresting calls:
+  - Add expectations for those methods if you want to verify them.
+  - Use `NiceMock` to suppress warnings if uninteresting calls are acceptable.
+
+- **Saturation Issues:** Expectation saturated but additional matching calls occur.
+  - Use `.RetiresOnSaturation()` or widen cardinality.
+
+- **Order Violations:** Calls out of order given sequences or prerequisites.
+  - Check your use of `InSequence` or `.After()` clauses to make sure they reflect the intended order.
+
+---
+
+## Example: Controlling Call Order with Sequences and Cardinalities
+
+```cpp
+using ::testing::Sequence;
+using ::testing::Return;
+using ::testing::_;
+
+Sequence seq;
+
+EXPECT_CALL(mock, Initialize()).InSequence(seq);
+EXPECT_CALL(mock, Process(_))
+    .InSequence(seq)
+    .Times(2)
+    .WillRepeatedly(Return(true));
+EXPECT_CALL(mock, Finalize()).InSequence(seq);
+
+// Test code must call Initialize, Process twice, then Finalize, in order.
+```
+
+
+## How to Handle Uninteresting vs Unexpected Calls
+
+- Uninteresting: No expectation set. Allowed by default but warns.
+- Unexpected: Expectations set but no matching expectation. Fails test.
+
+Use mock types:
+
+- **Naggy (default):** Warns on uninteresting calls.
+- **Nice:** Ignores uninteresting calls silently.
+- **Strict:** Fails test on uninteresting calls.
+
+---
