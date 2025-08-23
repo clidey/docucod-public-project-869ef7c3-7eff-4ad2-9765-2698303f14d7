@@ -1,0 +1,325 @@
+---
+title: "Why is my mock object behaving unexpectedly?"
+description: "Explanations for common GoogleMock surprises, like uninteresting calls, NiceMock/StrictMock behavior, default actions, and expectation matching quirks. Points to effective use of ON_CALL, EXPECT_CALL, and cardinalities."
+---
+
+# Why is my mock object behaving unexpectedly?
+
+This page demystifies common surprises users encounter when working with GoogleMock objects. Mock behaviors can sometimes seem puzzling—unexpected warnings or failures about uninteresting calls, subtle impacts of using `NiceMock`, `StrictMock`, or `NaggyMock`, and intricate nuances in how expectations match calls. Understanding these phenomena will empower you to write more predictable, maintainable tests.
+
+---
+
+## Understanding Uninteresting vs Unexpected Calls
+
+Two core concepts often confuse users:
+
+- **Uninteresting calls:** These occur when a mock method is called *without any expectation (i.e., no `EXPECT_CALL`)* set on it.
+- **Unexpected calls:** These occur when the mock method *has some expectations*, but the actual call's arguments do **not** match any of them.
+
+GoogleMock treats these calls differently:
+
+- **Uninteresting calls** do not cause test failures by default but produce warnings (called "naggy" behavior).
+- **Unexpected calls** always cause test failures since they violate specified expectations.
+
+To manage uninteresting calls, GoogleMock offers special wrappers:
+
+- `NiceMock<T>` suppresses the warnings on uninteresting calls, letting your tests proceed quietly.
+- `NaggyMock<T>` (the current default) warns about uninteresting calls.
+- `StrictMock<T>` treats uninteresting calls as test failures.
+
+### Example
+
+```cpp
+using ::testing::NiceMock;
+using ::testing::StrictMock;
+
+NiceMock<MockFoo> nice_foo;      // No warnings on uninteresting calls.
+StrictMock<MockFoo> strict_foo;  // Uninteresting calls cause failures.
+
+EXPECT_CALL(nice_foo, DoThis()); // Expecting DoThis()
+nice_foo.DoThis();              // Ok.
+nice_foo.SomeOtherMethod();     // No warning due to NiceMock.
+
+EXPECT_CALL(strict_foo, DoThis());
+strict_foo.DoThis();            // Ok.
+strict_foo.SomeOtherMethod();   // Test fails due to strict mock.
+```
+
+---
+
+## Default Action and Behavior on Calls Without `EXPECT_CALL`
+
+By default, mock methods that return built-in types or pointers return reasonable default values (e.g., `0` or `false`). For return types that have a default constructor, the method returns a default-constructed value.
+
+You can customize this behavior using:
+
+- `ON_CALL(mock_object, method(args...)).WillByDefault(action)` to define default actions without setting expectations.
+- `::testing::DefaultValue<T>::Set(value)` to change return values by type globally.
+
+**Important:** `ON_CALL` sets behavior but *does not* establish the requirement that the call must occur.
+
+---
+
+## How `EXPECT_CALL` Works
+
+`EXPECT_CALL` sets both the expectation and behavior for your mock methods. When calls happen, GoogleMock matches them against expectations in *reverse order* (newest first), stopping at the first active matching expectation.
+
+Key points:
+
+- Multiple `EXPECT_CALL`s on the same method allow you to express different behaviors based on argument matchers.
+- The order of `EXPECT_CALL`s matters; more specific rules should come *after* more general ones.
+- If a call does not match any expectation, it will fail as an unexpected call.
+
+### Setting Expectations with Cardinalities and Clauses
+
+```cpp
+EXPECT_CALL(mock, Foo(Args...))
+    .Times(cardinality)
+    .WillOnce(action)
+    .WillRepeatedly(action)
+    .InSequence(seq)
+    .After(other_exp)
+    .RetiresOnSaturation();
+```
+
+- `Times()` controls how many calls are expected.
+- `WillOnce()` and `WillRepeatedly()` specify the actions.
+- `InSequence()` and `After()` control call order.
+- `RetiresOnSaturation()` makes expectations inactive after saturation.
+
+### Partial Ordering Example
+
+```cpp
+Sequence seq1, seq2;
+EXPECT_CALL(mock, A())  .InSequence(seq1, seq2);
+EXPECT_CALL(mock, B())  .InSequence(seq1);
+EXPECT_CALL(mock, C())  .InSequence(seq2);
+EXPECT_CALL(mock, D())  .InSequence(seq2);
+```
+
+This means:
+
+- `A()` must happen before both `B()` and `C()`,
+- `C()` must happen before `D()`,
+- `B()` and `C()` order is independent.
+
+---
+
+## Default Mock Strictness Behavior and Wrappers
+
+GoogleMock currently defaults to "naggy" mocks: uninteresting calls produce warnings but not failures.
+
+You can instead mark mocks as:
+
+- **NiceMock:** suppresses uninteresting call warnings.
+- **StrictMock:** fails tests on uninteresting calls.
+
+Example of usage:
+
+```cpp
+using ::testing::NiceMock;
+using ::testing::StrictMock;
+
+NiceMock<MockFoo> nice_mock;
+StrictMock<MockFoo> strict_mock;
+
+EXPECT_CALL(nice_mock, DoThis());
+EXPECT_CALL(strict_mock, DoThis());
+
+nice_mock.SomeMethodWithoutExpectation();  // No warning
+strict_mock.SomeMethodWithoutExpectation(); // Test failure
+```
+
+### Important Caveats
+
+- `NiceMock` and `StrictMock` only affect uninteresting calls, not unexpected calls.
+- They only work with methods defined directly in the mock class using `MOCK_METHOD`.
+- Nesting (`NiceMock<StrictMock<MockFoo>>`) is not supported.
+- `NiceMock` and `StrictMock` might not behave correctly if the mocked class lacks a virtual destructor.
+
+---
+
+## Uninteresting Call Warnings and Verbosity Levels
+
+Uninteresting calls generate warnings to alert you of potential test oversights.
+
+You can control verbosity using the flag `--gmock_verbose`:
+
+- `info`: show all messages including stack traces.
+- `warning`: show warnings but no stack traces (default).
+- `error`: suppress all warnings.
+
+For example, run tests with:
+
+```bash
+test_binary --gmock_verbose=info
+```
+
+to see detailed traces of all mock calls and matches.
+
+---
+
+## Common Surprises and How to Address Them
+
+### 1. Unexpected Method Called Leading to Failure
+
+**Why?** An `EXPECT_CALL` exists only for specific argument patterns, and a call with different arguments does not match any.
+
+**How to fix:**
+
+- Add a "catch-all" expectation like `EXPECT_CALL(mock, Method(_)).Times(AnyNumber());` to allow other calls.
+- Adjust existing expectations to cover more argument cases.
+
+### 2. Uninteresting Call Warning Despite Setting `ON_CALL`
+
+**Why?** `ON_CALL` sets default behavior but does *not* set an expectation that the call should happen.
+
+**How to fix:**
+
+- Add an `EXPECT_CALL` if you want to verify the call.
+- Use `NiceMock` to suppress warning if calls are legitimately uninteresting.
+
+### 3. Calls Hitting Later Expectations Instead of Earlier Ones
+
+**Why?** Matching searches expectations in reverse order, so the last added matching expectation overrides earlier ones.
+
+**How to fix:**
+
+- Place more general expectations first, more specific later.
+- Use sequences if order of calls matters.
+
+### 4. Strange Behavior With `WillOnce` and Default Behavior
+
+**Example:** If you write:
+
+```cpp
+EXPECT_CALL(mock, GetValue())
+    .Times(4)
+    .WillOnce(Return(100));
+```
+
+Only the first call returns 100; the next three calls return default (like 0).
+
+**How to fix:**
+
+- Define multiple `WillOnce()`s to cover all calls.
+- Use `WillRepeatedly()` to specify behavior for calls after `WillOnce`s.
+
+### 5. Complications With Move-only Types
+
+Mocking methods taking or returning move-only types (e.g., `std::unique_ptr`) works normally with `MOCK_METHOD` but some actions (like `DoAll`) may not support them.
+
+To handle return values of move-only types, favor using lambdas or functors that create new instances each time.
+
+---
+
+## Tips and Best Practices
+
+- Use `ON_CALL` to set default behavior; use `EXPECT_CALL` to assert expected calls.
+- Use `NiceMock` to suppress uninteresting call warnings when you do not care about certain method calls.
+- Use `StrictMock` when you want to ensure *all* calls to a mock are explicitly expected.
+- Be explicit about call cardinalities with `Times()` to catch excessive or missing calls.
+- When setting multiple expectations on the same method, put catch-all generic expectations *before* specific ones.
+- Control verbosity with `--gmock_verbose` to help debug expectation matching issues.
+- If mocking classes with non-default constructors, `NiceMock` et al. inherit these constructors seamlessly.
+- Use sequences (`InSequence`) or partial orders (`After`) to validate call orderings properly.
+- For methods returning references, use `ReturnRef()` actions to avoid dangling references.
+
+---
+
+## Troubleshooting Common Issues
+
+### Why do I see "Uninteresting mock function call" messages when running my tests?
+
+These warnings mean a mock method was called without an expectation.
+
+- Confirm if your test should verify these calls; if so, add an `EXPECT_CALL`.
+- If you want to ignore, consider wrapping the mock with `NiceMock`.
+- Adjust `--gmock_verbose` to reduce noise during debugging.
+
+### Why does my test fail with "called more times than expected"?
+
+It means a method call matched an expectation but exceeded its expected cardinality.
+
+- Use `.Times()` to allow enough calls.
+- Use `.RetiresOnSaturation()` to allow other expectations to match after upper bound.
+- Review your call counting expectations for errors.
+
+### Why are some calls matched against unexpected expectations?
+
+GoogleMock matches calls against the *last* matching expectation first.
+
+- Define expectations from general to specific in order.
+- Use argument matchers (`_`, `Eq()`, `Ge()`, etc.) carefully to avoid overlaps.
+- Use sequences to enforce call ordering.
+
+### Can `NiceMock` or `StrictMock` affect test result?
+
+They only affect how *uninteresting* calls are handled (warnings vs errors). Unexpected calls always fail tests.
+
+---
+
+## Recommended Reading and Resources
+
+- [GoogleMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html): Start here for basics on mocks and expectations.
+- [Mocking Reference](https://google.github.io/googletest/reference/mocking.html): Details on mock macros, expectations, and strictness wrappers.
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html#NiceStrictNaggy): Deep dive on NiceMock, NaggyMock, StrictMock with examples.
+- [Setting Expectations](https://google.github.io/googletest/api/gmock/namespacetesting.html): Understanding `EXPECT_CALL` syntax and argument matching.
+
+For source and example tests illustrating these behaviors, see:
+
+- `googlemock/include/gmock/gmock-nice-strict.h`
+- `googlemock/test/gmock-nice-strict_test.cc`
+- `googlemock/src/gmock-spec-builders.cc`
+
+---
+
+
+<CardGroup cols={2}>
+<Card title="Understanding Mock Strictness">
+
+- `NiceMock`: suppresses warnings on uninteresting calls.
+- `NaggyMock`: (default behavior) warns on uninteresting calls.
+- `StrictMock`: treats uninteresting calls as failures.
+
+Example: `NiceMock<MockFoo> nice_foo;`
+
+</Card>
+<Card title="Setting Expectations with EXPECT_CALL">
+
+- Use `EXPECT_CALL(mock, method(args...))` to expect calls.
+- Can chain modifiers: `.Times()`, `.WillOnce()`, `.WillRepeatedly()`, `.InSequence()`, `.After()`, `.RetiresOnSaturation()`.
+- Matching is done in reverse order of expectation declarations.
+
+</Card>
+</CardGroup>
+
+<Tip>
+Always specify `EXPECT_CALL` before exercising your mock. Setting expectations after calls may cause undefined behavior.
+</Tip>
+
+<Warning>
+`NiceMock` and `StrictMock` only modify behavior for uninteresting calls, not unexpected calls. Unexpected calls always cause test failures.
+</Warning>
+
+<Info>
+Controlling verbosity via `--gmock_verbose` helps manage the volume and detail of mock call reporting.
+</Info>
+
+<Steps>
+<Step title="Identify surprising mock behavior">
+Check if the mock method call is uninteresting (no expectations set) or unexpected (no matching expectation).
+</Step>
+<Step title="Suppress or enforce uninteresting calls">
+Wrap your mock object with `NiceMock` to suppress warnings, or `StrictMock` to treat warnings as errors.
+</Step>
+<Step title="Set appropriate expectations">
+Add `EXPECT_CALL` with precise argument matchers and cardinalities.
+</Step>
+<Step title="Use `ON_CALL` for default behaviors">
+Define default return values or behaviors for calls without expectations.
+</Step>
+<Step title="Control call ordering">
+Use `InSequence` or `After` to express required call order, avoiding brittleness.
+</Step>
+</Steps>
