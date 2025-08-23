@@ -1,0 +1,339 @@
+---
+title: "Actions, Expectations, and Matchers"
+description: "Understand the conceptual contract between test author and framework for matching calls, specifying return behaviors (actions), and setting up expectations on call counts or values. Dive into how GoogleMock builds expressive and maintainable verification logic."
+---
+
+# Actions, Expectations, and Matchers
+
+Understand the conceptual contract between test author and framework for matching calls, specifying return behaviors (actions), and setting up expectations on call counts or values. Dive into how GoogleMock builds expressive and maintainable verification logic.
+
+---
+
+## Introduction
+
+In GoogleMock, when you write tests involving mock objects, your goal is to precisely describe **how** the mocks should behave and **what** interactions you expect. This page focuses on the trio of core concepts that compose this contract:
+
+- **Matchers**: How to specify which calls you expect by describing the arguments patterns.
+- **Actions**: What behaviors (return values, side-effects) mocks execute when matching calls occur.
+- **Expectations**: How many times calls are allowed or required, and in what order.
+
+GoogleMock's design elegantly separates these concerns to offer a powerful yet intuitive language to set up your mock objects, verify correct behavior, and produce readable failure reports.
+
+---
+
+## 1. Matchers: Defining the Criteria for Call Selection
+
+When a mock method is invoked, GoogleMock decides which expectation (if any) this call corresponds to by evaluating **matchers** against the method arguments. Matchers are predicates specifying constraints on arguments your test cares about.
+
+### What Matchers Do
+
+- Describe the argument requirements on a mock call, e.g., "the first argument equals 42" or "the second argument is greater than zero".
+- Provide flexibility through built-in matchers like `_` (wildcard), `Eq()`, `Ge()`, `Le()`, and compose them for complex conditions.
+- Can express whole-argument constraints with `.With()` clause, allowing matching on the tuple of all arguments.
+
+### How to Use Matchers
+
+- In `EXPECT_CALL` or `ON_CALL`, specify argument constraints using matchers:
+
+```cpp
+using ::testing::_;
+using ::testing::Ge;
+
+EXPECT_CALL(mock_object, Method(Ge(5), _));  // first argument >= 5, second is anything
+```
+
+- If you omit matchers, it defaults to matching any arguments (only for non-overloaded methods). For overloaded methods, you must specify matchers for disambiguation.
+
+- Combine matchers with `AllOf()`, `AnyOf()`, or `Not()` for complex logic.
+
+- Use `.With()` multi-argument matcher to refine matching on the entire argument list:
+
+```cpp
+EXPECT_CALL(mock, SetPosition(_, _))
+    .With(Lt());  // first arg < second arg
+```
+
+> **Best Practice:** Specify only necessary constraints. Over-specifying leads to brittle tests.
+
+---
+
+## 2. Actions: Specifying Mock Behavior on Matched Calls
+
+Match alone is not enough. When a call matches an expectation, GoogleMock must know what to **do**. This is defined by **actions**.
+
+### Default Behavior
+
+- If you don't specify an action, GoogleMock uses a _built-in default action_ based on the return type:
+  - `void` functions do nothing.
+  - `bool` functions return `false`.
+  - Numeric types return 0.
+  - Objects with default constructors return default-constructed values.
+
+- You can customize the default for all calls of a given return type via [`DefaultValue<T>::Set()`](reference/mocking.md#DefaultValue).
+
+### Specifying Actions
+
+- Use `WillOnce()` to specify behavior for individual calls:
+
+```cpp
+EXPECT_CALL(mock, Foo())
+    .WillOnce(Return(42))
+    .WillOnce(Return(100));
+```
+
+- Use `WillRepeatedly()` to specify behavior for all subsequent calls after those covered by `WillOnce()`:
+
+```cpp
+EXPECT_CALL(mock, Foo())
+    .WillOnce(Return(42))
+    .WillRepeatedly(Return(100));
+```
+
+- Actions can do more than just return values. They can:
+  - Set output arguments.
+  - Invoke callbacks passed as arguments.
+  - Perform side effects (via lambdas).
+  - Combine multiple effects using `DoAll()`.
+
+- The sequence of `WillOnce()` clauses define actions per successive matching calls; once exhausted, if specified, `WillRepeatedly()` action applies.
+
+> **Important:** Actions in `EXPECT_CALL()` are evaluated once at declaration time; use lambdas or custom callables to defer side effects.
+
+---
+
+## 3. Expectations: Defining Call Counts and Verification
+
+An **expectation** declares how many times a call matching your specified matchers should occur, when it should occur (order), and how strict the test is.
+
+### Cardinalities: Controlling How Many Times
+
+Use `.Times()` with **cardinalities** to specify how many calls are expected:
+
+| Cardinality          | Semantics                                         |
+|----------------------|--------------------------------------------------|
+| `AnyNumber()`        | Zero or more times                                |
+| `AtLeast(n)`         | At least n times                                  |
+| `AtMost(n)`          | No more than n times                              |
+| `Between(m, n)`      | Between m and n times inclusive                   |
+| `Exactly(n)` or `n`  | Exactly n times; `0` means the call should never happen |
+
+If you omit `.Times()`, GoogleMock infers cardinality:
+
+- No `WillOnce()` or `WillRepeatedly()` clauses -> `Times(1)`
+- n `WillOnce()` but no `WillRepeatedly()` -> `Times(n)`
+- n `WillOnce()` and one `WillRepeatedly()` -> `Times(AtLeast(n))`
+
+### Specifying Call Order
+
+- By default, calls can occur in any order.
+- To enforce order, use `InSequence` block or `.InSequence()` clause with `Sequence` objects:
+
+```cpp
+using ::testing::InSequence;
+{
+  InSequence seq;
+  EXPECT_CALL(mock, A());
+  EXPECT_CALL(mock, B());  // Expected after A()
+}
+```
+
+- For partial orderings, use `.After()` clause giving prerequisite expectations.
+
+### Call Saturation and Retirement
+
+- An expectation is *saturated* when it reaches its upper bound.
+- Normally, expectations are "sticky" and remain active even if saturated, causing failures on excessive calls.
+- You can use `.RetiresOnSaturation()` to have the expectation retire (become inactive) immediately after saturation, allowing more flexible matching with other expectations.
+
+### Verification and Clearing
+
+- GoogleMock automatically verifies expectations on mock destruction.
+- You can explicitly call `Mock::VerifyAndClearExpectations(mock_obj);` to verify earlier and reset.
+- If expectations are not met, GoogleMock reports detailed failure messages including call counts and argument mismatches.
+
+---
+
+## 4. Matching, Action, and Expectation Interplay: A Typical Mock Call Flow
+
+When your test code exercises a mock method, GoogleMock processes the call as follows:
+
+1. **Matching:**
+   - GoogleMock reviews expectations in reverse order.
+   - For each expectation, it checks if the call's arguments satisfy the matchers and auxiliary `.With()` clause.
+   - It also checks if the expectation is active (not retired), and all prerequisites are satisfied.
+2. **Action Selection:**
+   - If it finds a matching active expectation, it selects an action:
+     - Uses the proper `WillOnce()` action based on call count.
+     - If `WillOnce()` actions are exhausted, uses `WillRepeatedly()` if provided.
+     - If the call count exceeds cardinality, reports an excessive call and performs default action.
+   - If no expectation matches, it attempts to find an applicable `ON_CALL` default action.
+   - If none applies, the built-in default action runs.
+3. **Call Execution:**
+   - The selected action executes, potentially returning values or affecting output parameters.
+4. **State Update:**
+   - Call counts update.
+   - If configured, expectations retire on saturation.
+
+This strict yet flexible contract allows you to:
+
+- Precisely define how the mock should behave.
+- Verify interactions in granular or fuzzy ways.
+- Control test stability and expressiveness.
+
+---
+
+## 5. Common Pitfalls and Best Practices
+
+### Over-specifying Matchers
+
+Strict argument matching can lead to brittle tests; prefer matching only what matters.
+
+### Misordering Expectations
+
+Newer expectations override older ones. Place more specific expectations after general ones.
+
+### Forgetting to Set Actions
+
+An `EXPECT_CALL` without `WillOnce` or `WillRepeatedly` will fallback to default actions, which may be unexpected.
+
+### Neglecting Call Counts
+
+Set appropriate cardinalities to avoid false positives or negatives.
+
+### Overusing Strict Expectations
+
+Use `NiceMock` or `.Times(AnyNumber())` for methods irrelevant to the specific test.
+
+### Using `.RetiresOnSaturation()` Wisely
+
+Use to avoid expectation stickiness when running sequences or multiple different calls.
+
+### Validate `.With()` Usage
+
+`.With()` clause must be first clause and can only appear once per expectation/spec.
+
+---
+
+## 6. Example Workflow
+
+```cpp
+using ::testing::Return;
+using ::testing::_;
+using ::testing::Sequence;
+
+class MockTurtle {
+ public:
+  MOCK_METHOD(void, PenUp, (), ());
+  MOCK_METHOD(int, GetX, (), (const));
+};
+
+TEST(DrawTest, DrawsLine) {
+  MockTurtle turtle;
+
+  // Set default action: GetX() returns 0.
+  ON_CALL(turtle, GetX())
+      .WillByDefault(Return(0));
+
+  // Expect PenUp to be called once.
+  EXPECT_CALL(turtle, PenUp())
+      .Times(1);
+
+  // Expect GetX to be called twice: return 100 then 200.
+  EXPECT_CALL(turtle, GetX())
+      .WillOnce(Return(100))
+      .WillOnce(Return(200));
+
+  // Exercise code under test...
+  turtle.PenUp();
+  int x1 = turtle.GetX();  // 100
+  int x2 = turtle.GetX();  // 200
+
+  // When the test finishes, GoogleMock verifies expectations were met.
+  EXPECT_EQ(x1, 100);
+  EXPECT_EQ(x2, 200);
+}
+```
+
+---
+
+## 7. Troubleshooting
+
+### Expectation Never Satisfied
+
+- Verify matchers match actual arguments.
+- Check that `.Times()` reflects call count correctly.
+
+### Too Many or Too Few Actions Warning
+
+- Check that number of `WillOnce()` actions aligns with `.Times()`.
+- Add `WillRepeatedly()` if calls exceed `WillOnce()` count.
+
+### Unexpected Calls
+
+- Add a catch-all `EXPECT_CALL(mock, Method(_)).Times(AnyNumber())` for unspecified calls.
+- Use `NiceMock` to suppress warnings, or `StrictMock` to treat unexpected calls as errors.
+
+### Calls Out of Order
+
+- Use `InSequence` or `.InSequence()` clauses to enforce order constraints as needed.
+
+### Uninteresting Call Warnings
+
+- Use `ON_CALL()` clauses to set default behaviors.
+- Use `NiceMock` to suppress warnings.
+- Avoid unnecessarily adding `EXPECT_CALL` just to silence warnings.
+
+---
+
+## 8. Summary of Core Concepts
+
+| Concept         | Purpose                                         |
+|-----------------|------------------------------------------------|
+| Matcher         | Determines which calls match the expectation   |
+| Action          | Defines behavior when a call is executed        |
+| Expectation     | Specifies how many times, in what order calls occur |
+
+Together, these form the expressive language of GoogleMock for mocking C++ classes.
+
+---
+
+## References
+
+- [Mocking Reference - Setting Expectations & Call Sequences](../api-reference/mocking-api/expectations-and-sequencing.md)
+- [GoogleMock Cookbook](../guides/real-world-examples/recipes-and-use-cases.md)
+- [gMock Cheat Sheet](../docs/gmock_cheat_sheet.md)
+- [Matchers Reference](../api-reference/mocking-api/matchers-api.md)
+- [Actions Reference](../api-reference/mocking-api/actions-api.md)
+- [Mocking Reference - Matchers and Actions usage](../docs/reference/mocking.md#EXPECT_CALL)
+
+---
+
+<AccordionGroup title="Conceptual Flow of Action, Expectation, and Matchers in GoogleMock">
+<Accordion title="How Does GoogleMock Process a Mock Call?">
+When a mock function is called, GoogleMock:
+
+1. Searches expectations in reverse order (newest first).
+2. For each expectation:
+   - Checks argument matchers + `.With()` clause.
+   - Confirms expectation is active (not retired).
+   - Checks prerequisites are satisfied.
+3. If match is found, selects action:
+   - Next `WillOnce()` if available.
+   - Otherwise, `WillRepeatedly()` if specified.
+   - Warns or errors if the call exceeds anticipation.
+4. If no expectation matches, tries matching `ON_CALL` default action.
+5. If none found, uses built-in default action.
+6. Runs the chosen action and updates call counts and retirements.
+
+</Accordion>
+<Accordion title="Advice on Setting Expectations and Actions">
+- Specify only necessary argument matchers.
+- Set `.Times()` or rely correctly on cardinality inference.
+- Match the number of `WillOnce()` with expected call count.
+- Use `WillRepeatedly()` for repetitive behavior after singular calls.
+- Use sequences or `.After()` to control call order.
+- Use `.RetiresOnSaturation()` to avoid sticky expectations in sequences.
+- Use `ON_CALL()` to establish default behaviors for uninteresting calls.
+- Avoid overly strict mocks to keep tests maintainable.
+</Accordion>
+</AccordionGroup>
