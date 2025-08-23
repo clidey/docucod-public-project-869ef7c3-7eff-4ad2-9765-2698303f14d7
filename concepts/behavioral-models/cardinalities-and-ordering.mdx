@@ -1,0 +1,245 @@
+---
+title: "Cardinalities, Ordering, and Actions"
+description: "Learn how call expectations can be controlled in terms of frequency (cardinality), required order, and custom behaviors. This is essential for accurately describing and validating interactions in complex mocks."
+---
+
+# Cardinalities, Ordering, and Actions
+
+Understanding how to control the behavior and expectations of mock function calls is essential when writing precise and maintainable tests with GoogleMock. This guide covers the fundamental concepts of call frequency (cardinalities), call ordering, and specifying custom behaviors (actions) within your mock objects.
+
+---
+
+## 1. Controlling Call Frequency with Cardinalities
+
+GoogleMock allows you to specify exactly how many times a mocked method should be called through the use of **cardinalities**, expressed via the `.Times()` clause of an `EXPECT_CALL`.
+
+### Core Cardinalities
+
+| Cardinality          | Meaning                                                            |
+|----------------------|--------------------------------------------------------------------|
+| `AnyNumber()`        | The mocked method can be called any number of times (including zero). |
+| `AtLeast(n)`         | The method must be called at least `n` times.                      |
+| `AtMost(n)`          | The method can be called at most `n` times.                        |
+| `Between(m, n)`      | The method must be called between `m` and `n` times (inclusive).  |
+| `Exactly(n)` or `n`  | The method must be called exactly `n` times. If `n` is 0, the method should never be called. |
+
+If you omit `.Times()`, GoogleMock automatically infers the call count based on specified `WillOnce` and `WillRepeatedly` actions:
+
+- No `WillOnce` or `WillRepeatedly`: `.Times(1)` is assumed.
+- `n` `WillOnce` clauses and no `WillRepeatedly`: `.Times(n)` is assumed.
+- `n` `WillOnce` clauses and one `WillRepeatedly`: `.Times(AtLeast(n))` is assumed.
+
+### Practical Examples
+
+```cpp
+using ::testing::AtLeast;
+using ::testing::Exactly;
+using ::testing::AnyNumber;
+using ::testing::Return;
+
+EXPECT_CALL(mock_object, Method())
+    .Times(Exactly(3));  // Method expected exactly 3 times.
+
+EXPECT_CALL(mock_object, Method())
+    .Times(AtLeast(2));  // Called 2 or more times.
+
+EXPECT_CALL(mock_object, Method())
+    .Times(AnyNumber());  // Called any number of times.
+```
+
+### Common Pitfalls
+
+- Setting overly strict cardinalities can lead to fragile tests that fail on harmless implementation changes.
+- If you specify `.Times(0)`, you are explicitly stating the method should never be called with those arguments.
+- Forgetting to specify `.Times()` or mismatching it with your `WillOnce()` and `WillRepeatedly()` calls leads to unexpected behaviors or warnings.
+
+---
+
+## 2. Specifying Expected Call Order
+
+GoogleMock provides powerful options to establish when mock calls should occur relative to one another. This lets you precisely describe the expected partial or total order, preventing subtle interaction bugs.
+
+### 2.1 Using `InSequence` for Strict Ordering
+
+Wrapping multiple expectations inside an `InSequence` object enforces they occur strictly in the order they are declared.
+
+```cpp
+using ::testing::InSequence;
+{
+  InSequence seq;
+
+  EXPECT_CALL(mock1, Reset());
+  EXPECT_CALL(mock2, GetSize());
+  EXPECT_CALL(mock3, Describe());
+}
+```
+
+In this example, `Reset()` must be called before `GetSize()`, which must be called before `Describe()`. Calls out of order cause a test failure.
+
+### 2.2 Using `Sequence` Objects for Partial Ordering
+
+When you want finer control over ordering without fully strict sequences, use one or more `Sequence` objects and assign expectations to them using `.InSequence()`.
+
+```cpp
+using ::testing::Sequence;
+Sequence s1, s2;
+EXPECT_CALL(mock, Reset()).InSequence(s1, s2);
+EXPECT_CALL(mock, GetSize()).InSequence(s1);
+EXPECT_CALL(mock, Describe()).InSequence(s2);
+```
+
+This enforces that `Reset()` happens before both `GetSize()` and `Describe()`, but the relative order of `GetSize()` and `Describe()` is not constrained.
+
+### 2.3 Using `.After()` Clause for DAG Ordering
+
+For complex ordering beyond sequences, `.After()` lets you specify that an expectation should occur after one or more other `Expectation` or `ExpectationSet` objects.
+
+Example:
+
+```cpp
+using ::testing::Expectation;
+Expectation initX = EXPECT_CALL(mock, InitX());
+Expectation initY = EXPECT_CALL(mock, InitY());
+EXPECT_CALL(mock, Describe()).After(initX, initY);
+```
+
+Here, `Describe()` must be called after both `InitX()` and `InitY()`.
+
+### Common Pitfalls
+
+- Declaring `.Times()` after `.InSequence()` is invalid—times must be specified first.
+- Mixing `.InSequence()` and `.After()` incorrectly in expectation chains can lead to compiler or runtime errors.
+- Expectations not properly retired (see `.RetiresOnSaturation()`) can cause unexpected matches; refer to section 3.4.
+
+---
+
+## 3. Specifying Mock Call Behaviors with Actions
+
+Once you have declared when and how calls are expected, control what mock methods do when called using **actions**.
+
+### 3.1 Built-in Actions
+
+- `Return(value)`: returns the specified value.
+- `ReturnRef(variable)`: returns a reference to a variable.
+- `ReturnPointee(pointer)`: returns the value pointed to by a pointer at call time.
+- `DoAll(action1, action2, ..., actionN)`: performs several actions in sequence, returning the last action's result.
+
+### 3.2 Setting Actions in Expectations
+
+Use `WillOnce(action)` to specify behavior for a single call, and `WillRepeatedly(action)` for all subsequent calls after any `WillOnce`s.
+
+Example:
+
+```cpp
+using ::testing::Return;
+EXPECT_CALL(mock_object, GetNumber())
+    .WillOnce(Return(1))
+    .WillOnce(Return(2))
+    .WillRepeatedly(Return(3));
+```
+
+This makes the mock return 1 on the first call, 2 on the second, and 3 thereafter.
+
+### 3.3 Default Actions with `ON_CALL`
+
+`ON_CALL()` sets the default behavior of methods without creating expectations that the method will be called.
+
+```cpp
+ON_CALL(mock_object, GetValue()).WillByDefault(Return(42));
+```
+
+This makes calls to `GetValue()` return 42 unless overridden by `EXPECT_CALL`.
+
+### 3.4 Controlling Expectation Retirement
+
+By default, expectations remain active even when they reach their call limit (sticky behavior). Use `.RetiresOnSaturation()` on an expectation to retire it automatically when saturated, allowing subsequent matching by other expectations.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock_object, Foo(7))
+    .Times(2)
+    .RetiresOnSaturation();
+```
+
+This means after two calls to `Foo(7)`, the expectation will retire, avoiding upper-bound violations if `Foo(7)` is called again.
+
+### Common Recommendations
+
+- Prefer `.RetiresOnSaturation()` when stacked expectations might otherwise cause upper-bound violations.
+- Use `WillOnce()` for one-time behaviors, and `WillRepeatedly()` for default or repeated behaviors.
+- Remember that the order of `EXPECT_CALLs` matters for matching precedence; last matching expectation wins.
+
+---
+
+## 4. Best Practices and Troubleshooting
+
+### Best Practices
+
+- Use `ON_CALL` to define default behaviors for mock methods you don't want to strictly verify.
+- Use `EXPECT_CALL` to assert interactions and specify behaviors for expected calls.
+- Keep your call cardinalities neither too strict nor too loose to balance test robustness and correctness.
+- Use `InSequence` or `Sequence` objects to enforce call order only when necessary, to avoid brittle tests.
+- Apply `.RetiresOnSaturation()` to expectations where repeated calls might occur beyond the number you want to strictly verify.
+
+### Common Pitfalls
+
+- Forgetting to specify `.Times()` or incorrectly inferring it can cause test failures.
+- Expectation conflicts or mismatched call orders cause errors that can be troubleshot by enabling `--gmock_verbose=info`.
+- Unintended overlapping expectations without `.RetiresOnSaturation()` lead to upper-bound violations.
+- Attempting to use `.Times()` or `.With()` clauses out of order triggers errors.
+
+### Troubleshooting Tips
+
+- Enable verbose logging with `--gmock_verbose=info` to trace mock calls and expectations matched.
+- Check for excessive calls that match an expectation's upper bound.
+- Validate partial orders and prerequisites of expectations when using `.After()`.
+
+---
+
+## 5. Summary Diagram: Call Expectation Lifecycle
+
+```mermaid
+flowchart TD
+  A[EXPECT_CALL() Setup] --> B[Specify Matchers]
+  B --> C{Specify Modifiers}
+  C -->|With| D[Multi-Argument Matcher]
+  D --> E[Times(Cardinality)]
+  E --> F{Ordering}
+  F -->|InSequence| G[Assign to Sequence(s)]
+  F -->|After| H[Set Preceding Expectations]
+  F --> I[Actions]
+  I --> J[WillOnce(action) ...]
+  I --> K[WillRepeatedly(action)]
+  I --> L[RetiresOnSaturation]
+
+  J & K & L --> M[Test Execution & Matching]
+
+  M --> N{Call Matches Expectation?}
+  N -->|Yes| O[Perform Action]
+  N -->|No| P[Search other Expectations or Default]
+
+  O --> Q{Call Count < Cardinality?}
+  Q -->|No| R[Fail Test: Too Many Calls]
+  Q -->|Yes| S[Continue]
+
+  P --> T{Uninteresting or Unexpected Call?}
+  T -->|Uninteresting| U[Warning or Based on Mock Strictness]
+  T -->|Unexpected| V[Fatal Failure]
+```
+
+---
+
+## Further Reading and References
+
+- [`EXPECT_CALL` Reference (Mocking)](../api-reference/core-apis/mocking-and-methods.md#EXPECT_CALL)
+- [Actions and Behavior Control](../api-reference/advanced-behaviors/mock-actions.md)
+- [Matchers Reference](../api-reference/advanced-behaviors/argument-matchers.md)
+- [Sequences and Ordering](../api-reference/advanced-behaviors/expectations-verification.md#Ordering)
+- [gMock Cookbook: Using Sequences and Actions](https://google.github.io/googletest/gmock_cook_book.html#Ordering)
+
+---
+
+This page focuses exclusively on how to precisely define when and how a mocked method should be called, and what it should do, enabling you to control interactions in complex test scenarios efficiently and clearly.
+
+---
