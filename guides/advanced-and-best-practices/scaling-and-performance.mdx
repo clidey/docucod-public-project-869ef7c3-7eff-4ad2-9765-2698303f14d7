@@ -1,0 +1,206 @@
+---
+title: "Scaling Test Suites and Optimizing Performance"
+description: "Tactics for maintaining speed and manageability as your test codebase grows. Covers parallelization, selective test execution, test discovery, and writing efficient, focused tests for enterprise-scale C++ projects."
+---
+
+# Scaling Test Suites and Optimizing Performance
+
+## Overview
+
+As your GoogleTest suite grows to cover more code and scenarios, maintaining rapid feedback and manageable test infrastructure requires deliberate strategies. This guide focuses specifically on tactics *within* GoogleTest to enhance performance and scalability of your test suites. You will learn how to leverage **parallelization**, **selective test execution**, **efficient test discovery**, and **focused test writing** techniques to keep your test runs fast and actionable on enterprise-scale C++ projects.
+
+---
+
+## 1. Enhancing Test Suite Speed
+
+### 1.1 Run Tests in Parallel
+
+GoogleTest supports **test sharding** to distribute the execution of tests across multiple machines or cores, thus accelerating overall test completion.
+
+**How it works:**
+
+- Set the environment variables `GTEST_TOTAL_SHARDS` to the number of shards (machines/cores) and `GTEST_SHARD_INDEX` to the index of the current shard (0-based).
+- Each shard runs the same test binary.
+- GoogleTest uses these values to select a unique subset of tests per shard, ensuring full coverage without overlap.
+
+**Example:** To split tests evenly over 4 cores:
+
+```bash
+export GTEST_TOTAL_SHARDS=4
+# On core 0
+export GTEST_SHARD_INDEX=0
+./my_test_binary
+
+# On core 1
+export GTEST_SHARD_INDEX=1
+./my_test_binary
+
+# Repeat for indexes 2 and 3
+```
+
+**Best practices:**
+
+- Ensure tests are **independent** and do not share state that causes inter-test conflicts.
+- If tests are not perfectly balanced in runtime, you may need to partition manually or use custom test filters to balance shard workloads.
+
+### 1.2 Use Test Filtering
+
+GoogleTest provides **test filtering** to run only a subset of tests matching specified patterns. This reduces test runtime dramatically during development and debugging.
+
+- Use the `--gtest_filter` flag or the `GTEST_FILTER` environment variable.
+- Patterns support wildcards `*` (any sequence) and `?` (single character), and can include negative filters prefixed by `-`.
+
+**Example:**
+
+```bash
+./my_test_binary --gtest_filter=MySuite.*  # Run all tests in 'MySuite'
+./my_test_binary --gtest_filter=*Null*:BarTest.*-MySuite.Bar  # Include tests with 'Null' or any in 'BarTest' except 'MySuite.Bar'
+```
+
+**Tip:** Combine filtering with parallelization to shard only the relevant tests.
+
+### 1.3 Repeat and Shuffle Tests
+
+To catch flaky tests and improve reliability:
+
+- Use `--gtest_repeat=N` to run tests multiple times.
+- Combine with `--gtest_shuffle` and `--gtest_random_seed` for random execution order.
+
+Repeated and shuffled tests expose hidden dependencies and improve confidence.
+
+---
+
+## 2. Test Suite Organization for Performance
+
+### 2.1 Share Setup and TearDown Resources
+
+Avoid duplicating expensive setup/teardown for every test by using **per-test-suite setup/teardown**:
+
+- Define static shared resources in your test fixture class.
+- Implement `static void SetUpTestSuite()` and `static void TearDownTestSuite()`.
+
+**Example:**
+
+```cpp
+class DatabaseTest : public ::testing::Test {
+protected:
+  static void SetUpTestSuite() {
+    db_connection_ = new DatabaseConnection("test_db");
+  }
+  static void TearDownTestSuite() {
+    delete db_connection_;
+    db_connection_ = nullptr;
+  }
+  static DatabaseConnection* db_connection_;
+};
+
+DatabaseConnection* DatabaseTest::db_connection_ = nullptr;
+
+TEST_F(DatabaseTest, QueryWorks) {
+  ASSERT_TRUE(db_connection_->Execute("SELECT 1"));
+}
+```
+
+**Note:** Tests must not modify shared resources state or must restore any changes.
+
+### 2.2 Use Test Fixtures Efficiently
+
+- Tests in the same fixture class get isolated instances but share fixture code.
+- Avoid overly large fixtures that slow test construction or teardown.
+- Use `SetUp()` and `TearDown()` for per-test prep, but keep them lean.
+
+### 2.3 Disable or Skip Tests When Appropriate
+
+- Temporarily disable flaky or slow tests using `DISABLED_` prefix.
+- Use `GTEST_SKIP()` inside `SetUp()` or tests to programmatically skip based on runtime conditions.
+
+---
+
+## 3. Writing Efficient Tests
+
+### 3.1 Write Focused, Independent Tests
+
+- Each test should cover one logical unit or scenario.
+- Tests should not depend on ordering or side effects from other tests.
+
+### 3.2 Avoid Excessive Assertions in One Test
+
+- Multiple unrelated failures in one test can be hard to debug.
+- Prefer more, smaller tests over few, large tests.
+
+### 3.3 Use `ASSERT` and `EXPECT` Wisely
+
+- `ASSERT_*` macros abort the test on failure—use when failure makes continuation invalid.
+- `EXPECT_*` macros allow test to continue—use to gather more info during a single test run.
+
+### 3.4 Leverage Test Parameterization
+
+Test the same logic with multiple data inputs using:
+
+- **Value-parameterized tests** (`TEST_P`, `INSTANTIATE_TEST_SUITE_P`)
+- **Typed tests** (`TYPED_TEST`, `TYPED_TEST_SUITE`)
+
+This avoids test duplication and helps manage large test matrices.
+
+---
+
+## 4. Debugging and Troubleshooting Tips
+
+### 4.1 Detecting and Handling Flaky Tests
+
+Run tests repeatedly and shuffled to expose non-deterministic failures.
+
+### 4.2 Understanding Test Failures in Parallel Runs
+
+Keep in mind:
+
+- Failures in one shard do not stop others by default.
+- You may want to enable `--gtest_fail_fast` to halt on first failure.
+
+### 4.3 Common Pitfalls
+
+- Shared mutable state across tests leads to flaky failures.
+- Overly stringent `EXPECT_CALL` in mocks can cause brittle tests.
+
+### 4.4 Best Practices for Mock Usage in Scaled Tests
+
+- Set expectations in a single thread before running multithreaded code.
+- Use thread-safe mocks and synchronization primitives as needed.
+
+---
+
+## 5. Summary Diagram of Test Execution and Scaling
+
+```mermaid
+flowchart TD
+  Start([Start Test Suite Execution]) --> InitFlags["Initialize GoogleTest Flags"]
+  InitFlags --> ParseFilter["Parse --gtest_filter and environment"]
+  ParseFilter --> CheckSharding{"Are Sharding Variables Set?"}
+  CheckSharding -->|Yes| SelectShardTests["Select Tests for Shard"]
+  CheckSharding -->|No| SelectAllTests["Select All Tests"]
+  SelectShardTests --> ScheduleTests["Schedule Tests on Shard"]
+  SelectAllTests --> ScheduleTests
+  ScheduleTests --> ParallelExecution{"Run Tests in Parallel?"}
+  ParallelExecution -->|Yes| RunTestsParallel["Run Tests Concurrently"]
+  ParallelExecution -->|No| RunTestsSequential["Run Tests Sequentially"]
+
+  RunTestsSequential -->[Test Results] CollectResults["Collect Test Results"]
+  RunTestsParallel -->[Test Results] CollectResults
+
+  CollectResults --> GenerateReport["Generate Test Report (XML/JSON/Console)"]
+  GenerateReport --> End([Finish])
+
+  classDef decision fill:#f9f,stroke:#333,stroke-width:2px;
+  class CheckSharding,ParallelExecution decision;
+```
+
+---
+
+## 6. Additional Resources and Next Steps
+
+- Explore the [`--gtest_*` flags](https://github.com/google/googletest/blob/main/docs/advanced.md#running-test-programs-advanced-options) for advanced test control.
+- Learn about [Value- and Type-Parameterized Tests](../guides/core-testing-workflows/parameterized-and-typed-tests.mdx) to scale coverage efficiently.
+- Use [Test Filtering and Sharding](../docs/advanced.md#Distributing-Test-Functions-to-Multiple-Machines) in continuous integration setups.
+- Reference [Using Mocks in Parallel](../guides/core-testing-workflows/using-mocks.mdx#Using-Threads) for thread safety.
+
+By applying these strategies, you will keep your GoogleTest codebase fast, manageable, and reliable at scale.
