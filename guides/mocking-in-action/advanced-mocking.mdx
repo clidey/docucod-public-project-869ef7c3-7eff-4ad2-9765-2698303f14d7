@@ -1,0 +1,241 @@
+---
+title: "Advanced Mocking Techniques"
+description: "A deep dive into powerful mocking features: actions, matchers, NiceMock/NaggyMock/StrictMock wrappers, and composing complex behaviors. This page equips users to handle sophisticated testing scenarios in large or legacy C++ codebases."
+---
+
+# Advanced Mocking Techniques
+
+Explore advanced features in GoogleMock that enable you to create powerful, maintainable, and expressive mock objects. This guide covers sophisticated mocking scenarios, including customizing mock behavior with actions, leveraging matchers for fine-grained argument validation, using the NiceMock, NaggyMock, and StrictMock wrappers to control test output verbosity, and composing complex mock interactions.
+
+---
+
+## 1. Enhancing Mock Behavior with Custom Actions
+
+Actions allow you to define what happens when a mock method is called. Beyond simple return values, actions enable side effects, invoking custom functions, chaining multiple actions, and more.
+
+### Defining and Using Actions
+
+- **Returning values:** Use built-in actions like `Return(value)`, `ReturnRef(variable)`, or return the value pointed to by a pointer with `ReturnPointee(ptr)`.
+- **Side-effects:** Modify output arguments using actions like `SetArgPointee<N>(value)` or delete pointer arguments with `DeleteArg<N>()`.
+- **Chaining:** Combine multiple actions using `DoAll(a1, a2, ..., an)`, which executes each in order, returning the last action’s result.
+- **Using callables:** Pass functions, functors, or lambdas directly as actions via `Invoke()` or `InvokeWithoutArgs()` when parameters are not needed.
+
+#### Example: Mock with Side Effects
+```cpp
+using ::testing::SetArgPointee;
+using ::testing::Return;
+using ::testing::DoAll;
+
+class MockFileOps {
+ public:
+  MOCK_METHOD(bool, Read, (char* buf, int size), (override));
+};
+
+MockFileOps mock_file;
+
+EXPECT_CALL(mock_file, Read).
+  WillOnce(DoAll(SetArgPointee<0>('A'), Return(true)));
+
+char buffer = 0;
+EXPECT_TRUE(mock_file.Read(&buffer, 1));
+EXPECT_EQ(buffer, 'A');
+```
+
+### Best Practices for Actions
+
+- Always ensure that return types in `Return()` and related actions match the mock method’s signature.
+- For move-only types (`std::unique_ptr`), use lambdas in `WillOnce` or `WillRepeatedly` rather than `Return()`.
+- Chain side-effects before returning a value using `DoAll()`.
+- Avoid side effects in matchers (see [Matchers must have no side-effects](#MatchersMustHaveNoSideEffects)).
+
+---
+
+## 2. Leveraging Matchers for Argument Validation
+
+Matchers let you specify constraints on mock method arguments. Use them to verify not only the values but also complex properties of arguments passed during tests.
+
+### Simple and Composite Matchers
+
+- Use standard matchers: `_` (wildcard), `Eq(value)`, `Ge(value)`, `NotNull()`, etc.
+- Combine matchers with `AllOf()`, `AnyOf()`, `Not()`, and others for flexible conditions.
+- Match members of objects using `Field(&Class::member, matcher)` or `Property(&Class::getter, matcher)`.
+
+### Handling Overloaded and Template Methods
+
+Use wrappers like `Const()` to disambiguate const overloads and `SafeMatcherCast<T>(m)` to cast matchers when needed.
+
+```cpp
+using ::testing::Const;
+using ::testing::ReturnRef;
+
+EXPECT_CALL(mock, GetBar())
+    .WillOnce(ReturnRef(non_const_bar));
+EXPECT_CALL(Const(mock), GetBar())
+    .WillOnce(ReturnRef(const_bar));
+```
+
+### Matching Tuple Arguments
+
+Use `.With()` clause to match all arguments as a whole, specifying a matcher on the argument tuple.
+
+```cpp
+EXPECT_CALL(mock, Func(_, _))
+    .With(::testing::Lt());  // First arg less than second arg
+```
+
+### Custom Matchers
+
+Use `MATCHER`, `MATCHER_P`, or implement the matcher class interface for reusable, expressive matchers.
+
+#### Example: Custom Matcher
+```cpp
+MATCHER(IsEven, "checks if an integer is even") {
+  return (arg % 2) == 0;
+}
+
+EXPECT_CALL(mock, Process(IsEven()));
+```
+
+### Matchers Must Have No Side Effects
+
+Matchers must be pure functions, avoiding state changes, calls to mock methods, or unpredictable behaviors to ensure reliability.
+
+---
+
+## 3. Controlling Mock Verbosity with Wrappers
+
+GoogleMock provides wrappers to control how uninteresting calls (mock calls without expectations) are handled.
+
+| Wrapper            | Behavior on Uninteresting Calls          |
+|--------------------|-----------------------------------------|
+| `NaggyMock<T>`     | Emits warnings (default behavior)
+| `NiceMock<T>`      | Suppresses warnings
+| `StrictMock<T>`    | Treats uninteresting calls as errors
+
+### Usage
+
+```cpp
+using ::testing::NiceMock;
+NiceMock<MockFoo> mock_foo;
+EXPECT_CALL(mock_foo, DoSomething());
+```
+
+### Considerations
+
+- Use **nice mocks** for reduced noise in tests where some calls are unimportant.
+- Use **strict mocks** to catch unexpected calls, improving test rigor.
+- `NaggyMock` is the default for mocks not wrapped explicitly.
+- Be aware that `NiceMock` and `StrictMock` only affect mock methods defined directly in the mock class; inherited mock methods may behave differently.
+
+---
+
+## 4. Composing Complex Mock Interactions
+
+When testing sophisticated behavior, you can compose multiple expectations, sequences, and partial orders.
+
+### Sequences
+
+Use `InSequence` to enforce strict call order.
+
+```cpp
+using ::testing::InSequence;
+
+{
+  InSequence s;
+  EXPECT_CALL(mock, FirstCall());
+  EXPECT_CALL(mock, SecondCall());
+}
+// FirstCall() must happen before SecondCall().
+```
+
+### Partial Ordering with `After`
+
+Express partial order constraints among expectations.
+
+```cpp
+using ::testing::Expectation;
+
+Expectation e1 = EXPECT_CALL(mock, Init());
+EXPECT_CALL(mock, Use()).After(e1);
+```
+
+`Use()` cannot happen before `Init()`.
+
+### Multiple Expectations on Same Method
+
+More specific expectations should be placed after general ones due to the "newer overrides older" rule.
+
+```cpp
+EXPECT_CALL(mock, DoWork(_)).Times(AnyNumber());  // General catch-all
+EXPECT_CALL(mock, DoWork(42)).Times(1);           // More specific
+```
+
+### Retiring Expectations
+
+Use `.RetiresOnSaturation()` to have expectations automatically retire after their call limit is reached, enabling flexible matching sequences.
+
+```cpp
+EXPECT_CALL(mock, Process(1))
+    .WillOnce(Return(true))
+    .RetiresOnSaturation();
+EXPECT_CALL(mock, Process(_))
+    .WillRepeatedly(Return(false));
+```
+
+---
+
+## 5. Practical Tips and Common Pitfalls
+
+- **Set expectations before exercising mocks.** Calling mock methods prior to `EXPECT_CALL` leads to undefined behavior.
+- **Use `ON_CALL` to specify default behaviors** without enforcing call count.
+- **Beware of over-specification:** overly strict expectations cause brittle tests.
+- **Matchers must be stateless:** avoid using matchers that depend on mutable or external state.
+- **Slow compilation:** define mock class constructors/destructors in `.cc` files to speed up build times.
+
+---
+
+## 6. Troubleshooting
+
+### Why am I getting warnings about uninteresting calls?
+
+By default, calls to mock methods without expectations cause warnings. Use `NiceMock` to suppress or add catch-all `EXPECT_CALL(mock, Method(_)).Times(AnyNumber())` where calls are expected but not specifically checked.
+
+### Mock method calls invoke real method?
+
+Ensure the method is declared `virtual`. Non-virtual methods cannot be mocked unless using advanced techniques.
+
+### Compile errors due to commas in types?
+
+Wrap return or argument types containing commas with parentheses or typedef aliases.
+
+Example:
+```cpp
+MOCK_METHOD((std::pair<int, int>), GetPair, ());
+using IntIntPair = std::pair<int, int>;
+MOCK_METHOD(IntIntPair, GetPair, ());
+```
+
+### Unexpected calls fail the test
+
+An unexpected call means `EXPECT_CALL` was declared but no matching call occurred or an unmatched call happened. Adjust expectations or use `NiceMock` or `NaggyMock` as needed.
+
+---
+
+## 7. Next Steps
+
+- Review [Defining and Using Mock Classes](./defining-mocks) for creating your mock classes.
+- Study [Setting Expectations and Verifying Interactions](./setting-expectations) to master expectation syntax and usage.
+- Consult the [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) for practical recipes.
+- Explore the [Matchers Reference](../reference/matchers.md) and [Actions Reference](../reference/actions.md) for detailed options.
+
+---
+
+## References
+
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html)
+- [Mocking Reference](../reference/mocking.md)
+- [Actions Reference](../reference/actions.md)
+- [Matchers Reference](../reference/matchers.md)
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html)
+
+---
