@@ -1,0 +1,236 @@
+---
+title: "How do I mock complex or templated objects effectively?"
+description: "Addresses user confusion around advanced mocking scenarios, such as templated classes, polymorphic actions, and special matchers. Offers guidance for overcoming known limitations and anti-patterns."
+---
+
+# How do I mock complex or templated objects effectively?
+
+Mocking complex or templated objects in GoogleMock can initially feel daunting due to C++ language intricacies and advanced test design needs. This guide addresses common user challenges and provides practical advice for overcoming known limitations, designing maintainable mocks, and leveraging polymorphic matchers and actions effectively.
+
+---
+
+## Mocking Templated Classes
+
+Templated classes are common in C++ and can be mocked similarly to normal classes by defining mock methods using the `MOCK_METHOD` macro within mock class templates.
+
+### Basics
+
+Define the mock class as a template and mock virtual methods as usual:
+
+```cpp
+template <typename T>
+class MockStack : public StackInterface<T> {
+ public:
+  MOCK_METHOD(int, GetSize, (), (const, override));
+  MOCK_METHOD(void, Push, (const T& x), (override));
+};
+```
+
+Remember:
+
+- Mock all *virtual* methods including virtual destructors.
+- Use the `(override)` specifier for overridden virtual methods.
+- Place `MOCK_METHOD` declarations in the `public:` section to enable external access to mock functions.
+
+### Handling Overloaded Methods in Templates
+
+If your templated class has overloaded methods, mock each overload explicitly:
+
+```cpp
+MOCK_METHOD(int, Add, (const T& elem), (override));
+MOCK_METHOD(int, Add, (int times, const T& elem), (override));
+```
+
+Use `using Base::MethodName;` to bring in unmocked overloads if necessary to avoid hiding them.
+
+### Practical Tips
+
+- Aliasing complex types helps reduce macro parsing errors due to commas, e.g., `using PairType = std::pair<int, int>;`
+- If mock methods have reference or `const` qualifiers, mirror them in the mocks.
+- To speed compile time, define constructor and destructor implementations separately from the class definition.
+
+---
+
+## Polymorphic Matchers and Actions
+
+GoogleMock provides polymorphic matchers and actions that adapt automatically to varying argument and return types. Users often seek guidance to leverage these for complex mocking.
+
+### Writing New Polymorphic Matchers
+
+A polymorphic matcher can be used across multiple types. Implement it by writing a class template with a templated `MatchAndExplain` method, for example:
+
+```cpp
+class NotNullMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  template <typename T>
+  bool MatchAndExplain(T* p, std::ostream*) const {
+    return p != nullptr;
+  }
+
+  void DescribeTo(std::ostream* os) const { *os << "is not NULL"; }
+  void DescribeNegationTo(std::ostream* os) const { *os << "is NULL"; }
+};
+
+PolymorphicMatcher<NotNullMatcher> NotNull() {
+  return MakePolymorphicMatcher(NotNullMatcher());
+}
+```
+
+### Using Polymorphic Actions
+
+To define actions valid for multiple mock function signatures:
+
+```cpp
+class ReturnSecondArgumentAction {
+ public:
+  template <typename R, typename Tuple>
+  R Perform(const Tuple& args) const {
+    return std::get<1>(args);
+  }
+};
+
+PolymorphicAction<ReturnSecondArgumentAction> ReturnSecondArgument() {
+  return MakePolymorphicAction(ReturnSecondArgumentAction());
+}
+```
+
+This allows usage in different mock functions regardless of their signature.
+
+---
+
+## Common Challenges & Anti-Patterns
+
+### Over-Specifying Expectations
+
+Excessively strict expectations on arguments and call counts lead to brittle tests. Use:
+
+- Wildcard matcher `_` when argument details do not matter.
+- `ON_CALL` to set default behaviors versus `EXPECT_CALL` for assertions on call occurrence.
+
+### Not Mocking the Entire Overload Set
+
+If a base class method is overloaded, failing to mock all versions will lead to warnings or hidden base methods errors. Use `using` declarations to bring in missing overloads explicitly.
+
+### Mocking Non-Virtual Methods
+
+gMock cannot mock non-virtual methods directly. Workarounds include:
+
+- Using templates and mock classes unrelated but matching signatures.
+- Injecting dependencies via interfaces or std::function and mocking them.
+
+---
+
+## Effective Techniques for Complex Mocks
+
+### Delegating to Fakes or Real Objects
+
+To combine mock verification with actual implementation behavior:
+
+- Have the mock call a real or fake implementation in default actions using `ON_CALL(...).WillByDefault(...)`.
+
+Example:
+
+```cpp
+ON_CALL(mock, Method).WillByDefault([this](Args... args) {
+  return real_.Method(args...);
+});
+```
+
+### Dealing with Move-Only Types
+
+MOCK_METHOD supports methods with move-only parameters or return types; use lambdas or functors in actions to return fresh objects. Avoid repeating `Return(std::move(...))` as they can only be invoked once.
+
+### Controlling Mock Strictness
+
+Use `NiceMock`, `NaggyMock`, or `StrictMock` wrappers to control behavior on uninteresting calls:
+
+- `NiceMock`: suppresses warnings.
+- `NaggyMock`: prints warnings (default).
+- `StrictMock`: treats warnings as test failures.
+
+Use these wrappers as inheritance:
+
+```cpp
+NiceMock<MockClass> nice_mock;
+StrictMock<MockClass> strict_mock;
+```
+
+### Verifying and Clearing Mocks Early
+
+You can proactively check that expectations have been met before mock destruction via:
+
+```cpp
+Mock::VerifyAndClearExpectations(&mock_obj);
+```
+
+Remember not to add new expectations after call to verify and clear as behavior is undefined.
+
+---
+
+## Advanced Mock Class Patterns
+
+### Customizing Mock Methods to Simplify Usage
+
+You can re-implement complex methods with long argument lists by forwarding to simpler mock methods:
+
+```cpp
+void ComplexMethod(int a, double b, const char* c) override {
+  SimpleMockMethod(a, b);
+}
+MOCK_METHOD(void, SimpleMockMethod, (int, double), (override));
+```
+
+This makes your tests easier to write and maintain.
+
+### Using `MockFunction` for std::function
+
+Mocking callbacks using `MockFunction` simplifies expectations on function objects.
+
+```cpp
+MockFunction<int(std::string)> mock_callback;
+EXPECT_CALL(mock_callback, Call("check"))
+    .WillOnce(Return(1));
+```
+
+You can use `mock_callback.AsStdFunction()` to get a usable std::function proxy.
+
+---
+
+## Summary
+
+Mastering complex and templated mocks requires:
+
+- Defining mock classes carefully with proper macro usage.
+- Understanding and using polymorphic matchers and actions for flexibility.
+- Avoiding over-specification and embracing default behaviors via `ON_CALL`.
+- Delegating calls to fakes, real objects, or parent methods when appropriate.
+- Controlling mocking strictness for desirable test behavior using wrappers.
+
+Explore the [Mocking Reference](../reference/mocking.md), [gMock Cookbook](../guides/mocking-best-practices/gmock_cook_book.md), and [gMock Cheat Sheet](../docs/gmock_cheat_sheet.md) for detailed recipes, examples, and further guidance.
+
+---
+
+## Related Documentation
+
+- **Defining and Using Mock Methods:** [Mocking Reference](../api-reference/gmock-api/mock-methods.md)
+- **Expectation Setting and Verification:** [EXPECT_CALL and ON_CALL](../api-reference/gmock-api/expectations-api.md)
+- **Actions and Cardinalities:** [Controlling Mock Behavior](../api-reference/gmock-api/actions-and-cardinalities.md)
+- **Strict, Nice, and Naggy Mocking Modes:** [Strictness and Mock Behavior](../api-reference/gmock-api/strictness-and-mock-behavior.md)
+- **gMock Cookbook:** Practical recipes & tips [gMock Cookbook](../docs/gmock_cook_book.md)
+
+---
+
+## Practical Tips
+
+- Use type aliases when argument or return types contain commas to avoid parsing issues in macros.
+- When mocking const overloaded methods, use `Const()` wrapper for disambiguation.
+- Always put mock methods in the `public:` section regardless of their original access specifier.
+- Use `RetiresOnSaturation()` to have expectations retire when their call count is met.
+- Enable `--gmock_verbose=info` to troubleshoot complex expectation failures.
+- Avoid nesting `NiceMock` or `StrictMock` wrappers.
+
+<Tip>
+Proper planning and understanding of mocking scopes, along with clear expectations and default actions, ensure maintainable and robust tests.
+</Tip>
