@@ -1,0 +1,215 @@
+---
+title: "Test Organization and Integration Scenarios"
+description: "Best practices for structuring large test suites, managing shared test data/fixtures, and integrating GoogleTest/Mock with build and CI systems. Highlights ways to organize code for collaboration and maintainability."
+---
+
+# Test Organization and Integration Scenarios
+
+## Overview
+
+This guide helps you structure large test suites effectively, manage shared test data and fixtures, and integrate GoogleTest and GoogleMock into your build and CI systems. It focuses on organizing test code for better scalability, collaboration, and maintainability.
+
+By following these best practices, you will enable smooth teamwork, improve performance, and ensure your test suite remains manageable as it grows.
+
+---
+
+## 1. Structuring Large Test Suites
+
+### Why Structure Matters
+
+As your tests multiply, maintaining readability and avoiding duplication becomes critical. Proper organization helps new team members onboard faster and prevents fragile tests.
+
+### Recommended Practices
+
+- **Group Related Tests into Test Suites:** Use meaningful, consistent test suite names that reflect the component or feature under test.
+
+- **Use Test Fixtures for Shared Setup:** When multiple tests need the same objects or environment, define a `testing::Test`-derived fixture class to encapsulate this setup.
+
+- **Leverage Per-Test and Per-TestSuite SetUp/TearDown:**
+  - Use `SetUp()` and `TearDown()` methods for per-test preparation and cleanup.
+  - Use static `SetUpTestSuite()` and `TearDownTestSuite()` methods to manage expensive resources shared among tests within a suite.
+
+- **Avoid Cross-Test Dependencies:** Each test should be independent to prevent cascading failures and ensure repeatability.
+
+### Practical Example: Shared State with Static Fixtures
+```cpp
+class DatabaseTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    // Initialize shared resource
+    db_connection_ = new DatabaseConnection("test-db");
+  }
+
+  static void TearDownTestSuite() {
+    delete db_connection_;
+    db_connection_ = nullptr;
+  }
+
+  void SetUp() override {
+    // Prepare test-specific data
+    transaction_ = db_connection_->BeginTransaction();
+  }
+
+  void TearDown() override {
+    db_connection_->Rollback(transaction_);
+  }
+
+  static DatabaseConnection* db_connection_;
+  TransactionHandle transaction_;
+};
+
+DatabaseConnection* DatabaseTest::db_connection_ = nullptr;
+
+TEST_F(DatabaseTest, InsertRecord) {
+  EXPECT_TRUE(db_connection_->Insert(transaction_, "record1"));
+}
+```
+
+
+## 2. Managing Shared Test Data and Fixtures
+
+### Use Shared Fixtures Cautiously
+
+- Shared test data can speed up tests but must be immutable or properly reset between tests to avoid side-effects.
+
+- Use the test fixture to encapsulate shared resources and clean up carefully.
+
+### Sharing Data Across Test Suites or Files
+
+- Use global test environments (`testing::Environment`) for setup/teardown actions that span multiple test suites or the whole test program.
+
+- Register global environments early in your `main()` function or before calling `RUN_ALL_TESTS()`.
+
+```cpp
+class GlobalEnv : public testing::Environment {
+ public:
+  void SetUp() override {
+    // Initialize global resources
+  }
+  void TearDown() override {
+    // Cleanup
+  }
+};
+
+int main(int argc, char** argv) {
+  testing::InitGoogleTest(&argc, argv);
+  testing::AddGlobalTestEnvironment(new GlobalEnv);
+  return RUN_ALL_TESTS();
+}
+```
+
+### Best Practices
+
+- Avoid unnecessary sharing to keep tests independent.
+- Use `SCOPED_TRACE` to add contextual information to shared steps for easier debugging.
+- For parameterized or typed tests, encapsulate test data within the fixture to maximize reusability.
+
+
+## 3. Integrating GoogleTest and GoogleMock with Build and CI Systems
+
+### Build System Integration
+
+- **Use existing GoogleTest cmake support or Bazel rules:** If you use CMake, leverage `FetchContent` or `add_subdirectory` for GoogleTest as part of your build. For Bazel, use pre-existing GoogleTest/Bazel rules.
+
+- **Link against `gtest_main` when possible:** This provides a default `main()` and simplifies test executables.
+
+- **Custom main() options:** Implement your own `main()` to initialize GoogleTest using `testing::InitGoogleTest(&argc, argv)` if you need global environment setup or additional hooks.
+
+Example `main()` integration snippet:
+
+```cpp
+int main(int argc, char** argv) {
+  testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
+}
+```
+
+### Continuous Integration (CI) Considerations
+
+- **Run tests automatically as part of CI pipelines** to catch regressions early.
+
+- **Use GoogleTest output flags:** Generate XML or JSON test reports (`--gtest_output=xml:report.xml`) for easy integration with CI dashboards and runners.
+
+- **Control parallelism:** GoogleTest supports sharding via environment variables `GTEST_TOTAL_SHARDS` and `GTEST_SHARD_INDEX` to distribute tests across multiple agents.
+
+- **Filter tests** with `--gtest_filter` to run subsets of tests faster during development or CI debugging.
+
+- **Use `--gtest_repeat` and `--gtest_break_on_failure` for flaky test diagnosis.**
+
+### Managing Mock Expectations in CI
+
+- Strict mocks help catch unintended calls, but can increase brittleness. Use them judiciously.
+
+- Suppress uninteresting call warnings during CI runs with `NiceMock` unless diagnostics are required.
+
+
+## 4. Collaborative Code Organization for Maintainability
+
+- **Consistent Naming Conventions:** Use clear, descriptive test suite and case names to improve discoverability.
+
+- **Modularize Test Code:** Group test utilities, mocks, and fixtures logically in separate files or directories.
+
+- **Document Mocks and Shared Utilities:** Provide inline comments and/or markdown documentation about mock behavior and shared fixtures.
+
+- **Use Testing Policies:** Define and document when to use strict vs nice mocks, global setups, and when shared resources are allowed.
+
+- **Automate Test Suite Validation:** Use tools or CI jobs to enforce test suite organization and naming conventions.
+
+
+## 5. Troubleshooting & Tips
+
+<AccordionGroup title="Common Issues and Solutions">
+<Accordion title="Tests Running Too Slowly">
+Slow tests often result from repeated expensive setups or large shared states.
+
+**Solution:**
+- Use `SetUpTestSuite()` and `TearDownTestSuite()` to share expensive resources.
+- Ensure proper cleanup in `TearDown()` to avoid memory leaks.
+- Avoid global mutable state.
+</Accordion>
+<Accordion title="Tests Are Interdependent and Fail When Run in Isolation">
+This often happens due to shared mutable state or improper teardown.
+
+**Solution:**
+- Verify independence by running tests individually.
+- Refactor to isolate test setups.
+- Use fixtures and global environment correctly.
+</Accordion>
+<Accordion title="Mock Warnings for Uninteresting Calls">
+You may see warnings about uninteresting calls when mocks receive unexpected calls.
+
+**Tip:**
+- Use `NiceMock` to silence these warnings when calls are expected but unimportant.
+- Add catch-all `EXPECT_CALL(mock, Method(_)).Times(AnyNumber());` for explicitly allowed calls.
+</Accordion>
+<Accordion title="Issues Integrating with Build/CI Systems">
+Common integration issues include missing dependencies or misconfigured initialization.
+
+**Tips:**
+- Always call `testing::InitGoogleTest(&argc, argv);` before running tests.
+- Use supported versions of CMake or Bazel.
+- Check environment variables and flags in your CI jobs.
+</Accordion>
+</AccordionGroup>
+
+
+## 6. Additional Resources & Next Steps
+
+- **Deep Dive into GoogleMock:** Explore the [Mocking Patterns](../mocking-patterns/defining-using-mocks) and [Setting Expectations](../mocking-patterns/setting-expectations-actions).
+
+- **Advanced GoogleTest Topics:** Learn more about [Typed Tests](../advanced.md#typed-tests), [Parameterizing Tests](../advanced.md#value-parameterized-tests).
+
+- **Integration Guides:** Review [Integration & Extensibility](../architecture-concepts/integration-overview) and [Build, CI, and Tooling Patterns](../scalability-performance-integration/integration-patterns).
+
+- **Performance Optimization:** Check [Performance Optimization and Troubleshooting](../advanced-usage/performance-optimize).
+
+
+---
+
+## Summary
+
+This guide equips you to organize large GoogleTest suites, manage shared fixtures and test data effectively, and seamlessly integrate GoogleTest and GoogleMock within your project's build and CI systems for scalability and maintainability.
+
+Proper fixture usage, test independence, and strategic CI integration are central themes. By following these practices, you ensure robust, efficient, and collaborative testing workflows.
+
+---

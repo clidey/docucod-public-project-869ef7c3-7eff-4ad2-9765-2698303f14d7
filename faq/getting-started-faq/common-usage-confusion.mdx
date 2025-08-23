@@ -1,0 +1,349 @@
+---
+title: "What are the most common mistakes or misconceptions?"
+description: "Covers frequent points of confusion such as test discovery, test registration, difference between assertions, and understanding mock behaviors. Provides clarifications and practical examples to demystify foundational concepts."
+---
+
+# What are the most common mistakes or misconceptions?
+
+This FAQ page addresses frequent points of confusion encountered by users working with GoogleMock, focusing on common pitfalls and misunderstandings related to test discovery, test registration, assertion differences, and mock behaviors. It provides clear explanations and practical examples to help you avoid these mistakes and write effective and maintainable tests.
+
+---
+
+## 1. Confusing `ON_CALL` with `EXPECT_CALL`
+
+### Mistake:
+Users often incorrectly use `EXPECT_CALL` when they only want to specify the behavior of a mock method without requiring that it be called.
+
+### Clarification:
+- `ON_CALL` defines *default behavior* for a mock method. It does *not* expect the method to be called.
+- `EXPECT_CALL` sets both the behavior *and* an *expectation* that the method *will* be called matching specified arguments.
+
+### Practical Advice:
+Use `ON_CALL` by default to specify mock behaviors shared across tests and reserve `EXPECT_CALL` for verifying that calls actually occur.
+
+```cpp
+// Correct use of ON_CALL for default behavior
+ON_CALL(mock_obj, Foo(_)).WillByDefault(Return(42));
+
+// Use EXPECT_CALL when you expect a call
+EXPECT_CALL(mock_obj, Foo(5)).WillOnce(Return(10));
+```
+
+Avoid using `EXPECT_CALL` unnecessarily as it adds extra constraints and can make tests brittle.
+
+---
+
+## 2. Misunderstanding Uninteresting vs Unexpected Calls
+
+### Mistake:
+Confusing why unmocked calls generate warnings (uninteresting calls) and when calls cause test failures (unexpected calls).
+
+### Clarification:
+- **Uninteresting Call**: A method is called on a mock object with *no* `EXPECT_CALL` set. This is allowed, but gMock issues a warning unless suppressed.
+- **Unexpected Call**: A method is called but has `EXPECT_CALL`s defined on the mock object that do not match this call's arguments. Always an error.
+
+### Recommendation:
+- Use `NiceMock` to suppress uninteresting call warnings if you don't care about certain calls.
+- Use catch-all `EXPECT_CALL(mock, Method(_)).Times(AnyNumber())` to allow calls beyond those explicitly verified.
+
+```cpp
+NiceMock<MockFoo> nice_mock;  // No warnings for uninteresting calls
+
+EXPECT_CALL(mock_obj, GetData(_)).Times(AnyNumber());  // Accepts any GetData() calls
+```
+
+---
+
+## 3. Incorrect Use of `MOCK_METHOD` Macro Arguments
+
+### Mistake:
+Passing arguments with unprotected commas directly to `MOCK_METHOD` without parentheses, causing compilation errors.
+
+### Explanation:
+`MOCK_METHOD` parses argument types literally. Unshielded commas confuse the macro.
+
+### Solutions:
+- Wrap complex argument types with parentheses.
+- Use `using` to create type aliases and mock with these aliases.
+
+```cpp
+class MyMock {
+ public:
+  MOCK_METHOD((std::pair<bool, int>), GetPair, ());  // Parentheses around return type
+  MOCK_METHOD(bool, CheckMap, ((std::map<int, double>), bool));  // Parentheses around argument type
+
+  // Or use type aliases:
+  using BoolAndInt = std::pair<bool, int>;
+  MOCK_METHOD(BoolAndInt, GetPair, ());
+  using MapIntDouble = std::map<int, double>;
+  MOCK_METHOD(bool, CheckMap, (MapIntDouble, bool));
+};
+```
+
+---
+
+## 4. Forgetting That Mock Methods Must be Declared in `public:` Section
+
+### Mistake:
+Defining mock methods (`MOCK_METHOD`) in `protected` or `private` sections of the mock class.
+
+### Explanation:
+`MOCK_METHOD` methods must always be in the `public:` section, regardless of original method visibility, so test code can access them for setting expectations and modifying behaviors.
+
+### Example:
+
+```cpp
+class Base {
+ protected:
+  virtual void Resume();
+
+ private:
+  virtual int Timeout();
+};
+
+class MockBase : public Base {
+ public:
+  MOCK_METHOD(void, Resume, (), (override));  // Must be public!
+  MOCK_METHOD(int, Timeout, (), (override)); // Must be public!
+};
+```
+
+---
+
+## 5. Over-specifying Expectations Leading to Brittle Tests
+
+### Mistake:
+Using `EXPECT_CALL` excessively on all mock methods or arguments, causing tests to break with unrelated implementation changes.
+
+### Explanation:
+Tests should verify *only* the contract, not internal implementation details beyond necessity.
+
+### Best Practice:
+- Use `ON_CALL` for general behavior.
+- Use `EXPECT_CALL` *only* for interactions central to the test's intent.
+- Use argument matchers (`_`, `AnyOf()`, `AllOf()`, etc.) to focus expectations on relevant arguments.
+
+```cpp
+// Instead of this over-specification:
+EXPECT_CALL(mock_obj, Foo(42, "abc", true))...
+
+// Consider this focused check:
+EXPECT_CALL(mock_obj, Foo(42, _, _))...
+
+ON_CALL(mock_obj, Foo(_, _, _)).WillByDefault(Return(...));
+```
+
+---
+
+## 6. Confusion About EXPECT_CALL Behavior with Multiple Calls
+
+### Mistake:
+Assuming multiple `EXPECT_CALL` on the same method will combine or accumulate without ordering or retirement, leading to errors like "called more times than expected".
+
+### Explanation:
+- The latest matching `EXPECT_CALL` takes precedence for matching calls.
+- Expectations are **sticky** by default and *do not retire* automatically on saturation, unless `.RetiresOnSaturation()` is specified.
+
+### Solutions:
+- Use sequences (`InSequence`) to enforce call order.
+- Use `.RetiresOnSaturation()` to make expectations inactive after their limits.
+
+```cpp
+{
+  InSequence seq;
+  EXPECT_CALL(mock, Foo()).WillOnce(Return(1)).RetiresOnSaturation();
+  EXPECT_CALL(mock, Foo()).WillOnce(Return(2)).RetiresOnSaturation();
+}
+```
+
+---
+
+## 7. Misunderstanding the Default Cardinality and Action Inference
+
+### Mistake:
+Expecting all `EXPECT_CALL`s without explicit `.Times()` to be called any number of times or to have fully covering actions.
+
+### Explanation:
+- If no `.Times()` and no `WillOnce` or `WillRepeatedly` are specified, gMock assumes exactly 1 call.
+- If multiple `WillOnce()` clauses are present but no `.Times()`, cardinality is inferred from the count of `WillOnce`s.
+- If `WillRepeatedly()` is present, cardinality is inferred as at least the count of `WillOnce`s.
+
+### Recommendation:
+Always explicitly specify `.Times()` or ensure your `WillOnce`/`WillRepeatedly` clauses fully cover your intent.
+
+```cpp
+EXPECT_CALL(mock, Foo()).WillOnce(Return(1));  // Expect exactly 1 call
+EXPECT_CALL(mock, Foo()).Times(AnyNumber()).WillRepeatedly(Return(0));  // Any calls
+```
+
+---
+
+## 8. Mixing NiceMock, NaggyMock, and StrictMock Incorrectly
+
+### Mistake:
+Nested wrapping of mock classes using `NiceMock<StrictMock<MockClass>>` or mixing strictness modifiers.
+
+### Explanation:
+- `NiceMock`, `NaggyMock`, and `StrictMock` are mutually exclusive modifiers.
+- Nesting them is **not supported** and can cause unpredictable behavior.
+
+### Recommendation:
+Apply only one strictness modifier and prefer:
+
+- `NiceMock` to suppress uninteresting call warnings
+- `NaggyMock` (default) to get warnings
+- `StrictMock` to treat uninteresting calls as failures
+
+```cpp
+NiceMock<MyMock> mock;
+// Not NiceMock<StrictMock<MyMock>>
+```
+
+---
+
+## 9. Dealing with Mock Destructors
+
+### Common Misconception:
+That destructors can be mocked directly using `MOCK_METHOD`, which fails.
+
+### Correct Approach:
+- Add a mock method (e.g., `Die()`) that you call explicitly in the destructor.
+- Expect and verify calls to this method to monitor destruction timing.
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(void, Die, ());
+  ~MockFoo() override { Die(); }
+};
+```
+
+---
+
+## 10. Not Verifying Mocks Explicitly When They May Not Be Destroyed
+
+### Mistake:
+Assuming mock expectations will always be verified automatically, even if mocks live beyond test scope or are leaked.
+
+### Advice:
+Use `Mock::VerifyAndClearExpectations(&mock_obj)` to force verification before destruction or when managing their lifetime manually.
+
+```cpp
+MockFoo* foo = new MockFoo;
+EXPECT_CALL(*foo, Foo());
+foo->Foo();
+Mock::VerifyAndClearExpectations(foo);  // Force verification
+```
+
+---
+
+## 11. Common Pitfalls with Overloaded Methods
+
+### Mistake:
+Not disambiguating overloaded mock methods when setting expectations or default actions, leading to compilation errors or unexpected behavior.
+
+### Solution:
+Use `Const()` to disambiguate const vs non-const overloads and explicit matcher type casts or wrappers like `TypedEq<type>` to resolve overloads.
+
+```cpp
+EXPECT_CALL(mock, GetBar())             // non-const
+EXPECT_CALL(Const(mock), GetBar())      // const
+EXPECT_CALL(mock, Print(An<int>()));   // casts matcher to int
+```
+
+---
+
+## 12. Ignoring Default Values vs Specifying Actions
+
+### Mistake:
+Trying to return live values (like updated variables) by value using `Return(std::ref(x))`, which only returns the value at expectation setup time.
+
+### Correct Practice:
+Use `ReturnPointee(&x)` to return the current value pointed by a pointer when the mock method is invoked.
+
+```cpp
+int x = 5;
+EXPECT_CALL(mock, GetValue()).WillRepeatedly(ReturnPointee(&x));
+x = 10;
+EXPECT_EQ(mock.GetValue(), 10);  // Works correctly
+```
+
+---
+
+## 13. Testing Asynchronous Code
+
+### Challenge:
+Testing async code leads to non-deterministic test runs.
+
+### Recommended Practice:
+Use `Notification` objects or similar synchronization to wait for async calls triggered through mocks.
+
+```cpp
+EXPECT_CALL(mock_dispatcher, DispatchEvent(event_id))
+    .WillOnce([&notif] { notif.Notify(); });
+queue.EnqueueEvent(event_id);
+notif.WaitForNotification();
+```
+
+---
+
+## 14. Avoid Over-Verification With Verbosity Controls
+
+If tests print excessive warnings or logs about mock function calls, control output verbosity with the `--gmock_verbose=` flag:
+- `info`: Most verbose (includes all call logs and warnings)
+- `warning`: Default level
+- `error`: Errors only
+
+Inside test code:
+
+```cpp
+::testing::FLAGS_gmock_verbose = "error";
+```
+
+---
+
+## 15. Key Tips for Using Mocks Effectively
+
+- Always set expectations before triggering mock calls.
+- Use argument matchers (`_`, `Eq()`, `AnyOf()`) to keep tests expressive and resilient.
+- Avoid mocking non-virtual methods unless using specialized patterns.
+- Prefer coding to interfaces; mock interfaces, not concrete implementations.
+- Use `NiceMock` to suppress warnings when uninteresting calls are acceptable.
+- Use `StrictMock` when any uninteresting call should fail the test.
+
+---
+
+## Troubleshooting Section
+
+### Common Issue: "Uninteresting mock function call encountered"
+
+- This message means a method without an `EXPECT_CALL` was called.
+- Don't panic; it's informative.
+- To suppress, either use `NiceMock` or add `EXPECT_CALL(...).Times(AnyNumber())`.
+
+### Common Issue: Unexpected Calls
+
+- A call that doesn't match any `EXPECT_CALL` is an error.
+- Diagnose using `--gmock_verbose=info` to view call traces and expectation matching.
+
+### Compilation Errors with Mocked Method When Using Commas
+
+- Parenthesize argument types containing commas or use typedef aliases.
+
+### Errors with Overloaded Methods
+
+- Use `Const()` for const overloads and explicit matcher casts for ambiguous overloads.
+
+---
+
+## Related Reading and Resources
+
+- [Mocking Reference](/api-reference/mocking-api/mocking-classes-methods)
+- [gMock Cookbook](https://github.com/google/googletest/blob/main/docs/gmock_cook_book.md)
+- [EXPECT_CALL Macro](/api-reference/mocking-api/mock-behavior-control)
+- [Understanding NiceMock, NaggyMock, StrictMock](/guides/mocking-patterns/mock-strictness-lifecycle)
+- [Core Concepts and Terminology](/overview/architecture-concepts/core-terminology)
+
+---
+
+This overview should prepare you to avoid the most frequent stumbling blocks and unlock GoogleMock's full potential in your testing suite.
