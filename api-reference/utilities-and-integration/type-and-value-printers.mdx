@@ -1,0 +1,291 @@
+---
+title: "Type and Value Printers"
+description: "Documents APIs for customizing value representations in test output, including PrintTo routines for user-defined types and printer integration for containers, pointers, and tuples."
+---
+
+# Type and Value Printers
+
+Customizing the representation of values in your test output is essential for clear diagnostic messages and effective debugging. GoogleTest offers a robust API surface to control how values of various types are printed when assertions fail or when values need inspection. This page documents the mechanisms for teaching GoogleTest to print user-defined types via `PrintTo()` functions and how it handles printing containers, pointers, tuples, and other special types.
+
+---
+
+## 1. Overview of Value Printing Customization
+
+GoogleTest provides a universal value printer that attempts to render any value of a given type `T` to an output stream for test output and failure messages. The key design goal is to automatically produce the most readable and informative representation for standard and user-defined types alike.
+
+- The default printer tries to print types using the first available method from the following:
+  1. User-defined `PrintTo(const T&, std::ostream*)` function.
+  2. Overloaded `operator<<(std::ostream&, const T&)`.
+  3. Specialized container printers that iterate and print elements.
+  4. Printing raw bytes for unprintable or incomplete types.
+
+- For pointer types, GoogleTest prints pointer values and attempts to print pointed-to values if possible.
+
+- Containers are printed element-wise with `{}` braces and commas.
+
+- Tuples and pairs have special formatting for clarity.
+
+This flexibility lets users extend printing easily and improves test comprehension.
+
+---
+
+## 2. Using PrintTo and Overloaded Streaming Operators
+
+The core user customization points are:
+
+### 2.1 Defining `PrintTo` Function (Preferred)
+
+Namespaces owning the user-defined type should provide the following overload:
+
+```cpp
+namespace mynamespace {
+
+class MyType { /* ... */ };
+
+void PrintTo(const MyType& value, std::ostream* os) {
+  *os << "MyType: " << value.SomeField();
+}
+
+}  // namespace mynamespace
+```
+
+GoogleTest uses argument-dependent lookup to find this `PrintTo` function automatically when printing values of `MyType`. This approach is preferred if you want to customize how a class prints without changing or overloading `operator<<`.
+
+### 2.2 Overloading `operator<<` for Streaming
+
+If a user-defined type implements a standard stream insertion operator:
+
+```cpp
+std::ostream& operator<<(std::ostream& os, const MyType& value) {
+  return os << "MyType: " << value.SomeField();
+}
+```
+
+GoogleTest will use it unless `PrintTo` is defined in the same namespace.
+
+### 2.3 Priority Rules
+
+GoogleTest respects this search order and uses the first available printer it finds:
+
+1. `foo::PrintTo(const T&, std::ostream*)`
+2. `operator<<(std::ostream&, const T&)` found by ADL
+3. Container printer
+4. Pointer printer
+5. Raw byte printer
+
+<Tip>
+Defining `PrintTo` is often more flexible and isolates printing logic from the core class, avoiding operator overloading conflicts.
+</Tip>
+
+---
+
+## 3. Built-in Support for Fundamental and STL Types
+
+### 3.1 Fundamental Types
+
+GoogleTest provides specialized printers for highest clarity:
+
+- Characters (including Unicode char16_t, char32_t, wchar_t) are printed with escapes and code points.
+- Booleans print as "true" or "false".
+- Integral types print decimal representation.
+- Floating points print with appropriate precision.
+- Pointer types print pointer values, with special handling for function pointers, member pointers, and null pointers.
+
+### 3.2 Strings and String Views
+
+Standard and wide strings (`std::string`, `std::wstring`), including UTF-8, UTF-16, and UTF-32 variants, are printed as escaped string literals with quotes.
+
+### 3.3 Containers
+
+For STL and STL-compatible containers such as:
+
+- Sequential containers: `std::vector`, `std::list`, `std::deque`, `std::forward_list`
+- Associative containers: `std::set`, `std::map`, `std::multiset`, `std::multimap`
+- Unordered containers: `std::unordered_set`, `std::unordered_map`, `std::unordered_multiset`, `std::unordered_multimap`
+
+GoogleTest prints contents within curly braces `{ ... }` with elements comma-separated. For key-value maps, elements are shown as pairs `(key, value)`.
+
+For large containers, printing is truncated with an ellipsis to maintain readability.
+
+### 3.4 Native Arrays and Tuples
+
+C-style arrays are printed as `{ ... }` sequences. Multi-dimensional arrays print nested braces.
+
+`std::tuple` and `std::pair` have specialized printing formats using parentheses:
+
+- Pair example: `(true, 5)`
+- Tuple example: `(false, 'a', 3)`
+
+Nested tuples print recursively with nested parentheses.
+
+---
+
+## 4. Special Cases and Advanced Printers
+
+### 4.1 Pointer Types
+
+- Null pointers print as `NULL` or `(nullptr)`.
+- Pointers to character types print both the pointer and the pointed-to string with escaping.
+- Pointers to other types print the raw pointer address.
+- Member pointers are printed as raw bytes due to their implementation-defined nature.
+
+### 4.2 Smart Pointers
+
+`std::unique_ptr` and `std::shared_ptr` are printed with their internal pointer address and, if possible, the pointed-to value.
+
+### 4.3 Unprintable Types
+
+User-defined types without any printer method or stream operator print their raw bytes up to a max threshold, shown as a byte-size object with a hex dump:
+
+```
+16-byte object <EF-12 00-00 34-AB ...>
+```
+
+If the type is too large, truncated output with ellipsis is used.
+
+### 4.4 User-Defined Containers and Recursive Containers
+
+GoogleTest detects recursive containers (e.g., mimicking filesystem paths) and avoids infinite printing recursion, printing the value tersely.
+
+### 4.5 `PrintTo` for Pointers
+
+Users can define `PrintTo` for pointer types (e.g., `T*`). For example:
+
+```cpp
+void PrintTo(const PointerPrintable* p, std::ostream* os) {
+  *os << "PointerPrintable*";
+}
+```
+
+This lets GoogleTest print pointers with custom formatting.
+
+---
+
+## 5. Using the UniversalPrinter API
+
+GoogleTest internally invokes printing through:
+
+```cpp
+::testing::internal::UniversalPrinter<T>::Print(const T& value, std::ostream* os);
+```
+
+Your `PrintTo` or streaming operator will be called automatically based on the rules above.
+
+For convenience, these wrappers are available:
+
+- `testing::PrintToString(const T& value)` returns the string representation of a value.
+- `testing::internal::UniversalPrint(const T& value, std::ostream* os)` prints the value with full info (e.g., pointers and strings).
+- `testing::internal::UniversalTersePrint(const T& value, std::ostream* os)` prints a terse version (e.g., without pointer addresses).
+
+### Example usage:
+
+```cpp
+int value = 42;
+std::string s = testing::PrintToString(value); // s == "42"
+
+std::vector<int> v = {1, 2, 3};
+std::cout << testing::PrintToString(v) << std::endl; // prints { 1, 2, 3 }
+```
+
+---
+
+## 6. Practical Examples
+
+### 6.1 Defining PrintTo for a User Type
+
+```cpp
+namespace my {
+struct Printable {
+  int x;
+};
+
+void PrintTo(const Printable& p, std::ostream* os) {
+  *os << "Printable{ x=" << p.x << " }";
+}
+}
+
+// In test:
+my::Printable p{42};
+EXPECT_EQ("Printable{ x=42 }", testing::PrintToString(p));
+```
+
+### 6.2 Printing STL Containers
+
+```cpp
+std::vector<int> v = {1, 2, 3};
+std::cout << testing::PrintToString(v); // Outputs: { 1, 2, 3 }
+
+std::map<std::string, int> m = { {"a", 1}, {"b", 2} };
+std::cout << testing::PrintToString(m); // Outputs: { ("a", 1), ("b", 2) }
+```
+
+### 6.3 Printing Pointers and Arrays
+
+```cpp
+int* p = nullptr;
+std::cout << testing::PrintToString(p); // Outputs: NULL
+
+int arr[3] = {1, 2, 3};
+std::cout << testing::PrintToString(arr); // Outputs: { 1, 2, 3 }
+```
+
+### 6.4 Printing Tuples
+
+```cpp
+std::tuple<int, char, bool> t(10, 'a', true);
+std::cout << testing::PrintToString(t); // Outputs: (10, 'a' (97, 0x61), true)
+```
+
+---
+
+## 7. Troubleshooting and Best Practices
+
+- **Symbols Not Found for `PrintTo`**: Ensure `PrintTo` is declared in the namespace of the type and that it has the correct signature: `(const T&, std::ostream*)`.
+
+- **Streaming Operator Preferred?** Remember that if `PrintTo` is defined in the same namespace as the type, it takes precedence over `operator<<`.
+
+- **Escaping Strings and Characters**: GoogleTest automatically escapes special characters and non-printable characters in strings and chars for clarity.
+
+- **Avoid Printing Too Large Objects as Bytes**: For large or complex objects lacking printers, consider implementing `PrintTo` for better readability.
+
+- **Recursive Containers**: Be aware of recursive container definitions to avoid infinite printing loops.
+
+- **Using Abseil `AbslStringify`**: If your project uses Abseil and types define `AbslStringify`, GoogleTest integrates with this to prefer that representation.
+
+---
+
+## 8. Summary of API and Known Limitations
+
+### 8.1 Supported Types
+
+- Fundamental and built-in types (integral, floating point, char variants)
+- Standard containers (sequential, associative, unordered)
+- Strings and string views
+- Tuples and pairs
+- Smart pointers
+- User-defined types with `PrintTo` or streaming support
+
+### 8.2 Known Limitations
+
+- Printing STL-style containers relies on const_iterator; input iterators with unusual categories might print incorrectly.
+- For optimal printing of user-defined types, `PrintTo` function is preferred over streaming operators.
+- Some exotic pointer types or member function pointers print raw bytes since their representation is implementation-defined.
+
+---
+
+For full details on implementations and internal helpers, see the source code in
+
+- [`gtest-printers.h`](https://github.com/google/googletest/blob/main/googletest/include/gtest/gtest-printers.h)
+- [`gtest-printers.cc`](https://github.com/google/googletest/blob/main/googletest/src/gtest-printers.cc)
+
+---
+
+## References and Related Pages
+
+- [Teaching GoogleTest How to Print Your Values](../advanced.md#teaching-googletest-how-to-print-your-values)
+- [Testing Reference - GoogleTest Macros and Utilities](../reference/testing.md)
+- [GoogleTest Primer Overview](../primer.md)
+- [Core Testing APIs - Parameterized and Typed Tests](../api-reference/core-testing-apis/parameterized-and-typed-tests.md)
+- [GoogleTest Samples Directory](https://github.com/google/googletest/tree/main/googletest/samples)
+
+---
