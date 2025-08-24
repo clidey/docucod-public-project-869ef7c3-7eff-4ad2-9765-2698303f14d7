@@ -1,0 +1,255 @@
+---
+title: "Resolving Test and Mock Failures"
+description: "Covers diagnosis and solutions for failed assertions, unstable tests, and common causes for mock expectations not being met. Offers strategies for interpreting error messages and debugging test code."
+---
+
+# Resolving Test and Mock Failures
+
+This page helps you diagnose and resolve common failures encountered when running GoogleTest tests and GoogleMock expectations. Understanding why tests fail and how to fix them is essential for writing stable, maintainable tests. You'll find guidance on interpreting error messages, identifying causes for unsatisfied or unexpected expectations, handling unstable tests, and tips to ensure your mock expectations are correctly met.
+
+---
+
+## 1. Understanding Common Test Failures
+
+### Why Did My Test Fail?
+
+When a test fails, GoogleTest reports failure messages describing which expectations or assertions were not met. These messages include the file and line number along with detailed diagnostics about the failure. Common reasons for test failures include:
+
+- **Unsatisfied Expectations:** An expected call to a mocked method was not invoked as specified.
+- **Unexpected Calls:** A method was called with arguments or at times that were not anticipated.
+- **Excessive Calls:** A method was called more times than declared in the expectation.
+- **Mismatched Arguments:** The call arguments did not match the expected matcher conditions.
+- **Uninteresting Calls:** Calls that were neither expected nor explicitly allowed (see [Nice, Strict, and Naggy Mocks](https://github.com/google/googletest/tree/main/docs/api-reference/mocking-framework/nice-strict-mocks.md)).
+
+Use the detailed messages and stack traces provided by GoogleMock to trace the failing call and verify that your mocks and expectations are configured correctly.
+
+### Common Failure Scenarios
+
+- **Unsatisfied Prerequisites:** When a call is expected to happen only after other calls (dependencies) but those calls have not yet occurred.
+- **Retired Expectations:** Calls to expectations marked with `.RetiresOnSaturation()` after they are marked as saturated.
+- **Mismatch in `.With()` Conditions:** Failures when the additional `With()` clause matchers are not satisfied.
+
+---
+
+## 2. Diagnosing Mocking Issues
+
+### How to Recognize the Problem
+
+Here are patterns you may see and what they mean:
+
+- **Unexpected call - returning default:**
+  - Means the mock received a call that does not match any active `EXPECT_CALL`.
+  - Often occurs when the arguments differ or no matching expectation is set.
+- **Mock function called more times than expected:**
+  - Indicates excessive calls beyond the `.Times()` specification.
+- **Too few actions specified in `EXPECT_CALL`:**
+  - Happens when `.WillOnce()` calls are fewer than the expected call count.
+- **Uninteresting call - warning:**
+  - The call neither matches expectations nor `ON_CALL` default behaviors.
+  - Usually safe to ignore or you can suppress by using `NiceMock` or defining explicit expectations.
+
+### How to Fix
+
+- Ensure your `EXPECT_CALL`s cover all anticipated method calls with correct argument matchers.
+- Use sequences (`InSequence`) or `.After()` to properly order dependent calls.
+- Use `.Times()` to specify correct call counts.
+- Use `ON_CALL` to provide default actions for calls not covered by `EXPECT_CALL`.
+- If a call is truly uninteresting and safe to ignore, use `NiceMock` or silence warnings explicitly.
+- Use `RetiresOnSaturation()` judiciously to mark expectations you don’t want to persist after saturation.
+
+### Using Verbose Output
+
+To get more insight into what GoogleMock sees:
+
+```shell
+--gmock_verbose=info
+```
+
+or set it programmatically:
+
+```cpp
+GMOCK_FLAG_SET(verbose, "info");
+```
+
+This will print details about each expectation and actual calls.
+
+---
+
+## 3. Interpreting GoogleMock Failure Messages
+
+### Examples & Their Meaning
+
+- **Unexpected mock function call - returning default value:**
+
+  ```none
+  Function call: Bar2(1, 0)
+  Returns: false
+
+  Google Mock tried the following 1 expectation, but it didn't match:
+
+  EXPECT_CALL(foo_, Bar2(0, _))...
+  ```
+
+  The call to `Bar2(1, 0)` did not match the expected call which awaited `Bar2(0, _)`.
+
+- **Mock function called more times than expected:**
+
+  ```none
+  Mock function called more times than expected - returning default value.
+  Function call: Bar2(0, 1)
+  Returns: false
+  Expected: to be called once
+  Actual: called twice - over-saturated and active
+  ```
+
+  Your test made more calls than `.Times(1)` allowed.
+
+- **Too few actions specified in `EXPECT_CALL`:**
+
+  ```none
+  Too few actions specified in EXPECT_CALL(foo_, Bar2(_, _))...
+  Expected to be called twice, but has only 1 WillOnce().
+  Actions ran out in EXPECT_CALL(foo_, Bar2(_, _))...
+  Called 2 times, but only 1 WillOnce() is specified - returning default value.
+  ```
+
+  You need to add more `WillOnce()` or `WillRepeatedly()` actions to cover all calls.
+
+- **Uninteresting call warning:**
+
+  ```none
+  Uninteresting mock function call - returning default value.
+  Function call: Bar2(0, 1)
+  Returns: false
+  NOTE: You can safely ignore the above warning unless this call should not happen.
+  ```
+
+  Consider adding an expectation or default behavior if this is unexpected.
+
+- **Mismatch in `.With()` clause:**
+
+  ```none
+  Actual function call count doesn't match EXPECT_CALL(foo_, Bar2(_, _))...
+  Expected args: are a pair where the first >= the second
+  Expected: to be called once
+  Actual: never called - unsatisfied and active
+  ```
+
+  The call’s additional `.With()` condition is not met.
+
+---
+
+## 4. Strategies for Debugging Unstable or Flaky Tests
+
+If a test fails inconsistently or only under certain conditions, consider:
+
+- **Test Isolation:** Verify tests don’t depend on global state or side effects from other tests.
+- **Order Dependencies:** Some failures signal that expected call order isn't guaranteed. Use `Sequence` or `InSequence` to enforce.
+- **Default Action Coverage:** Ensure `ON_CALL` defaults are set where needed to avoid unexpected calls.
+- **Proper Arguments:** Check matchers in `EXPECT_CALL` don’t mismatch real call arguments.
+- **Leak Detection:** Use `GMOCK_FLAG_SET(catch_leaked_mocks, true)` to detect leaked mocks causing silent verification skips.
+
+When tests are flaky, enabling verbose output and carefully reviewing expectation sequences helps to identify root causes.
+
+---
+
+## 5. Preventing & Handling Mock Leaks
+
+### What is a Leak?
+
+A leaked mock object is one that hasn’t been properly deleted before program exit. This prevents GoogleMock from verifying expectations on it, potentially hiding failures.
+
+### How to Detect
+
+GoogleMock can catch leaked mocks if the flag is enabled:
+
+```cpp
+GMOCK_FLAG_SET(catch_leaked_mocks, true);
+```
+
+Leaked mocks cause an error message at program exit indicating the address of the leaked mock.
+
+### How to Avoid
+
+- Properly manage mock object lifetime in your tests.
+- Avoid dynamically allocated mocks without proper deletion.
+- If deliberate, suppress leak warnings using `testing::Mock::AllowLeak(mock_object);`.
+
+---
+
+## 6. Troubleshooting Checklist
+
+Use the following steps to resolve failures efficiently:
+
+<Steps>
+<Step title="Check Test Output and Logs">
+Carefully read failure messages and call stacks. Note mismatched expectations or unsatisfied calls.
+</Step>
+<Step title="Enable Verbose Mock Output">
+Set `--gmock_verbose=info` or programmatically enable it to trace mock call evaluation.
+</Step>
+<Step title="Verify Expectation Definitions">
+Ensure all expected calls are declared with correct matchers and cardinalities.
+</Step>
+<Step title="Check Call Order and Prerequisites">
+If dependencies exist, verify proper ordering using `Sequence` or `InSequence`.
+</Step>
+<Step title="Inspect Unexpected and Excessive Calls">
+Review if extra calls occur outside expectations, and if so, add `ON_CALL` or `EXPECT_CALL` accordingly.
+</Step>
+<Step title="Fix Mismatched Arguments or 'With' Clauses">
+Review call arguments and any `.With()` matchers for compatibility.
+</Step>
+<Step title="Ensure No Mock Object Leaks">
+Use leak detection and manage object lifetimes carefully.
+</Step>
+<Step title="Run Tests in Isolation">
+Try running failing tests individually to rule out global state interference.
+</Step>
+</Steps>
+
+---
+
+## 7. Best Practices for Stable Mock Testing
+
+- Define expectations for all anticipated calls or provide default actions via `ON_CALL`.
+- Use exact argument matchers wherever possible to catch argument mismatches early.
+- Use sequences to enforce call order when required.
+- Use `RetiresOnSaturation()` to remove expectations from active lists cleanly.
+- Avoid mixing `EXPECT_CALL` and `ON_CALL` ambiguously — understand their distinct purposes.
+- Manage mock object lifetimes strictly to ensure proper verification.
+- Prefer `NaggyMock` or `StrictMock` over `NiceMock` when testing critical interaction enforcement.
+- Regularly run with `--gmock_verbose=info` during development to catch subtle mismatches.
+
+---
+
+## 8. Additional Resources
+
+- [GoogleTest Primer](https://github.com/google/googletest/blob/main/docs/primer.md)
+- [Assertions Reference](https://github.com/google/googletest/blob/main/docs/reference/assertions.md)
+- [Mock Objects and Methods](https://github.com/google/googletest/blob/main/docs/api-reference/mocking-framework/mock-object-api.md)
+- [Nice, Strict, and Naggy Mocks](https://github.com/google/googletest/blob/main/docs/api-reference/mocking-framework/nice-strict-mocks.md)
+- [Expectations and Cardinalities](https://github.com/google/googletest/blob/main/docs/api-reference/mocking-framework/cardinalities-api.md)
+- [GoogleMock Cookbook](https://github.com/google/googletest/blob/main/docs/gmock_cook_book.md)
+- [Troubleshooting Common Failures](https://github.com/google/googletest/blob/main/faq/troubleshooting/test-failure-diagnostics.md)
+
+---
+
+## 9. Summary
+
+This page focuses on interpreting test failures related to mock expectations and assertions in GoogleTest and GoogleMock. By understanding the typical failure messages, their causes, and applying best practices, users gain confidence to diagnose and resolve test issues effectively. Leveraging verbose output, controlling mock strictness, and carefully defining expectations help maintain robust and reliable tests.
+
+---
+
+<Info>
+When reporting issues or seeking help, include the verbose test output, details of your mock setup, the exact failure messages, and relevant portions of your test code.
+</Info>
+
+<Check>
+Always verify that:
+- Each `EXPECT_CALL` matches actual calls.
+- Argument matchers are precise.
+- Call order requirements are explicitly stated.
+- Mocks are properly destroyed.
+- Default actions are defined as fallback.
+</Check>
