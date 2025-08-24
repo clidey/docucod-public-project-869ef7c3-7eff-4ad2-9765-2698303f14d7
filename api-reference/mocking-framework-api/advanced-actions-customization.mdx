@@ -1,0 +1,297 @@
+---
+title: "Advanced Actions and Customization"
+description: "In-depth look at advanced actions (variadic actions, template actions, custom actions) available in GoogleMock, with scenarios for advanced stubbing and dynamic test control flow."
+---
+
+# Advanced Actions and Customization
+
+Explore the powerful and flexible actions system in GoogleMock that enables advanced stubbing, dynamic behavior, and customization of mocks beyond the basics. This guide delves into variadic actions, template-based actions, and custom user-defined actions to control the flow of your tests effectively.
+
+---
+
+## Overview
+
+GoogleMock actions define what a mock method does when invoked. While simple actions like `Return()` and `Invoke()` cover most needs, complex scenarios require advanced actions. Understanding these capabilities empowers you to mimic sophisticated behaviors, orchestrate test flow precisely, and create reusable, maintainable test code.
+
+This page focuses specifically on advanced actions available in GoogleMock, such as:
+
+- Variadic actions: composing multiple actions into one sequence
+- Action templates: defining generic actions working with multiple types
+- Custom actions: user-defined behaviors employing `ACTION` macros or callable objects
+
+---
+
+## Combining Multiple Actions Using `DoAll()`
+
+Sometimes a mock method needs to perform multiple side effects sequentially before returning a value. The `DoAll()` action lets you combine several actions into one that executes them in order.
+
+### Key Points
+
+- The return value of `DoAll()` is the result of the last action in the sequence.
+- All preceding actions must return `void`.
+
+### Example
+
+```cpp
+using ::testing::DoAll;
+using ::testing::SetArgPointee;
+using ::testing::Return;
+
+class MockMutator {
+ public:
+  MOCK_METHOD(bool, Mutate, (int* value), (override));
+};
+
+TEST(MutationTest, SetsValueAndReturnsTrue) {
+  MockMutator mutator;
+  EXPECT_CALL(mutator, Mutate(testing::_))
+      .WillOnce(DoAll(SetArgPointee<0>(5), Return(true)));
+
+  int my_value = 0;
+  EXPECT_TRUE(mutator.Mutate(&my_value));
+  EXPECT_EQ(5, my_value);
+}
+```
+
+This example sets the pointed-to value and returns `true` as the final action.
+
+---
+
+## Returning Values with Dynamic Lifetimes
+
+### `Return()` vs `ReturnRef()` and `ReturnPointee()`
+
+- `Return(value)` returns a **copy** of the value captured when setting the action.
+- `ReturnRef(variable)` returns a reference to the live variable.
+- `ReturnPointee(pointer)` returns the dereferenced live value pointed by `pointer` when the action executes.
+
+### Why This Matters
+
+Use `Return()` when returning a simple, immutable value. Use `ReturnRef()` or `ReturnPointee()` when your return value should reflect current or changing state.
+
+### Example with Live Values
+
+```cpp
+int x = 0;
+MockFoo foo;
+EXPECT_CALL(foo, GetValue())
+    .WillRepeatedly(ReturnPointee(&x));
+x = 42;
+EXPECT_EQ(42, foo.GetValue());  // Returns current value of x
+```
+
+---
+
+## Controlling Arguments and Side Effects
+
+You can modify parameters passed into mock methods, especially output or reference parameters.
+
+- **SetArgPointee<N>(value)** sets the value pointed to by argument N.
+- **SetArrayArgument<N>(first, last)** copies elements from a source range to the argument at position N.
+
+### Example
+
+```cpp
+using ::testing::SetArgPointee;
+
+class MockUpdater {
+ public:
+  MOCK_METHOD(void, Update, (int*, int), (override));
+};
+
+TEST(UpdateTest, SetsValue) {
+  MockUpdater updater;
+  EXPECT_CALL(updater, Update(testing::_, 5))
+      .WillOnce(SetArgPointee<0>(10));
+
+  int n = 0;
+  updater.Update(&n, 5);
+  EXPECT_EQ(10, n);
+}
+```
+
+To combine such side effects with return values, use `DoAll()` to chain actions.
+
+---
+
+## Using Existing Callables as Actions
+
+You can directly use functions, methods, functors, or lambdas as mock actions for flexible behavior:
+
+- `Invoke(func)` calls a global or callable object.
+- `Invoke(obj, &Class::Method)` calls a method on an object.
+- `InvokeWithoutArgs(func)` calls a nullary function ignoring mock args.
+
+### Example Using Lambda
+
+```cpp
+EXPECT_CALL(mock, Process(testing::_))
+    .WillOnce([](int value) { return value * 2; });
+```
+
+This will double the argument whenever `Process()` is called.
+
+---
+
+## Selecting Arguments for Actions
+
+If your callable expects fewer or differently ordered arguments than the mock method, use these adaptors:
+
+- `WithArg<N>(action)` passes only argument N
+- `WithArgs<N1, N2,...>(action)` passes selected arguments
+- `WithoutArgs(action)` ignores all mock args
+
+### Example
+
+```cpp
+bool CheckCoordinates(int x, int y);
+EXPECT_CALL(mock, Foo("desc", _, _))
+    .WillOnce(WithArgs<1, 2>(Invoke(CheckCoordinates)));
+```
+
+---
+
+## Defining Custom Actions
+
+When built-in actions aren't enough, define your own with:
+
+### 1. `ACTION` Macros
+
+Simple macros define parameter-less or parameterized actions:
+
+```cpp
+ACTION(IncrementArg1) { return ++(*arg1); }
+ACTION_P(Add, n) { return arg0 + n; }
+```
+
+Usage:
+
+```cpp
+EXPECT_CALL(mock, Foo(testing::_)).WillOnce(IncrementArg1());
+EXPECT_CALL(mock, Foo(testing::_)).WillOnce(Add(5));
+```
+
+### 2. Custom Callable Objects
+
+Define a class or struct with a templated `operator()` matching the mock method signature:
+
+```cpp
+struct MultiplyBy {
+  int multiplier;
+  template <typename T>
+  T operator()(T arg) { return arg * multiplier; }
+};
+EXPECT_CALL(mock, Foo(testing::_)).WillOnce(MultiplyBy{7});
+```
+
+### 3. Polymorphic Actions
+
+Use `MakePolymorphicAction` to create actions usable with various signatures.
+
+---
+
+## Delegating to Fakes, Real Implementations, or Parent Classes
+
+Sometimes mixing mocks with existing implementations is useful:
+
+- Delegate default actions to a *fake* object by forwarding calls via `ON_CALL`.
+- Delegate to a *real* object to maintain production behavior while verifying calls.
+- Delegate specific calls to base class implementations using fully qualified names.
+
+### Example Delegating to Fake
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, DoThis, (int), (override));
+  void DelegateToFake() {
+    ON_CALL(*this, DoThis).WillByDefault([this](int x) {
+      return fake_.DoThis(x);
+    });
+  }
+ private:
+  FakeFoo fake_;
+};
+```
+
+Call `DelegateToFake()` in setup to enable.
+
+---
+
+## Managing Uninteresting and Unexpected Calls
+
+- Uninteresting calls have no matching `EXPECT_CALL` and cause warnings by default.
+- Use `NiceMock<T>` to suppress warnings.
+- Use `StrictMock<T>` to treat such calls as test failures.
+- Define catch-all expectations with `EXPECT_CALL(mock, Method(_)).Times(AnyNumber())` to specify allowed calls.
+
+---
+
+## Best Practices
+
+- Use `ON_CALL` to define common default behaviors.
+- Use `EXPECT_CALL` to set explicit expectations and actions.
+- Use `DoAll()` to combine side effects and return values.
+- Prefer lambdas or callable structs for complex or stateful custom actions.
+- Use argument selectors (`WithArg`, `WithArgs`) to adapt method signatures conveniently.
+- Delegate to fakes or real objects to reuse logic.
+
+---
+
+For a complete picture of defining mocks, expectations, matchers, and actions, refer to the related sections in the GoogleTest documentation.
+
+<Info>
+GoogleMock lives in the `testing` namespace. Use `using ::testing::Foo;` where appropriate for readability.
+</Info>
+
+---
+
+## See Also
+
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html)
+- [Actions Reference](../reference/actions.md)
+- [Matchers Reference](../reference/matchers.md)
+- [Mocking Reference](../reference/mocking.md)
+- [gMock for Dummies](../gmock_for_dummies.md)
+
+---
+
+<AccordionGroup title="Advanced Actions Examples">
+<Accordion title="Combining Multiple Actions with DoAll">
+```cpp
+EXPECT_CALL(mock, Mutate(_))
+    .WillOnce(DoAll(SetArgPointee<0>(5), Return(true)));
+```
+Executes `SetArgPointee` then returns `true`.
+</Accordion>
+<Accordion title="Using Functions and Lambdas as Actions">
+```cpp
+EXPECT_CALL(mock, Sum(_, _))
+    .WillOnce([](int a, int b) { return a + b; });
+```
+Runs the lambda adding arguments as the action.
+</Accordion>
+<Accordion title="Selecting Arguments for Callables">
+```cpp
+EXPECT_CALL(mock, Foo(_, _, _))
+    .WillOnce(WithArgs<0, 2>(Invoke(MyAction)));
+```
+Passes only the 1st and 3rd args to `MyAction`.
+</Accordion>
+<Accordion title="Defining Custom Parameterized Actions">
+```cpp
+ACTION_P(Add, n) { return arg0 + n; }
+EXPECT_CALL(mock, Foo(_)).WillOnce(Add(5));
+```
+Defines an action that adds `n` to the argument.
+</Accordion>
+<Accordion title="Delegating Default Behavior to Fake Object">
+```cpp
+void DelegateToFake() {
+  ON_CALL(*this, Method(_))
+      .WillByDefault([this](int x) { return fake_.Method(x); });
+}
+```
+Allows combining mocks with pre-existent fake logic.
+</Accordion>
+</AccordionGroup>

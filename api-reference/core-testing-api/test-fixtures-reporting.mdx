@@ -1,0 +1,316 @@
+---
+title: "Test Fixtures, Environment, and Reporting"
+description: "Covers setup/teardown patterns (fixtures), test environment management, and advanced test reporting features. Reference for the Environment class, test event listeners, and diagnostics interfaces that enable context-aware and extensible test runs."
+---
+
+# Test Fixtures, Environment, and Reporting
+
+GoogleTest offers a powerful suite of tools to manage your tests' lifecycle, configure global test environments, and gather detailed test execution data. This documentation focuses on leveraging test fixtures for setup/teardown operations, managing test environments globally, and using advanced reporting features through event listeners and diagnostic interfaces.
+
+---
+
+## 1. Test Fixtures: Setup and Teardown Patterns
+
+Test fixtures provide a reusable context for multiple tests that share the same resources or state. They enable consistent setup before each test and clean-up afterwards. GoogleTest's fundamental fixture class is **`testing::Test`**, and your fixtures derive from it.
+
+### Basic Fixture Usage
+
+- Derive a test fixture class from `testing::Test`.
+- Implement `SetUp()` and `TearDown()` for per-test initialization and cleanup.
+- Use `TEST_F(FixtureName, TestName)` macros to write tests that use the fixture.
+
+**Example:**
+
+```cpp
+class ResourceFixture : public testing::Test {
+ protected:
+  void SetUp() override {
+    // Common setup code
+    resource_ = new Resource;
+  }
+  void TearDown() override {
+    // Cleanup code
+    delete resource_;
+  }
+
+  Resource* resource_;
+};
+
+TEST_F(ResourceFixture, TestOne) {
+  EXPECT_TRUE(resource_->IsReady());
+}
+
+TEST_F(ResourceFixture, TestTwo) {
+  ASSERT_NE(resource_, nullptr);
+  // Test using resource_
+}
+```
+
+### Per-Test-Suite Setup and Teardown
+
+Sometimes setup/teardown needs to happen only once per test suite (all tests sharing the fixture) rather than per test.
+
+- Implement `static void SetUpTestSuite()` and `static void TearDownTestSuite()` in your fixture class.
+- GoogleTest calls `SetUpTestSuite()` once before the first test in the suite.
+- It calls `TearDownTestSuite()` once after the last test in the suite.
+
+**Example:**
+
+```cpp
+class ExpensiveFixture : public testing::Test {
+ public:
+  static void SetUpTestSuite() {
+    shared_data_ = LoadLargeDataSet();
+  }
+  static void TearDownTestSuite() {
+    delete shared_data_;
+    shared_data_ = nullptr;
+  }
+
+ protected:
+  void SetUp() override {
+    // Per-test code
+  }
+  void TearDown() override {
+    // Per-test clean-up
+  }
+
+  static DataSet* shared_data_;
+};
+
+DataSet* ExpensiveFixture::shared_data_ = nullptr;
+
+TEST_F(ExpensiveFixture, UsesSharedData) {
+  ASSERT_NE(shared_data_, nullptr);
+  // Use shared_data_ in the test
+}
+```
+
+### Nonfatal Failures in Fixtures
+
+GoogleTest supports *nonfatal* failures inside fixture constructors, `SetUp()`, and `TearDown()`. However, fatal failures in constructors abort the test immediately.
+
+Use `ADD_FAILURE()` to add non-fatal failures in constructors and `SetUp()`, allowing the test to proceed.
+
+<Tip>
+Avoid using fatal assertions inside constructors or destructors, as they do not abort the whole test but can leave the fixture in an invalid state. Instead, prefer `SetUp()` and `TearDown()` for assertions requiring test aborts.
+</Tip>
+
+---
+
+## 2. Managing Global Test Environments
+
+Global test environments enable shared setup/teardown across all tests in a test program.
+
+### Defining a Test Environment
+
+- Derive a class from `testing::Environment`.
+- Override virtual methods `SetUp()` and `TearDown()`.
+
+**Example:**
+
+```cpp
+class MyGlobalEnvironment : public testing::Environment {
+ public:
+  void SetUp() override {
+    // Code to set up environment (e.g., start servers, initialize DB)
+  }
+
+  void TearDown() override {
+    // Code to clean up environment
+  }
+};
+```
+
+### Registering Global Environments
+
+Call `testing::AddGlobalTestEnvironment()` before running tests to register environments.
+
+```cpp
+int main(int argc, char** argv) {
+  testing::InitGoogleTest(&argc, argv);
+
+  testing::AddGlobalTestEnvironment(new MyGlobalEnvironment);
+
+  return RUN_ALL_TESTS();
+}
+```
+
+### Execution Flow
+
+When invoking `RUN_ALL_TESTS()`, GoogleTest:
+
+- Calls `SetUp()` on all global environments in registration order.
+- Runs tests only if no fatal failures or global skips occur.
+- Calls `TearDown()` on all global environments in reverse registration order even if tests are skipped or fail.
+
+<Tip>
+Use global environments to manage expensive or shared resources across test suites, such as database connection pools or external services.
+</Tip>
+
+---
+
+## 3. Advanced Test Reporting
+
+GoogleTest provides a flexible event listener API and diagnostic interfaces to customize and extend test reporting. These are particularly useful for integrating with CI pipelines, custom test dashboards, or detailed diagnostics.
+
+### Event Listener API
+
+The `testing::TestEventListener` interface provides hooks corresponding to key points in the test lifecycle.
+
+#### Key Callbacks Include:
+
+| Event                          | Method                                 | Description                                  |
+|-------------------------------|--------------------------------------|----------------------------------------------|
+| Before any test starts         | `OnTestProgramStart(const UnitTest&)` | Before any test activity begins.             |
+| Before each iteration starts   | `OnTestIterationStart(const UnitTest&, int)` | Before test iteration (if repeating).        |
+| Before environment setup start | `OnEnvironmentsSetUpStart(const UnitTest&)` | Before global environment setup begins.      |
+| After environment setup ends   | `OnEnvironmentsSetUpEnd(const UnitTest&)` | After global environment setup completes.    |
+| Before a test suite starts     | `OnTestSuiteStart(const TestSuite&)` | Before running a test suite.                   |
+| Before a test starts           | `OnTestStart(const TestInfo&)`        | Before running an individual test.            |
+| After assertion result         | `OnTestPartResult(const TestPartResult&)` | After a test assertion or explicit SUCCEED()/FAIL() call. |
+| After a test ends              | `OnTestEnd(const TestInfo&)`           | After an individual test finishes.            |
+| After a test suite ends        | `OnTestSuiteEnd(const TestSuite&)`     | After all tests in a suite finish.             |
+| Before environment teardown    | `OnEnvironmentsTearDownStart(const UnitTest&)` | Before tearing down global environment.       |
+| After environment teardown     | `OnEnvironmentsTearDownEnd(const UnitTest&)` | After tearing down global environment.        |
+| After test iteration ends      | `OnTestIterationEnd(const UnitTest&, int)` | After a test iteration completes.              |
+| After all test activity ends   | `OnTestProgramEnd(const UnitTest&)`    | After all tests and environments finish.
+
+### Using Event Listeners
+
+- Subclass `TestEventListener` or `EmptyTestEventListener` (which provides empty default implementations).
+- Override methods relevant to your custom logic.
+- Add your listener to the GoogleTest event listener list via:
+
+```cpp
+main(int argc, char** argv) {
+  testing::InitGoogleTest(&argc, argv);
+  testing::TestEventListeners& listeners =
+      testing::UnitTest::GetInstance()->listeners();
+
+  // Optionally remove default printer
+  delete listeners.Release(listeners.default_result_printer());
+
+  // Add your listener
+  listeners.Append(new MyCustomListener);
+
+  return RUN_ALL_TESTS();
+}
+```
+
+### Use Cases for Event Listeners:
+
+- **Custom Output:** Replace the console or XML output format.
+- **Logging:** Tag or capture test results for analytics.
+- **Resource Monitoring:** Track resource usage or leaks during tests.
+- **Diagnostics:** Implement memory leak checkers or performance logging.
+
+### Restrictions and Tips
+
+- Do **not** generate test failures within `OnTestPartResult()` to avoid recursion.
+- Add listeners that handle `OnTestPartResult()` before listeners that generate failures to ensure failures are correctly attributed.
+
+---
+
+## 4. Diagnostic Interfaces and Test Context
+
+GoogleTest exposes rich reflection interfaces to access information about tests, suites, and results programmatically.
+
+### Key Classes:
+
+| Class Name         | Description                                               |
+|--------------------|-----------------------------------------------------------|
+| `UnitTest`         | Represents the entire test program.                       |
+| `TestSuite`        | Represents a group of related tests.                      |
+| `TestInfo`         | Provides detailed info about a single test.              |
+| `TestResult`       | Holds the results and properties of a test run.          |
+| `TestPartResult`   | Represents the outcome of individual assertions.         |
+| `TestProperty`     | Captures key-value properties recorded during a test.    |
+
+### Accessing Currently Running Test Information
+
+You can retrieve the currently executing test’s context during test runtime:
+
+```cpp
+const testing::TestInfo* test_info = testing::UnitTest::GetInstance()->current_test_info();
+if (test_info) {
+  std::cout << "Currently running test: "
+            << test_info->test_suite_name() << "." << test_info->name() << std::endl;
+}
+```
+
+### Recording Properties for Tests
+
+During test execution, you can log key/value properties relevant to your test:
+
+```cpp
+testing::Test::RecordProperty("Key", "Value");
+```
+
+- Properties recorded within a test are included as attributes in the XML report at the `<testcase>` level.
+- Properties recorded during `SetUpTestSuite()` or `TearDownTestSuite()` are logged at the `<testsuite>` level.
+- Properties recorded outside all suites appear at the top-level `<testsuites>` element.
+
+<Tip>
+Choose property keys that are valid XML attribute names and avoid naming collisions with predefined GoogleTest attributes such as `name`, `status`, `time`, etc.
+</Tip>
+
+---
+
+## 5. Practical Tips and Common Pitfalls
+
+- Ensure that global environments are added **before** calling `RUN_ALL_TESTS()`. Otherwise, their setup and teardown will not be triggered.
+- Use `SetUpTestSuite()` and `TearDownTestSuite()` **only** for global or expensive setup/teardown shared by the entire suite. Avoid modifying state that may cause test dependencies.
+- Avoid fatal assertions in constructors; prefer `SetUp()` where failures can more safely abort the test.
+- When adding event listeners, remove the default output listeners if you want clean output exclusively from your listeners.
+- Understand the order of event callbacks; start events fire in forward order, end events in reverse order.
+- Use `SCOPED_TRACE(message)` or `testing::ScopedTrace` when working with helper functions to add context traces to failure messages.
+
+---
+
+## 6. Example: Custom Event Listener for Concise Output
+
+```cpp
+class SimpleListener : public testing::EmptyTestEventListener {
+ public:
+  void OnTestStart(const testing::TestInfo& info) override {
+    std::cout << "Starting test: " << info.test_suite_name()
+              << "." << info.name() << std::endl;
+  }
+
+  void OnTestPartResult(const testing::TestPartResult& result) override {
+    if (result.failed()) {
+      std::cout << "Failure in " << result.file_name() << ":" << result.line_number()
+                << " - " << result.summary() << std::endl;
+    }
+  }
+
+  void OnTestEnd(const testing::TestInfo& info) override {
+    std::cout << "Finished test: " << info.test_suite_name()
+              << "." << info.name()
+              << (info.result()->Passed() ? " PASSED" : " FAILED") << std::endl;
+  }
+};
+
+// Usage in main:
+int main(int argc, char** argv) {
+  testing::InitGoogleTest(&argc, argv);
+
+  auto& listeners = testing::UnitTest::GetInstance()->listeners();
+  delete listeners.Release(listeners.default_result_printer());
+  listeners.Append(new SimpleListener);
+
+  return RUN_ALL_TESTS();
+}
+```
+
+---
+
+## 7. See Also
+
+- [GoogleTest Primer](primer.md) – Introduction to test writing and fixture usage.
+- [Testing Reference](reference/testing.md) – Detailed API for classes like `Environment`, `TestEventListener`.
+- [Advanced GoogleTest Topics](advanced.md) – Deep dive into advanced testing techniques including event listeners.
+- [GoogleTest Samples](https://github.com/google/googletest/tree/main/googletest/samples) – Real test code examples demonstrating fixtures, environments, and listeners.
+
+---
