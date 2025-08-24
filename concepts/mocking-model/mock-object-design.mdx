@@ -1,0 +1,311 @@
+---
+title: "Designing and Using Mock Objects"
+description: "Learn the concepts behind mock objects, their roles in interface-based testing, and how they underpin reliable, decoupled test design. See how mock classes are defined, instantiated, and leveraged to simulate and verify component interactions without relying on concrete implementations."
+---
+
+# Designing and Using Mock Objects
+
+Understanding the role of mock objects is fundamental to harnessing the power of GoogleMock in writing reliable, decoupled unit tests. This guide will walk you through the concepts of mock objects, why they matter, and how to effectively design and use them in your tests. By simulating and verifying component interactions without depending on concrete implementations, mocks let you gain precise control and observability over your code’s collaborators.
+
+---
+
+## What Are Mock Objects?
+
+Imagine you’re testing a module that depends on other components, some of which may be slow, unreliable, or hard to set up. Instead of relying on the real components, a **mock object** acts as a stand-in implementing the same interface. You can specify at runtime exactly what methods you expect to be called, with what arguments, how many times, and with what outcomes.
+
+In essence, mock objects move your tests from being state-based (asserting outputs or states after execution) to **interaction-based testing**, verifying also the precise *behavior and interaction patterns* between your code and its dependencies.
+
+### Mocks vs Fakes
+
+It’s important to differentiate **mocks** from **fakes**:
+
+- **Fakes** have working implementations, often simplified for test speed or convenience (e.g., an in-memory database). They don't enforce expectations.
+- **Mocks** are pre-programmed with behavioral expectations, and will report if those expectations are violated.
+
+
+> _Tip_: When you just want to replace a collaborator with a simple, working alternative, use a fake. When you want to verify interactions with that collaborator, use a mock.
+
+---
+
+## Defining Mock Classes
+
+To create mocks in GoogleMock, you derive classes from the interfaces you want to mock and use the `MOCK_METHOD` macro to define mock methods matching the virtual methods of your interfaces.
+
+### How to Define a Mock Class
+
+Take a virtual method signature:
+
+```cpp
+virtual int GetSize() const = 0;
+```
+
+Define a mock class that overrides this method:
+
+```cpp
+#include <gmock/gmock.h>
+
+class MockInterface : public Interface {
+ public:
+  MOCK_METHOD(int, GetSize, (), (const, override));
+};
+```
+
+- The first parameter is the return type.
+- The second is the method name.
+- The third is the parameter list inside parentheses.
+- The optional fourth parameter includes method qualifiers, such as `(const, override)`.
+
+You must place all `MOCK_METHOD` calls in the public section of the mock class, regardless of the access level of the base class method to ensure `EXPECT_CALL` and `ON_CALL` macros can access the mock methods properly.
+
+### Dealing with Commas in Types
+
+If your return type or argument types contain commas (e.g., templates), wrap the entire type in parentheses:
+
+```cpp
+MOCK_METHOD((std::pair<int, int>), GetPair, ());
+MOCK_METHOD(bool, CheckMap, ((std::map<int, double>), bool));
+```
+
+Alternatively, use type aliases:
+
+```cpp
+using PairInt = std::pair<int, int>;
+MOCK_METHOD(PairInt, GetPair, ());
+```
+
+### Mocking Overloaded or Const Methods
+
+To mock overloaded methods or const-qualified methods, define each overload individually, specifying the appropriate qualifiers:
+
+```cpp
+MOCK_METHOD(int, GetValue, (), (override));
+MOCK_METHOD(int, GetValue, (int index), (override));
+MOCK_METHOD(int, GetSize, (), (const, override));
+```
+
+Use the `Const()` wrapper to resolve overload ambiguities when setting expectations.
+
+---
+
+## Using Mock Objects in Tests
+
+### Typical Workflow
+
+1. **Include** `gmock/gmock.h` and import necessary symbols from the `testing` namespace.
+2. **Create** instances of your mock classes.
+3. **Set default behaviors** using `ON_CALL` (optional).
+4. **Set expectations** on methods using `EXPECT_CALL`.
+5. **Exercise** your code under test.
+6. **Verify** that all expectations were met—this happens automatically when mocks are destructed, or manually with `Mock::VerifyAndClearExpectations()`.
+
+### Specifying Expectations
+
+Use the macro `EXPECT_CALL(mock_object, method(matchers))` to specify that a method should be called. You can optionally chain clauses:
+
+- `.Times(cardinality)` to specify how many calls are expected.
+- `.WillOnce(action)` or `.WillRepeatedly(action)` to specify behavior.
+- `.InSequence()` or `.After()` for ordering constraints.
+- `.RetiresOnSaturation()` to disable the expectation after it has been satisfied.
+
+#### Example: Expect a method called exactly twice returning different values each time
+
+```cpp
+EXPECT_CALL(mock_obj, GetNumber())
+    .WillOnce(Return(1))
+    .WillOnce(Return(2));
+```
+
+This implies the method will be called twice. Without an explicit `Times()`, gMock infers it from `WillOnce` calls.
+
+### Setting Default Behavior (`ON_CALL`)
+
+Use `ON_CALL(mock_object, method(matchers))` to configure the behavior of methods without setting expectations. Unlike `EXPECT_CALL`, `ON_CALL` does not require that the method is actually called during the test.
+
+Example:
+
+```cpp
+ON_CALL(mock_obj, GetSize()).WillByDefault(Return(10));
+```
+
+`ON_CALL`s are useful for setting common behavior in test fixtures.
+
+### Important Rules
+
+- **Expectations must be set before exercising the mock.** Altering expectations after invoking mock methods leads to undefined behavior.
+- The last matching expectation added overrides earlier ones.
+- If you don't specify `Times()`, gMock infers it automatically based on the presence of `WillOnce()` and/or `WillRepeatedly()` clauses.
+- If you want a method never to be called, use `.Times(0)`.
+
+### Handling Uninteresting and Unexpected Calls
+
+- **Uninteresting call**: A call to a mock method with no defined `EXPECT_CALL`. By default, this triggers a warning but not a failure.
+- **Unexpected call**: A call to a mock method that has `EXPECT_CALL`s, but none matches the call’s arguments. This results in a test failure.
+
+To manage warnings on uninteresting calls, use `NiceMock<T>` to suppress warnings or `StrictMock<T>` to treat them as errors.
+
+### Controlling Call Order
+
+- By default, calls can occur in any order regardless of expectation order.
+- Use `InSequence` (the scope guard class) to enforce order on grouped expectations.
+
+Example:
+
+```cpp
+{
+  InSequence seq;
+  EXPECT_CALL(mock, FirstCall());
+  EXPECT_CALL(mock, SecondCall());
+}
+```
+
+Calls to `FirstCall()` and `SecondCall()` must respect that order.
+
+### Specifying Partial Orders with `.After()` and `.InSequence()` Clause
+
+You can specify complex partial orders by using `.After()` to declare that one expectation can only be satisfied after others.
+
+Example:
+
+```cpp
+Sequence s1, s2;
+EXPECT_CALL(mock, A()).InSequence(s1, s2);
+EXPECT_CALL(mock, B()).InSequence(s1);
+EXPECT_CALL(mock, C()).InSequence(s2);
+```
+
+Representing a DAG where `A()` must occur before `B()` and `C()`, but `B()` and `C()` order relative to each other is unconstrained.
+
+### Retiring Expectations on Saturation
+
+Expectations remain active even when saturated by default. Use `.RetiresOnSaturation()` to mark an expectation as inactive once fulfilled, allowing other expectations to match subsequent calls.
+
+---
+
+## Practical Examples
+
+### Defining and Using a Simple Mock
+
+```cpp
+class Turtle {
+ public:
+  virtual ~Turtle() {}
+  virtual void PenDown() = 0;
+  virtual void Forward(int distance) = 0;
+};
+
+class MockTurtle : public Turtle {
+ public:
+  MOCK_METHOD(void, PenDown, (), (override));
+  MOCK_METHOD(void, Forward, (int distance), (override));
+};
+
+TEST(PainterTest, DrawsCircle) {
+  MockTurtle turtle;
+
+  EXPECT_CALL(turtle, PenDown()).Times(AtLeast(1));
+  EXPECT_CALL(turtle, Forward(100)).Times(1);
+
+  Painter painter(&turtle);
+  EXPECT_TRUE(painter.DrawCircle(0, 0, 10));
+}
+```
+
+This test verifies that `PenDown()` is called at least once and `Forward(100)` exactly once.
+
+### Using `ON_CALL` for Default Behavior
+
+```cpp
+ON_CALL(turtle, GetX()).WillByDefault(Return(0));
+```
+
+Sets the default return value when `GetX()` is called, without asserting the call must occur.
+
+### Using Multiple Expectations for Different Arguments
+
+```cpp
+EXPECT_CALL(foo, Bar(_))
+    .Times(AnyNumber());
+EXPECT_CALL(foo, Bar(5))
+    .Times(2);  // Exactly two calls with argument 5
+```
+
+The more specific expectation takes precedence for calls with argument 5.
+
+### Mocking Methods with Move-Only Types
+
+GoogleMock supports mocking methods accepting or returning move-only types (such as `std::unique_ptr`). Use `MOCK_METHOD` as usual.
+
+```cpp
+class MockBuzzer : public Buzzer {
+ public:
+  MOCK_METHOD(std::unique_ptr<Buzz>, MakeBuzz, (StringPiece text), (override));
+};
+```
+
+Specify return actions using lambdas or `Return` with care, especially `WillOnce` and `WillRepeatedly`.
+
+
+---
+
+## Troubleshooting Common Pitfalls
+
+- **Mock methods must be virtual.** If the real class method is not virtual, mocking it will not intercept calls.
+- **Set expectations before calling mock methods.** Setting them after leads to undefined behavior.
+- **Beware of sticky expectations.** Unless retired, expectations remain even after saturation and may cause excessive call failures.
+- **Overload resolution in expectation macros can be ambiguous.** Use explicit parameter lists or wrappers like `Const()` to clarify.
+- **Uninteresting calls generate warnings by default.** Suppress them with `NiceMock` or explicit catch-all expectations.
+
+---
+
+## Summary
+
+Mock objects are the cornerstone of flexible, interaction-based testing in C++. GoogleMock provides powerful, expressive tools to define mocks through simple macros, specify their behavior and expectations declaratively, and verify interactions precisely. Understanding how to design mocks, define expectations, and control their behavior allows you to write tests that are clean, maintainable, and robust.
+
+Explore additional guides such as [Basic Mocking with GoogleMock](../guides/getting-started/basic-mocking), [Advanced Mocking Patterns](../guides/essential-workflows/advanced-mocking-patterns), and the [Expectations, Cardinalities, and Verification](../concepts/mocking-model/expectations-cardinalities) documentation to deepen your expertise.
+
+
+---
+
+### Related Topics and Next Steps
+
+- **Writing Your First Test:** Learn how to integrate mocks into test cases and write basic expectations.
+- **Matchers and Actions:** Understand argument matching and how to define behaviors for mock methods.
+- **Cardinalities and Expectations:** Master specifying how often methods are called and complex call orders.
+- **Debugging and Troubleshooting:** Best practices for diagnosing failing expectations and unexpected calls.
+
+---
+
+For complete detail, visit the [GoogleMock Reference](https://github.com/google/googletest/tree/main/googlemock) and source code.
+
+---
+
+## Additional Resources
+
+- [gMock for Dummies](docs/gmock_for_dummies.md): Beginner-friendly introduction to mocking.
+- [gMock Cookbook](docs/gmock_cook_book.md): Recipes for common mocking scenarios and advanced usage.
+- [Mocking Reference](docs/reference/mocking.md): Detailed reference for mocking macros and classes.
+- [Expectations, Cardinalities, and Verification](concepts/mocking-model/expectations-cardinalities): Deep dive into specifying call counts and verification.
+- [Matchers Reference](api-reference/matchers-actions/matchers.md): How to write expressive argument matchers.
+- [Actions Reference](api-reference/matchers-actions/actions.md): How to specify mock behaviors.
+
+---
+
+## Callouts
+
+<Info>
+Always define mock methods in the public section of your mock class to ensure GoogleMock macros work correctly.
+</Info>
+
+<Tip>
+Use `ON_CALL` to specify common method behavior without enforcing the call, and `EXPECT_CALL` to specify precise call requirements.
+</Tip>
+
+<Warning>
+Do not alternate `EXPECT_CALL` invocations and calls to mock methods in the same test; always set expectations upfront.
+</Warning>
+
+<Check>
+Verify your mock objects either by letting their destructors do it automatically or by calling `Mock::VerifyAndClearExpectations()` explicitly.
+</Check>
+
+---

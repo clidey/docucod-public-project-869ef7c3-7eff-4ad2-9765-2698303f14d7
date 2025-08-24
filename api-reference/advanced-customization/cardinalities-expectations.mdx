@@ -1,0 +1,308 @@
+---
+title: "Cardinalities and Expectations"
+description: "Reference for specifying call frequency expectations and configuring how mock methods should behave under different invocation patterns. Includes the full set of cardinality helpers, configuration tips, and example usage for strictness control."
+---
+
+# Cardinalities and Expectations
+
+Harness the power of GoogleMock's cardinalities to precisely specify and control how many times your mocked methods should be invoked. This reference explains the full suite of cardinality helpers, how to set expectations on mock calls, configure invocation patterns, and maintain strictness control to build robust and expressive tests.
+
+---
+
+## Overview
+
+Cardinalities define the expected number of times a mock method should be called. Proper use of cardinalities lets you express a wide range of invocation patterns — from "any number of calls" to "exactly n times", to complex ranges — ensuring your tests precisely capture the contract your code under test must meet.
+
+GoogleMock provides several built-in cardinality helpers and the ability to create custom cardinalities by implementing the `CardinalityInterface`. Expectations use these cardinalities to verify call counts and enforce mock behavior.
+
+---
+
+## Common Cardinality Helpers
+
+All cardinalities reside in the `::testing` namespace and can be used inside the `.Times()` clause of an `EXPECT_CALL()`.
+
+| Helper           | Description                                    | Example Usage                    |
+|------------------|------------------------------------------------|----------------------------------|
+| `AnyNumber()`    | Allows any number of calls (0 to unlimited)   | `.Times(AnyNumber())`            |
+| `AtLeast(n)`     | At least `n` calls                             | `.Times(AtLeast(2))`             |
+| `AtMost(n)`      | At most `n` calls                              | `.Times(AtMost(3))`              |
+| `Between(m, n)`  | Between `m` and `n` calls, inclusive           | `.Times(Between(2, 5))`          |
+| `Exactly(n)`     | Exactly `n` calls                              | `.Times(Exactly(1))` or `.Times(1)` |
+
+### Examples
+
+```cpp
+using ::testing::AtLeast;
+using ::testing::Exactly;
+using ::testing::AnyNumber;
+using ::testing::Between;
+
+EXPECT_CALL(mock_obj, Foo())          // Expect exactly 1 call (default)
+    .Times(Exactly(1));
+
+EXPECT_CALL(mock_obj, Bar(_))          // Expect at least 2 calls
+    .Times(AtLeast(2));
+
+EXPECT_CALL(mock_obj, Baz(42))         // Expect between 3 and 5 calls
+    .Times(Between(3, 5));
+
+EXPECT_CALL(mock_obj, Qux())            // Expect any number of calls
+    .Times(AnyNumber());
+```
+
+#### Inferred Cardinalities
+When `.Times()` is omitted, GoogleMock infers the cardinality following these rules, based on presence of `WillOnce()` and/or `WillRepeatedly()`:
+
+- No `WillOnce()` or `WillRepeatedly()`: cardinality is inferred as `Exactly(1)`.
+- `n` `WillOnce()` clauses and no `WillRepeatedly()`: inferred `Exactly(n)`.
+- `n` `WillOnce()` clauses and one `WillRepeatedly()`: inferred `AtLeast(n)`.
+
+The inference enables concise expectations without losing correctness.
+
+---
+
+## Specifying Expectations with Cardinalities
+
+When you set an expectation using `EXPECT_CALL()`, use `.Times()` to declare how often the call is expected:
+
+```cpp
+EXPECT_CALL(mock_obj, SomeMethod())
+    .Times(AtLeast(2))
+    .WillRepeatedly(Return(10));
+```
+
+This means `SomeMethod()` should be called at least twice, performing the action `Return(10)` on each call.
+
+If .Times() is omitted, GoogleMock applies the inference rules (see above).
+
+### Zero Times (Disallowing Calls)
+
+You can specify `.Times(0)` to disallow a method call:
+
+```cpp
+EXPECT_CALL(mock_obj, UnexpectedCall(_))
+    .Times(0);
+```
+
+Any call to `UnexpectedCall()` will fail the test.
+
+### Using Cardinalities for Flexible Call Counts
+
+Cardinalities allow you to be as precise or as flexible as your test needs:
+
+- Use `AtMost(n)` to say "up to" `n` calls.
+- Use `AtLeast(n)` to say "no less than" `n` calls.
+- Use `Between(m, n)` for a specific range.
+- Use `Exactly(n)` or a literal `n` for exact counts.
+
+---
+
+## Creating Custom Cardinalities
+
+When the built-in cardinalities are insufficient, you can define your own by implementing the `CardinalityInterface`. This interface requires:
+
+- `IsSatisfiedByCallCount(int call_count)`: returns true if the observed number of calls satisfies this cardinality.
+- `IsSaturatedByCallCount(int call_count)`: returns true if the call count has reached or exceeded the upper bound where no more calls should be accepted.
+- `DescribeTo(std::ostream* os)`: describes the cardinality in human-readable form.
+
+### Example: Even Number Cardinality
+
+A cardinality that matches if the number of calls is even:
+
+```cpp
+class EvenNumberCardinality : public testing::CardinalityInterface {
+ public:
+  bool IsSatisfiedByCallCount(int call_count) const override {
+    return call_count % 2 == 0;
+  }
+
+  bool IsSaturatedByCallCount(int /* call_count */) const override {
+    return false;  // No upper bound, never saturates
+  }
+
+  void DescribeTo(std::ostream* os) const override {
+    *os << "called even number of times";
+  }
+};
+
+testing::Cardinality EvenNumber() {
+  return testing::MakeCardinality(new EvenNumberCardinality);
+}
+```
+
+Use it in expectations:
+
+```cpp
+EXPECT_CALL(mock_obj, SomeMethod())
+    .Times(EvenNumber());
+```
+
+---
+
+## Expectation Strictness and Call Counts
+
+GoogleMock enforces expectations based on cardinalities and keeps track of the number of calls.
+
+- If fewer calls than the lower bound are made, a failure is reported.
+- If more calls than the upper bound are made, a failure is reported immediately ("over-saturated").
+- When the upper bound is reached exactly, the expectation is saturated.
+- An expectation can be configured to *retire* itself (stop matching additional calls) upon saturation by calling `.RetiresOnSaturation()`.
+
+### Behavior on Saturation
+
+By default, expectations remain active even after saturation, causing calls beyond the upper bound to cause failures.
+
+To avoid this, especially when queuing multiple ordered expectations, `.RetiresOnSaturation()` makes the expectation inactive after upper bound calls are reached:
+
+```cpp
+EXPECT_CALL(mock_obj, Foo())
+    .Times(Exactly(1))
+    .RetiresOnSaturation();
+EXPECT_CALL(mock_obj, Foo())
+    .Times(AnyNumber());
+
+// The first call matches the first expectation.
+// The second call matches the second expectation.
+```
+
+---
+
+## Common Pitfalls
+
+- **Avoid multiple `.Times()` clauses on the same `EXPECT_CALL()`.** GoogleMock enforces usage rules and will warn or fail if you specify `.Times()` more than once per expectation.
+- **Specify `.Times()` before `.InSequence()`, `.WillOnce()`, `.WillRepeatedly()`, and `.RetiresOnSaturation()`.** The order of chained clauses is important to prevent runtime errors.
+- **Mismatched number of `WillOnce()` actions versus cardinality causes warnings.** Having more or fewer `WillOnce()` clauses than allowed calls results in detailed warnings.
+- **Use `.RetiresOnSaturation()` thoughtfully.** Expectations that retire when saturated allow sequences and partial orders to work smoothly but may be inappropriate for all tests.
+
+---
+
+## Practical Tips
+
+- When you expect a call exactly once and want concise syntax, omit `.Times()`. Expectation infers `Exactly(1)`.
+- Use `AnyNumber()` to represent "no limit" or "I don't care how many times".
+- Use `Between(m, n)` for clear ranges.
+- Combine sequences with cardinalities to model complex call orders and counts.
+- For call counts that depend on conditions or external state, define a custom cardinality.
+- Use `.RetiresOnSaturation()` in sequences to avoid spurious "too many calls" failures.
+
+---
+
+## Describing Cardinalities
+
+GoogleMock produces human-readable descriptions of cardinalities for expectation failure messages.
+
+Examples:
+
+| Cardinality | Description             |
+|-------------|-------------------------|
+| Exactly(1)  | "called once"          |
+| Exactly(2)  | "called twice"         |
+| Exactly(5)  | "called 5 times"       |
+| AtLeast(3) | "called at least 3 times" |
+| AtMost(4)  | "called at most 4 times"|
+| Between(2,5) | "called between 2 and 5 times"|
+| AnyNumber() | "called any number of times"|
+| Between(0,0) | "never called"         |
+
+The actual call count is similarly described for clarity:
+
+```cpp
+// Example usage of DescribeActualCallCountTo
+std::ostringstream os;
+testing::Cardinality::DescribeActualCallCountTo(1, &os); // "called once"
+std::string description = os.str();
+```
+
+---
+
+## Example Workflow
+
+```cpp
+using ::testing::AtLeast;
+using ::testing::Exactly;
+using ::testing::Return;
+
+MockFoo mock;
+
+// This expects that Bar() will be called exactly 3 times.
+EXPECT_CALL(mock, Bar())
+    .Times(Exactly(3))
+    .WillRepeatedly(Return(42));
+
+// Call Bar() three times
+mock.Bar(); // returns 42
+mock.Bar(); // returns 42
+mock.Bar(); // returns 42
+
+// Fourth call will generate test failure due to cardinality violation
+mock.Bar(); // Test failure: Too many calls
+```
+
+---
+
+## Troubleshooting
+
+### Too Many or Too Few Actions Warning
+
+You may see warnings like:
+
+```
+Too many actions specified in EXPECT_CALL(...)
+Expected to be called at most once, but has 2 WillOnce()s.
+```
+
+or
+
+```
+Too few actions specified in EXPECT_CALL(...)
+Expected to be called twice, but has only 1 WillOnce().
+```
+
+This indicates mismatch between `.Times()` cardinality and the number of `.WillOnce()` actions.
+
+**Solution:** Make sure `.WillOnce()` count matches or is appropriate compared to `.Times()` cardinality or use `.WillRepeatedly()` to cover the rest.
+
+### Unexpected Calls
+
+Calls that don't match any `EXPECT_CALL` produce errors immediately. Fix your expectations or allow other calls with `.Times(AnyNumber())` if valid.
+
+### Uninteresting Calls
+
+Calls to mock methods without `EXPECT_CALL` produce warnings (naggy mode by default). Use `NiceMock<>` to suppress or `StrictMock<>` to treat as failures.
+
+---
+
+## Related APIs and Documentation
+
+- [`EXPECT_CALL`](../reference/mocking.md#EXPECT_CALL) — Setting expectations, chaining clauses
+- [`ON_CALL`](../reference/mocking.md#ON_CALL) — Setting default behaviors without expectations
+- [Cardinality Helpers](../gmock_cheat_sheet.md#CardinalityList) — Quick cheatsheet of built-in cardinalities
+- [Basic Mocking](../guides/getting-started/basic-mocking.md) — How to use mocks and expectations
+- [Advanced Mocking Patterns](../guides/essential-workflows/advanced-mocking-patterns.md) — In-depth usage of sequences and call order control
+- [gMock for Dummies](../docs/gmock_for_dummies.md) — Beginner-friendly intro
+
+---
+
+## References
+
+- **Cardinalities are defined in:** `googlemock/include/gmock/gmock-cardinalities.h` and implemented in `googlemock/src/gmock-cardinalities.cc`.
+- **Test coverage examples:** `googlemock/test/gmock-cardinalities_test.cc`
+
+---
+
+## See Also
+
+For a full understanding of how cardinalities interact with expectations and mock behavior, study:
+
+- [`EXPECT_CALL` API](../reference/mocking.md#EXPECT_CALL)
+- [Matchers API](../api-reference/matchers-actions/matchers.md)
+- [Actions API](../api-reference/matchers-actions/actions.md)
+- [Mocking APIs](../api-reference/core-testing-apis/mocking-apis.md)
+
+---
+
+## Summary
+
+Cardinalities allow you to rigorously specify how many times mock methods are expected or allowed to be called, providing precise verification for unit tests. Using built-in helpers like `AtLeast`, `AtMost`, `Between`, and `Exactly` — or implementing custom cardinalities — gives you flexible control over invocation patterns. Combining cardinalities with behavior clauses and sequences yields robust, maintainable, and expressive mock expectations.
+
+---
