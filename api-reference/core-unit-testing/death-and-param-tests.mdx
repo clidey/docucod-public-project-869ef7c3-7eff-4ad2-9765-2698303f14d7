@@ -1,0 +1,324 @@
+---
+title: "Death Tests and Parameterized Testing"
+description: "Documents APIs for writing death tests (verifying abnormal program termination) and both value- and type-parameterized tests, with guidance on their invocation and best practices."
+---
+
+# Death Tests and Parameterized Testing
+
+This page documents the advanced GoogleTest APIs and techniques for verifying abnormal program termination (death tests), and for writing both value-parameterized and type-parameterized tests. It guides you through the recommended invocation practices and best practices to help you write robust, expressive tests that thoroughly verify your code’s behavior under diverse conditions.
+
+---
+
+## Death Tests
+
+Death tests are specialized tests designed to confirm that your code terminates as expected under certain failure conditions, such as assertion failures or fatal signals. These tests ensure that your program detects and reacts properly to invalid states, and help prevent silent failures that could lead to memory corruption or security vulnerabilities.
+
+### What Are Death Tests?
+
+- Death tests verify that a statement causes the process to terminate (e.g., crashes or exits with a nonzero status).
+- They differ from exception tests, as exceptions can be caught by callers and do not necessarily lead to termination.
+- GoogleTest provides macros that execute death tests by running the tested code in a subprocess and checking the exit status and stderr output.
+
+### Writing a Death Test
+
+Use the following macros inside a test function to write death tests:
+
+```cpp
+TEST(MyDeathTest, CrashesOnInvalidInput) {
+  ASSERT_DEATH({ ProcessInput(-1); }, "Invalid input");
+}
+
+TEST(MyDeathTest, ExitsNormally) {
+  EXPECT_EXIT(NormalExitFunction(), testing::ExitedWithCode(0), "Success");
+}
+
+TEST(MyDeathTest, KilledBySignal) {
+  EXPECT_EXIT(KillProcess(), testing::KilledBySignal(SIGKILL), "termination");
+}
+```
+
+- The first parameter is the statement tested.
+- The second is an exit status predicate or a check for any nonzero exit status.
+- The third parameter is a matcher or a regex string to match stderr output.
+
+### Important Usage Notes
+
+- **Test suite naming convention:** Name test suites that contain death tests with suffix `DeathTest` (e.g., `MyFeatureDeathTest`). This helps GoogleTest run them first and manage thread safety.
+- **Mocks and leaks:** If a death test uses mocks and expects a specific exit code, allow mocks to be leaked with `Mock::AllowLeak` to prevent false positives from mock leak detection.
+- **Compound statements:** You may use compound statements `{ ... }` to include multiple statements in a death test.
+- **Multiple death tests:** Don't put multiple death test macros on the same line; this causes compile errors.
+- **Thread safety:** Death tests run subprocesses and are best run in single-threaded contexts due to potential fork/thread interaction issues.
+
+### Death Test Styles
+
+GoogleTest supports two styles:
+
+- **Fast:** The child process runs test logic immediately after forking.
+- **Threadsafe:** The child process re-executes the entire binary, running only the target death test.
+
+Set the style globally or per-test using:
+
+```cpp
+GTEST_FLAG_SET(death_test_style, "threadsafe");
+```
+
+### Common Failure Modes
+
+- Failing to die causes the test to fail.
+- Unexpected stderr output causes failure.
+- Assertions inside the death test that do not terminate the process do not cause test failure.
+- Using `return` inside the death test code is illegal and triggers failure.
+
+### Handling Exceptions in Death Tests
+
+- Death tests do **not** consider exceptions as “death.”
+- Exceptions escaping death tests are reported as failures.
+- See exception assertion macros for verifying exceptions instead.
+
+### Example: Crash on nullptr Dereference
+
+```cpp
+TEST(PointerDeathTest, CrashOnNullptrDereference) {
+  ASSERT_DEATH(
+    {
+      int* p = nullptr;
+      *p = 42;
+    },
+    ""
+  );
+}
+```
+
+---
+
+## Value-Parameterized Tests
+
+Value-parameterized tests enable you to run the same test logic over a set of different input values, improving test coverage without duplicating code.
+
+### How to Write Value-Parameterized Tests
+
+1. Define a fixture class derived from `testing::TestWithParam<T>`, where `T` is the parameter type:
+
+```cpp
+class MyParamTest : public testing::TestWithParam<int> {};
+```
+
+2. Write your tests using `TEST_P` macro, accessing the parameter via `GetParam()`:
+
+```cpp
+TEST_P(MyParamTest, HandlesVariousInputs) {
+  int input = GetParam();
+  EXPECT_TRUE(Validate(input));
+}
+```
+
+3. Instantiate your test suite for a list of parameters using `INSTANTIATE_TEST_SUITE_P`:
+
+```cpp
+INSTANTIATE_TEST_SUITE_P(
+    MyGroup,
+    MyParamTest,
+    testing::Values(1, 2, 3, 42));
+```
+
+### Notes
+
+- The first argument to `INSTANTIATE_TEST_SUITE_P` is the instantiation name, used as a prefix in test naming.
+- The parameter generator can be `Values`, `ValuesIn`, etc., allowing arrays, vectors, or any iterable.
+- Definition of `TEST_P` and the instantiation macros must occur at namespace/global scope, not inside functions.
+- To suppress warnings when `TEST_P` is defined without instantiation, use `GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(FixtureName);`.
+
+### Example
+
+```cpp
+class StringLengthTest : public testing::TestWithParam<std::string> {};
+
+TEST_P(StringLengthTest, IsPositive) {
+  EXPECT_GT(GetParam().length(), 0);
+}
+
+INSTANTIATE_TEST_SUITE_P(NonEmptyStrings, StringLengthTest,
+                         testing::Values("a", "hello", "test"));
+```
+
+---
+
+## Typed Tests
+
+Typed and type-parameterized tests simplify testing the same logic over multiple types.
+
+### Typed Tests
+
+You must know the list of types at test definition time.
+
+1. Create a class template derived from `testing::Test`:
+
+```cpp
+template <typename T>
+class MyTypedTest : public testing::Test {
+  // test code, type-dependent
+};
+```
+
+2. Associate a list of types with the test suite using `TYPED_TEST_SUITE`:
+
+```cpp
+using MyTypes = ::testing::Types<int, double, char>;
+TYPED_TEST_SUITE(MyTypedTest, MyTypes);
+```
+
+3. Define tests using `TYPED_TEST` macro:
+
+```cpp
+TYPED_TEST(MyTypedTest, DoesSomething) {
+  TypeParam value{};  // TypeParam references the current test's type
+  EXPECT_TRUE(TestFunction(value));
+}
+```
+
+### Type-Parameterized Tests
+
+If you want to define the test once and instantiate it later with multiple type lists:
+
+1. Define fixture template and declare using `TYPED_TEST_SUITE_P`:
+
+```cpp
+template <typename T>
+class MyTypeParamTest : public testing::Test {};
+
+TYPED_TEST_SUITE_P(MyTypeParamTest);
+```
+
+2. Define test patterns with `TYPED_TEST_P`:
+
+```cpp
+TYPED_TEST_P(MyTypeParamTest, DoesSomething) {
+  TypeParam value{};
+  EXPECT_TRUE(TestFunction(value));
+}
+```
+
+3. Register test names:
+
+```cpp
+REGISTER_TYPED_TEST_SUITE_P(MyTypeParamTest, DoesSomething);
+```
+
+4. Instantiate with types later:
+
+```cpp
+using MyTypes = ::testing::Types<int, float>;
+INSTANTIATE_TYPED_TEST_SUITE_P(MyInstantiation, MyTypeParamTest, MyTypes);
+```
+
+### Notes
+
+- This approach is useful for testing interface conformance in libraries where type lists are not known upfront.
+- You can instantiate the same test pattern multiple times with different type lists using different prefixes.
+
+### Example (Typed Test)
+
+```cpp
+template <typename T>
+class NumericTest : public testing::Test {
+ public:
+  T value = T();
+};
+
+using NumericTypes = testing::Types<int, double, long>;
+TYPED_TEST_SUITE(NumericTest, NumericTypes);
+
+TYPED_TEST(NumericTest, IsZeroInitially) {
+  EXPECT_EQ(this->value, TypeParam{});
+}
+```
+
+### Example (Type-Parameterized Test)
+
+```cpp
+template <typename T>
+class InterfaceComplianceTest : public testing::Test {
+  void CheckInterface() { /*...*/ }
+};
+
+TYPED_TEST_SUITE_P(InterfaceComplianceTest);
+
+TYPED_TEST_P(InterfaceComplianceTest, Complies) {
+  this->CheckInterface();
+}
+
+REGISTER_TYPED_TEST_SUITE_P(InterfaceComplianceTest, Complies);
+
+using Implementations = testing::Types<ClassA, ClassB>;
+INSTANTIATE_TYPED_TEST_SUITE_P(MyImpls, InterfaceComplianceTest, Implementations);
+```
+
+---
+
+## Best Practices and Troubleshooting
+
+### Death Tests
+
+- Prefer short, self-contained death test statements.
+- Avoid freeing memory or side effects inside death test statements as the child process may exit abruptly.
+- If your death test uses mocks, ensure you allow leaks if necessary.
+- Use dedicated test suites named with `DeathTest` suffix.
+- Beware of multi-threading issues; death tests are best single-threaded.
+
+### Parameterized Tests
+
+- Carefully name instantiations to avoid clashes.
+- If parameters are complex types, consider providing custom name generators.
+- Use `SCOPED_TRACE` within parameterized tests to track individual failing parameter values.
+- Use `GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST` to suppress warnings for template tests used as libraries.
+
+---
+
+## Additional Resources
+
+- [Assertions Reference](reference/assertions.md#death) — Comprehensive list of death test and exit assertions.
+- [Advanced Guide](docs/advanced.md#death-tests) — In-depth explanation of death test implementation and nuances.
+- [GoogleMock Introduction](overview/core-concepts-and-terminology/googlemock-intro) — For integrating mocks with death tests.
+- [Parameterized Testing](reference/testing.md#parameterized-tests) — Official parameterized test APIs and examples.
+
+---
+
+By mastering death tests and parameterized testing, you ensure your code gracefully handles critical failure paths and that your tests can effortlessly cover a broad range of scenarios with minimal code duplication. Harness these features to build thorough, maintainable, and robust test suites.
+
+---
+
+<AccordionGroup title="Code Examples">
+<Accordion title="Death Test Example">
+```cpp
+TEST(FooDeathTest, TerminatesOnInvalidState) {
+  ASSERT_DEATH({ Foo().Process(-1); }, "Invalid state");
+}
+```
+</Accordion>
+<Accordion title="Value-Parameterized Test Example">
+```cpp
+class IsPrimeTest : public testing::TestWithParam<int> {};
+
+TEST_P(IsPrimeTest, HandlesPrimeInput) {
+  EXPECT_TRUE(IsPrime(GetParam()));
+}
+
+INSTANTIATE_TEST_SUITE_P(PrimeNumbers, IsPrimeTest,
+                         testing::Values(2, 3, 5, 7, 11));
+```
+</Accordion>
+<Accordion title="Typed Test Example">
+```cpp
+template <typename T>
+class NumericLimitsTest : public testing::Test {};
+
+typedef ::testing::Types<int, float, double> MyTypes;
+
+TYPED_TEST_SUITE(NumericLimitsTest, MyTypes);
+
+TYPED_TEST(NumericLimitsTest, MaxIsGreaterThanZero) {
+  EXPECT_GT(std::numeric_limits<TypeParam>::max(), 0);
+}
+```
+</Accordion>
+</AccordionGroup>
