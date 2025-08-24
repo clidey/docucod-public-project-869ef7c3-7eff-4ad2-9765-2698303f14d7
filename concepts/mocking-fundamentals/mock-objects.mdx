@@ -1,0 +1,278 @@
+---
+title: "Mock Objects and the Role of Expectations"
+description: "Discover how to use mock objects to specify, observe, and verify interactions with dependencies. Learn about the use of ON_CALL and EXPECT_CALL, and how expectations drive test intent and verification."
+---
+
+# Mock Objects and the Role of Expectations
+
+Understanding how to specify, observe, and verify interactions with dependencies is essential for effective unit testing in C++. Google Mock (gMock) provides a powerful framework to create mock objects and express expectations on how those objects are used, enabling interaction-based testing that complements traditional state verification.
+
+---
+
+## Overview of Mock Objects
+
+A **mock object** is a test double that simulates the behavior of a real object in a controlled way. Unlike fakes, mocks allow explicit **expectations** to be set on their behavior and interactions, verifying the correctness of how the system under test uses its dependencies.
+
+The workflow involves:
+
+1. Defining a mock class with mock methods.
+2. Setting **default actions** using `ON_CALL` for general behavior when calls occur.
+3. Setting **expectations** using `EXPECT_CALL` to specify how many times, with what arguments, and in which order functions are called.
+4. Exercising the code under test.
+5. Upon mock object destruction, gMock automatically verifies that all expectations were met.
+
+---
+
+## Defining Default Behavior With ON_CALL
+
+`ON_CALL` is used to specify the default behavior of mock methods without setting an expectation that the method must be called. It controls what happens when the method is invoked with matching arguments but no explicit expectation exists.
+
+### Syntax Summary
+
+```cpp
+ON_CALL(mock_object, Method(matchers...))
+    .With(multi_arg_matcher)  // Optional, once
+    .WillByDefault(action);   // Required
+```
+
+- The `With` clause is optional and restricts argument combinations.
+- `WillByDefault` specifies what action to perform when the call occurs.
+
+### Example
+
+```cpp
+using ::testing::Return;
+
+ON_CALL(foo_mock, GetSize())
+    .WillByDefault(Return(1));
+```
+
+Any call to `foo_mock.GetSize()` that does not match an explicit expectation will return 1.
+
+### Best Practice
+
+- Use `ON_CALL` to set common default behaviors, ideally in the mock constructor or test fixture.
+- Avoid using `EXPECT_CALL` when you do not want to enforce a call count or arguments.
+- Multiple `ON_CALL`s can be set, with later ones taking precedence for matching arguments.
+
+---
+
+## Setting Expectations Using EXPECT_CALL
+
+`EXPECT_CALL` defines expectations about the interaction between the system under test and the mock object: which methods are expected to be called, how often, with what arguments, and optionally in what order.
+
+### Syntax Summary
+
+```cpp
+EXPECT_CALL(mock_object, Method(matchers...))
+    .With(multi_arg_matcher)        // Optional, once
+    .Times(cardinality)             // Optional, once
+    .InSequence(sequences...)       // Optional, any number
+    .After(expectations...)         // Optional, any number
+    .WillOnce(action)               // Optional, any number
+    .WillRepeatedly(action)         // Optional, once
+    .RetiresOnSaturation();         // Optional, once
+```
+
+### Purpose and Impact
+
+- An `EXPECT_CALL` statement sets an expectation **before** the code under test runs, signalling that the call is expected to occur.
+- If the mock method is called fewer or more times than specified, or with arguments that don’t match, verification will fail.
+- Later `EXPECT_CALL`s override earlier ones for matching argument sets (search happens **back to front**).
+
+### Example
+
+```cpp
+using ::testing::Return;
+
+EXPECT_CALL(foo_mock, Compute(_))  // Any argument
+    .Times(3)
+    .WillOnce(Return(10))
+    .WillOnce(Return(20))
+    .WillOnce(Return(30));
+
+// foo_mock.Compute() is expected to be called exactly three times,
+// returning 10, then 20, then 30 in order.
+```
+
+### Key Clauses
+
+- **Times(cardinality)**: Specifies how many times the call is expected (`Exactly(n)`, `AtLeast(n)`, `AnyNumber()`, etc.). Inferred if omitted.
+- **InSequence()** & **After()**: Control the call order explicitly.
+- **WillOnce()** and **WillRepeatedly()**: Define behaviors for calls.
+- **RetiresOnSaturation()**: Marks an expectation as inactive after matching the specified call count, enabling fallback to earlier expectations.
+
+### Best Practices
+
+- Use `EXPECT_CALL` only when you want to verify a call occurs as expected.
+- Avoid over-specifying - setting expectations too narrowly creates brittle tests.
+- Utilize catch-all expectations with wildcard matchers (`_`) and `Times(AnyNumber())` to allow unimportant calls without warnings.
+- Arrange `EXPECT_CALL`s from general to specific; the most recent matching expectation is applied.
+
+---
+
+## How Expectations Drive Test Intent and Verification
+
+Expectations are the glue bridging test intent and verification. They:
+
+- Specify *which* calls matter and *how* they matter.
+- Enable early failure detection when calls happen unexpectedly or with incorrect arguments.
+- Support reasoning about the *order* of calls and *frequency* constraints.
+
+Google Mock searches expectations in reverse order to pick the last matching expectation, allowing default behaviors to be set early and overridden later by more specific expectations.
+
+### Example: Overriding Default Expectations
+
+```cpp
+EXPECT_CALL(foo, Bar(_))
+    .Times(AnyNumber())
+    .WillRepeatedly(Return(false));  // Default behavior
+
+EXPECT_CALL(foo, Bar(5))
+    .Times(2)
+    .WillRepeatedly(Return(true));  // Specific behavior
+```
+
+Calls to `foo.Bar(5)` will use the second expectation (return `true`), up to two times, after which the first applies.
+
+### Common Pitfall: Sticky Expectations
+
+Expectations remain active even after they have been saturated, causing calls exceeding the call count to produce errors unless `RetiresOnSaturation()` is used.
+
+```cpp
+EXPECT_CALL(foo, DoX())
+    .Times(2)
+    .RetiresOnSaturation();
+
+EXPECT_CALL(foo, DoX())
+    .Times(AnyNumber());
+```
+
+The first will retire after two calls, allowing subsequent calls to be handled by the second.
+
+---
+
+## Distinguishing Uninteresting and Unexpected Calls
+
+Understanding call categories is vital for diagnosing test failures:
+
+| Call Type        | Description                                            | Behavior with `EXPECT_CALL` | Default gMock Action          |
+|------------------|--------------------------------------------------------|-----------------------------|------------------------------|
+| **Uninteresting** | No `EXPECT_CALL` is set for the method at all.         | N/A                         | Warning printed; call allowed |
+| **Unexpected**   | One or more `EXPECT_CALL`s exist but none match args.  | Failure                     | Test failure reported         |
+
+### Adjusting Behavior
+
+- **Nice Mocks:** Suppress warnings for uninteresting calls.
+- **Naggy Mocks (Default):** Show warnings on uninteresting calls.
+- **Strict Mocks:** Treat uninteresting calls as errors.
+
+Example:
+
+```cpp
+using ::testing::NiceMock;
+NiceMock<MockFoo> nice_foo;  // No warnings for uninteresting calls
+
+using ::testing::StrictMock;
+StrictMock<MockFoo> strict_foo;  // Fail on uninteresting calls
+```
+
+---
+
+## Summary of Terms
+
+| Term          | Meaning                                                  |
+|---------------|----------------------------------------------------------|
+| Mock Object   | Simulated object with controllable behavior and expectations |
+| Expectation   | An `EXPECT_CALL` declaration describing expected calls   |
+| Default Action| Default behavior defined by `ON_CALL` or built-in defaults|
+| Uninteresting Call | Call to a mock method without any matching expectation     |
+| Unexpected Call | Call to a mock method with no matching expectation       |
+
+---
+
+## Troubleshooting Tips
+
+- Use `--gmock_verbose=info` to get detailed traces of all mock calls and expectations.
+- If you get warnings about uninteresting calls, consider adding a catch-all `EXPECT_CALL` with `Times(AnyNumber())` or switch to `NiceMock`.
+- Use sequences and `.After()` clauses to diagnose call order issues.
+- Ensure mock objects have virtual destructors to avoid memory errors.
+
+---
+
+## Example: Complete Mock Setup
+
+```cpp
+#include <gmock/gmock.h>
+
+class FooInterface {
+ public:
+  virtual ~FooInterface() = default;
+  virtual int Compute(int x) = 0;
+};
+
+class MockFoo : public FooInterface {
+ public:
+  MOCK_METHOD(int, Compute, (int x), (override));
+};
+
+TEST(UsingMocks, Example) {
+  MockFoo mock;
+
+  // Default behavior when no expectation matches.
+  ON_CALL(mock, Compute(_)).WillByDefault(::testing::Return(0));
+
+  // Expect Compute(5) to be called twice, returning 42 each time.
+  EXPECT_CALL(mock, Compute(5))
+      .Times(2)
+      .WillRepeatedly(::testing::Return(42));
+
+  EXPECT_EQ(mock.Compute(5), 42);  // First call
+  EXPECT_EQ(mock.Compute(5), 42);  // Second call
+  EXPECT_EQ(mock.Compute(3), 0);   // Default behavior
+}
+```
+
+---
+
+## References and Further Reading
+
+- [Mocking Reference](../reference/mocking.md) — Comprehensive details on mock macros and classes.
+- [gMock Cheat Sheet](gmock_cheat_sheet.md) — Quick recipes and commonly used techniques.
+- [gMock Cookbook](gmock_cook_book.md) — Advanced usage, tips, and tricks.
+- [gMock for Dummies](gmock_for_dummies.md) — Beginner-friendly introduction.
+- Understanding [Uninteresting vs Unexpected Calls](gmock_cook_book.md#uninteresting-vs-unexpected)
+
+---
+
+With this knowledge, you are empowered to write expressive and maintainable tests that verify interactions precisely, improving code reliability and test quality.
+
+---
+
+### Mermaid Diagram: Mock Interaction with Expectations
+
+```mermaid
+flowchart TD
+
+    SUT["System Under Test"] -->|calls| MockObj["Mock Object"]
+
+    subgraph Expectation Search
+        direction TB
+        E1["Old Expectations"]
+        E2["Recent Expectations"]
+        E3["Most Recent Expectation"]
+    end
+
+    MockObj -->|checks call against| E3
+    E3 -->|matches?| matchResult{Match found?}
+    matchResult -- "yes" --> PerformAction["Perform Associated Action (WillOnce/WillRepeatedly)"]
+    matchResult -- "no" --> E2
+    E2 -->|checks call against| E1
+    E1 -->|no match| UnexpCall["Unexpected Call! Test Failure"]
+
+    PerformAction -->|if saturated and RetiresOnSaturation()| RetireExp["Retire Expectation"]
+
+    classDef sutStyle fill:#aaffaa,stroke:#333,stroke-width:2px;
+    class SUT sutStyle;
+    class MockObj,E1,E2,E3,PerformAction,UnexpCall,RetireExp suspen;
+```
