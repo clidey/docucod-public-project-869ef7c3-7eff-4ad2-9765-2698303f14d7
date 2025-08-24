@@ -1,0 +1,258 @@
+---
+title: "Setting Expectations and Sequencing"
+description: "Details how to use EXPECT_CALL and ON_CALL macros to specify expected invocations, ordering, and call counts with cardinality controls. Illustrates sequencing multiple expectations and behaviors."
+---
+
+# Setting Expectations and Sequencing
+
+This documentation explains how to use the `EXPECT_CALL` and `ON_CALL` macros in GoogleMock to define expected method invocations, control call ordering, and manage call counts using cardinality. It illustrates how to sequence multiple method expectations and specify behaviors for mock methods.
+
+---
+
+## Overview
+
+When working with mock objects in GoogleMock, you specify how the mock methods are expected to be called and what actions they should perform. The two primary macros for this are:
+
+- `EXPECT_CALL`: Defines an expectation that a mock method should be called with specific arguments, how many times, and optionally in which order.
+- `ON_CALL`: Defines default behavior when a mock method is called, but does not set any expectations about *whether* or *how many times* it will be called.
+
+Understanding when and how to use these macros effectively enables you to write precise, maintainable tests that verify interaction patterns between objects.
+
+---
+
+## Using `EXPECT_CALL`
+
+`EXPECT_CALL(mock_object, Method(args...))` is how you declare that your test expects certain calls to occur on the mock object. Alongside this macro, you can chain clauses to refine the expectation:
+
+```cpp
+EXPECT_CALL(mock_object, Method(matchers...))
+    .With(multi_argument_matcher)     // Optional, once
+    .Times(cardinality)               // Optional, once
+    .InSequence(sequences...)         // Optional, any number
+    .After(expectations...)           // Optional, any number
+    .WillOnce(action)                 // Optional, any number
+    .WillRepeatedly(action)           // Optional, once
+    .RetiresOnSaturation();           // Optional, once
+```
+
+### Key Clauses Explained
+
+### 1. `.With()` — Matching Arguments as a Whole
+
+Use `.With()` to apply a matcher to the entire set of arguments as a tuple. For example, to expect calls where the first argument is less than the second:
+
+```cpp
+using ::testing::_;
+using ::testing::Lt;
+EXPECT_CALL(mock, SetPosition(_, _))
+    .With(Lt());  // The first argument is less than the second
+```
+
+The `.With()` clause can only appear once and must be the first clause after `EXPECT_CALL`.
+
+### 2. `.Times()` — Specifying How Many Times
+
+Controls how many times the mock method is expected to be called. Examples include:
+
+| Cardinality           | Description                             |
+|-----------------------|---------------------------------------|
+| `AnyNumber()`         | Any number of calls                    |
+| `AtLeast(n)`          | At least `n` calls                    |
+| `AtMost(n)`           | At most `n` calls                     |
+| `Between(m, n)`       | Between `m` and `n` calls (inclusive) |
+| `Exactly(n)` or `n`   | Exactly `n` calls                      |
+
+If omitted, cardinality is inferred from the `.WillOnce()` / `.WillRepeatedly()` clauses:
+
+- No `WillOnce` or `WillRepeatedly`: assumes `Times(1)`.
+- `n` `WillOnce` clauses, no `WillRepeatedly`: `Times(n)`.
+- `n` `WillOnce` clauses and one `WillRepeatedly`: `Times(AtLeast(n))`.
+
+### 3. `.InSequence()` — Enforcing Call Ordering
+
+To require calls to happen in a specific order, associate expectations with one or more `Sequence` objects:
+
+```cpp
+using ::testing::Sequence;
+Sequence s1, s2;
+EXPECT_CALL(mock, Reset())
+    .InSequence(s1, s2);
+EXPECT_CALL(mock, GetSize())
+    .InSequence(s1);
+EXPECT_CALL(mock, Describe())
+    .InSequence(s2);
+```
+
+Calls assigned to the same sequence must be invoked in the order the expectations appear. Using multiple sequences allows specifying partial orderings.
+
+### 4. `.After()` — Specifying Partial Ordering
+
+Allows setting explicit partial ordering by specifying prerequisite expectations that must be satisfied before this expectation can be matched.
+
+```cpp
+using ::testing::Expectation;
+Expectation e1 = EXPECT_CALL(mock, InitX());
+Expectation e2 = EXPECT_CALL(mock, InitY());
+EXPECT_CALL(mock, Describe()).After(e1, e2);
+```
+
+The mock method with `.After()` will only accept matching calls after all prerequisite expectations are satisfied.
+
+You can supply up to 5 expectations or expectation sets in `.After()`.
+
+### 5. `.WillOnce()` and `.WillRepeatedly()` — Defining The Behavior
+
+Specify actions taken when the expectation is matched:
+
+- `.WillOnce(action)` specifies the action for the *next* matching call (can be called multiple times with different actions).
+- `.WillRepeatedly(action)` specifies the action for all subsequent matching calls after `WillOnce`s run out (can be called at most once).
+
+Example:
+
+```cpp
+using ::testing::Return;
+EXPECT_CALL(mock, GetNumber())
+    .WillOnce(Return(1))
+    .WillOnce(Return(2))
+    .WillRepeatedly(Return(3));
+```
+
+### 6. `.RetiresOnSaturation()` — Retiring Expectations
+
+Controls when an expectation becomes inactive (retires). By default, expectations are "sticky" and remain active even if saturated.
+
+Use `.RetiresOnSaturation()` to make the expectation retire as soon as its call count hits the upper bound — this allows other expectations to match subsequent calls.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, SetNumber(_))     // #1
+    .Times(AnyNumber());
+EXPECT_CALL(mock, SetNumber(7))     // #2
+    .Times(2)
+    .RetiresOnSaturation();
+```
+
+Here, the first two calls with argument 7 match expectation #2. After it retires, further calls with 7 match #1.
+
+---
+
+## Using `ON_CALL`
+
+`ON_CALL` defines the default actions for a mock method when no matching `EXPECT_CALL` applies. It sets behavior without adding expectations.
+
+Usage patterns:
+
+```cpp
+ON_CALL(mock, Method(matchers...))
+    .With(multi_argument_matcher)    // Optional, once
+    .WillByDefault(action);          // Mandatory, once
+```
+
+`ON_CALL` is useful to:
+
+- Provide common default behavior shared by all tests
+- Avoid over-constraining tests with unnecessary expectations
+
+Example:
+
+```cpp
+using ::testing::Return;
+ON_CALL(mock, Greet())
+    .WillByDefault(Return("hello"));
+```
+
+Multiple `ON_CALL`s are resolved by precedence: the last matching `ON_CALL` applies.
+
+---
+
+## Best Practices
+
+- Use `ON_CALL` to specify default behaviors without requiring call counts.
+- Use `EXPECT_CALL` to verify that specific calls happen, including their order and count.
+- Set expectations *before* the mock methods are called — otherwise behavior is undefined.
+- Use `.Times(0)` to explicitly disallow specific calls.
+- Use `Sequence` objects or `InSequence` block to enforce strict call order.
+- Use `.After()` clause to specify more complex partial ordering.
+- Use `.RetiresOnSaturation()` when you want expectations to retire after being fulfilled.
+- Specify `.WillOnce()` and `.WillRepeatedly()` actions to control mock method behavior precisely.
+- For overloaded methods, provide argument matchers or use the `Const()` wrapper to avoid ambiguity.
+- Suppress "Uninteresting mock function call" warnings by:
+  - Using `NiceMock` wrapper
+  - Adding a catch-all `EXPECT_CALL(...).Times(AnyNumber())`
+
+---
+
+## Example: Ordering and Call Counts
+
+```cpp
+using ::testing::Sequence;
+using ::testing::Return;
+using ::testing::AtLeast;
+
+Sequence seq;
+MockTurtle turtle;
+
+ON_CALL(turtle, GetX())
+    .WillByDefault(Return(0));
+
+EXPECT_CALL(turtle, PenDown())
+    .Times(1)
+    .InSequence(seq);
+EXPECT_CALL(turtle, Forward(100))
+    .Times(AtLeast(1))
+    .InSequence(seq);
+EXPECT_CALL(turtle, PenUp())
+    .InSequence(seq);
+
+// Now turtle.PenDown() must happen before Forward(100), which must happen before PenUp()
+```
+
+---
+
+## Troubleshooting Common Issues
+
+### Calls Not Matching Any Expectation
+
+- Ensure your `EXPECT_CALL` uses correct matchers or argument lists.
+- If a call is unexpected, GoogleMock will print detailed messages showing which expectations were tried.
+- Use `--gmock_verbose=info` to see detailed matching logs during test runs.
+
+### Unexpected Call Order Errors
+
+- Use `Sequence` or `InSequence` to enforce call ordering when required.
+- Double-check `.After()` clauses for partial ordering constraints.
+
+### Too Many or Too Few Actions
+
+- Verify `.WillOnce()` and `.WillRepeatedly()` counts align with `.Times()`.
+- Warnings occur if you specify more or fewer actions than the cardinality allows.
+
+### Uninteresting Call Warnings
+
+- Use `NiceMock` to suppress warnings for unexpected but allowable calls.
+- Add explicit catch-all `EXPECT_CALL` with `.Times(AnyNumber())` if needed.
+
+---
+
+## Related Resources
+
+- [Mocking Reference](reference/mocking.md#EXPECT_CALL) — detailed explanation of `EXPECT_CALL` and `ON_CALL`.
+- [gMock for Dummies](docs/gmock_for_dummies.md) — beginner-friendly introduction.
+- [gMock Cookbook](docs/gmock_cook_book.md#SettingExpectations) — practical recipes for expectations and sequencing.
+- [Matchers Reference](reference/using-matchers.md) — learn argument matchers used in expectations.
+- [Actions Reference](reference/actions.md) — define what mock methods do when called.
+- [Writing Effective Tests](guides/writing-effective-tests/using-mocks-effectively.mdx) — best practices in test design with mocks.
+
+---
+
+## Source
+
+The implementation of `EXPECT_CALL` and `ON_CALL` can be found in the following core GoogleMock files:
+
+- `gmock-spec-builders.h` — macros and class templates enabling expectations syntax
+- `gmock-spec-builders.cc` — supporting internal mechanics for sequencing and expectation lifecycle
+
+See the [GoogleMock GitHub repository](https://github.com/google/googletest) for the full source.
+
+---
