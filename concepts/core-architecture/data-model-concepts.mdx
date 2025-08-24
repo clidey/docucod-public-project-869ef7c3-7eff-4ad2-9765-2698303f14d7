@@ -1,0 +1,182 @@
+---
+title: "Data Models & Schemas"
+description: "Details the internal models for tests, test cases, assertions, and matchers. Explains how the framework structures test metadata, result aggregation, and reporting to facilitate extensibility and robust error tracking."
+---
+
+# Data Models & Schemas
+
+Understanding how GoogleTest internally models tests, test suites, assertions, and matchers is essential to grasping how it manages metadata, aggregates results, and supports extensibility. This page dives into the core data structures and schemas that GoogleTest uses to track, report, and orchestrate test execution at scale. By knowing these foundational models, users can better interpret test results, customize reporting, and appreciate how extensibility such as event listeners is built on top of these abstractions.
+
+---
+
+## 1. Test Entities Overview
+
+At the heart of GoogleTest's data model are several key entities representing the hierarchy and execution context of tests:
+
+- **Test**: An individual test case or test method, representing a specific verification logic.
+- **TestSuite**: A container grouping logically related tests (previously called TestCase) that share fixtures or configuration.
+- **TestInfo**: Metadata object about an individual test, including name, source location, parameterization, and execution result.
+- **TestResult**: Captures the run-time outcome of a test, including all assertion results and timing information.
+- **TestPartResult**: Records the outcome of each assertion or test step within a test (success, non-fatal failure, fatal failure, skipped).
+- **TestProperty**: User-defined key/value pairs logged during test execution for extended metadata.
+- **UnitTest**: The singleton representing the entire test program, aggregating all test suites and global data.
+
+These building blocks enable structured collection and reporting of test execution data in a highly organized manner.
+
+### Illustration: Test Entity Hierarchy
+
+```
+UnitTest
+ ├─ TestSuite(s)
+ │    ├─ TestInfo(s)
+ │    │    ├─ TestResult
+ │    │    │    ├─ TestPartResult(s)
+ │    │    │    └─ TestProperty(s)
+ │    │    └─ TestProperty(s) (suite-level)
+ │    └─ TestProperty(s) (suite-level)
+ └─ Global TestProperty(s) (program-level)
+```
+
+
+## 2. Test and TestSuite
+
+### TestSuite
+
+- **Purpose**: Groups tests (Test instances) that are related, commonly by purpose or shared test fixture.
+- **Responsibilities**:
+  - Manage shared setup/teardown via `SetUpTestSuite()`/`TearDownTestSuite()` methods.
+  - Track collections of TestInfo objects representing the contained tests.
+  - Keep aggregated execution status, timing, and property data.
+  - Support shuffling, filtering, and selective execution of contained tests.
+- **Key Properties**:
+  - `name_`: the suite name.
+  - `test_info_list_`: owning vector of pointers to TestInfo objects.
+  - `type_param_`: name of parameterized type if a typed test suite.
+  - `set_up_tc_` and `tear_down_tc_`: pointers to static fixture setup/teardown functions.
+
+### Test
+
+- **Purpose**: Represents the executable test logic, implemented as a unique object for each test case.
+- **Responsibilities**:
+  - Defines the actual test code via overriding the abstract `TestBody()` method.
+  - Supports per-test setup/teardown via `SetUp()` and `TearDown()`.
+  - Used by GoogleTest runners to execute individual tests.
+- **Lifecycle**: A fresh test object is created and destroyed for every test run to ensure isolation.
+
+## 3. TestInfo & TestResult
+
+### TestInfo
+
+- Holds immutable information about a specific test instance:
+  - Test suite name and test name.
+  - Source file and line location.
+  - Flags indicating whether the test should be run, is disabled, or is included in the current shard.
+  - Parameterization details if any (both type and value parameters).
+  - Factory object used to create the Test instance.
+- Provides access to the run-time `TestResult` object which accumulates results.
+
+### TestResult
+
+- Tracks the detailed execution outcome for a test run:
+  - Timing information: start timestamp and elapsed time.
+  - List of `TestPartResult` objects tracking individual assertion results.
+  - User-defined properties added during the test run.
+  - Count of death tests executed within.
+- Provides convenience methods to query overall pass/fail status, fatal failures, skips, etc.
+
+## 4. TestPartResult: Capturing Assertion Outcomes
+
+- Represents the result of a single assertion or explicit test event (e.g., `FAIL()` call).
+- Each result includes:
+  - **Type**: One of `kSuccess`, `kNonFatalFailure`, `kFatalFailure`, or `kSkip`.
+  - **Source location**: The file name and line number where the assertion occurred.
+  - **Summary and message**: A text snippet summarizing the failure or success message if any.
+  - Helpers to query pass/fail and skip status.
+
+## 5. TestProperty: Extensible Test Metadata
+
+- Allows users to attach arbitrary key/value data to tests, test suites, or the entire test program.
+- Values are emitted as attributes in XML or JSON reports under their respective test elements.
+- Properties recorded during test execution are scoped to the test run, while those recorded during setup/teardown apply at higher levels.
+- Keys must not conflict with reserved GoogleTest XML attribute names.
+
+## 6. Parameterized Tests and Type Information
+
+- **Value-Parameterized Tests**: Each test instance gets a unique parameter from the generator. This is reflected in TestInfo's `value_param_`.
+- **Typed and Type-Parameterized Tests**: TestStats include `type_param_` information for test suites and individual tests, enabling proper reporting and filtering.
+- **Test Naming**: Parameterized test instances include the parameter or type name suffix in their full test name, aiding identification at runtime.
+
+## 7. Execution Context: UnitTest Singleton
+
+- Central repository of all registered test suites and global state.
+- Tracks aggregate counts of tests run, succeeded, failed, skipped, and disabled.
+- Provides access to the currently running test suite and test during execution.
+- Manages environment objects for global setup and teardown.
+- Supports event listener subscriptions to track test lifecycle events.
+
+## 8. Reporting Data Schema
+
+GoogleTest outputs reports (XML/JSON) structured with these elements:
+
+- `<testsuites>`: Root element, aggregates the entire test program run.
+- `<testsuite>`: Represents a TestSuite, including attributes like name, number of tests, failures, and time.
+- `<testcase>`: Corresponds to a specific test, with source info, execution status, and timing.
+- `<failure>`: Captures individual assertion failures as nested elements inside `<testcase>`.
+- Properties are emitted as XML attributes corresponding to user-defined keys.
+
+This schema aligns with JUnit report conventions enabling integration with CI systems and IDEs.
+
+## 9. Troubleshooting and Common Pitfalls
+
+- **Test Fixture Defaults**: Ensure fixture classes have a default constructor so tests can be instantiated correctly.
+- **Parameter Naming**: Avoid underscores in test and suite names to prevent naming conflicts and ambiguity.
+- **Assertion Limitations**: `ASSERT_*` macros abort only the current function, not the whole test - use `HasFatalFailure()` or `ASSERT_NO_FATAL_FAILURE` to manage flow.
+- **Test Isolation**: Tests must not rely on ordering or shared mutable state between them.
+
+## 10. Practical Example
+
+```cpp
+class FactorialTest : public ::testing::Test {};
+
+TEST_F(FactorialTest, HandlesZeroInput) {
+  EXPECT_EQ(Factorial(0), 1);
+}
+
+TEST_F(FactorialTest, HandlesPositiveInput) {
+  EXPECT_EQ(Factorial(1), 1);
+  EXPECT_EQ(Factorial(2), 2);
+}
+```
+
+- Here `FactorialTest` maps to a `TestSuite`
+- The two `TEST_F` instances are individual `TestInfo` with associated `TestResult`
+- Each `EXPECT_EQ` generates `TestPartResult` entries upon assertions
+
+
+---
+
+## See Also
+
+- [Test Macros and Registration](../api-reference/core-apis/test-macros.md)
+- [Assertions and Predicate Macros](../api-reference/core-apis/assertions.md)
+- [Matchers](../api-reference/core-apis/matchers.md)
+- [Parameterized and Typed Tests](../api-reference/advanced-features/parameterized-tests.md)
+- [System Architecture Overview](../overview/architecture-core-concepts/system-architecture.md)
+
+---
+
+## Glossary
+
+| Term             | Description                                                    |
+|------------------|----------------------------------------------------------------|
+| Test             | An individual test case or method.                            |
+| TestSuite        | A logical grouping of tests with common fixtures or purposes. |
+| TestInfo         | Metadata and registration info about a test.                  |
+| TestResult       | Execution result of a test, includes assertion outcomes.     |
+| TestPartResult   | Outcome and message of a single assertion inside a test.     |
+| TestProperty     | Custom key/value data attached to tests or suites.            |
+| UnitTest         | Singleton managing all test suites and global execution data. |
+
+---
+
+This data model underpins GoogleTest’s ability to manage complex test runs, support extensibility such as custom listeners, and generate rich reports, ensuring tests deliver clear insights into code health and behavior.
