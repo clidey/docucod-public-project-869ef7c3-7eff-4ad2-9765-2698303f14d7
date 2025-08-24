@@ -1,0 +1,286 @@
+---
+title: "Test Lifecycle & Execution Flow"
+description: "A deep dive into how a typical test progresses from initialization to teardown, covering key extension points such as custom environments and fixtures. Understand how tests are isolated, how failures are handled (fatal vs non-fatal), and how user code integrates with core operations."
+---
+
+# Test Lifecycle & Execution Flow
+
+Understanding how a test progresses within GoogleTest is vital to writing reliable and maintainable tests. This guide takes you on a journey through a typical test’s lifecycle, beginning at initialization and concluding with teardown. Along the way, it highlights key extension points like custom environments and fixtures, explains test isolation strategies, failure handling mechanisms, and how user code hooks into the core execution flow.
+
+---
+
+## 1. Overview of a Test's Lifecycle
+
+A GoogleTest test program runs tests in a highly structured process designed to ensure each test is isolated, reproducible, and reliable. The lifecycle can be summarized as:
+
+* **Global Environment Setup:** Before any tests start, all registered global test environments are initialized. This is your opportunity to set up system-wide resources.
+* **Test Suite Setup:** For each test suite, static setup methods prepare any shared resources or states before its first test runs.
+* **Test Fixture Creation:** Before each individual test, a fresh test fixture object is constructed.
+* **Test Setup:** The fixture’s `SetUp()` method is called to prepare the per-test context.
+* **Test Execution:** The test body runs, containing assertions that can pass or fail.
+* **Test Teardown:** `TearDown()` is invoked to clean up after the test.
+* **Fixture Destruction:** The test fixture object is destructed.
+* **Test Suite Teardown:** After all tests in a suite finish, the suite-level teardown method runs.
+* **Global Environment Teardown:** Finally, all global environments are torn down.
+
+Each phase is critical for test correctness and extensibility, with well-defined user extension points.
+
+---
+
+## 2. Global Test Environments
+
+### Purpose
+Global test environments allow setup and teardown of resources shared across the entire test program, such as databases, network configurations, or global configurations.
+
+### User Implementation
+To create a global test environment, subclass `::testing::Environment` and override:
+
+```cpp
+class FooEnvironment : public ::testing::Environment {
+public:
+  void SetUp() override {
+    // Initialize global resources
+  }
+
+  void TearDown() override {
+    // Cleanup
+  }
+};
+```
+
+Register your environment instance before running tests:
+
+```cpp
+testing::AddGlobalTestEnvironment(new FooEnvironment);
+```
+
+GoogleTest calls `SetUp()` on all registered environments before tests run, and `TearDown()` afterward.
+
+<Tip>
+If a global environment `SetUp()` reports a fatal failure or uses `GTEST_SKIP()`, testing stops before any test runs.
+</Tip>
+
+---
+
+## 3. Test Suites and Fixtures
+
+### Test Suites
+Test suites group related tests logically, often by class or module.
+
+### Fixtures
+Fixtures encapsulate per-test setup and teardown code, enabling test code reuse and consistent state.
+
+Example fixture declaration:
+
+```cpp
+class MyTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    // Prepare the test fixture
+  }
+  void TearDown() override {
+    // Clean up
+  }
+
+  // Shared objects for tests
+  Resource r_;
+};
+```
+
+Each test in the suite is run on a fresh fixture instance created specifically for it, ensuring full test isolation.
+
+---
+
+## 4. Detailed Test Execution Flow
+
+The core flow for each test is:
+
+1. **Fixture Construction:** A new test fixture object is created.
+2. **Fixture Setup:** The `SetUp()` method runs. If it fails fatally, the test is skipped.
+3. **Test Body Execution:** The test code runs, which may contain multiple assertions.
+4. **Failure Handling:** 
+   - *Fatal failures* (`ASSERT_*`) abort the current function immediately.
+   - *Nonfatal failures* (`EXPECT_*`) allow the function to continue.
+5. **Fixture Teardown:** After test execution, `TearDown()` is called to clean up.
+6. **Fixture Destruction:** The fixture object is destructed.
+
+<Tip>
+GoogleTest creates a new fixture instance per test. This guarantees independence but requires you keep expensive setups in `SetUpTestSuite()` for reuse.
+</Tip>
+
+---
+
+## 5. Test Suite Setup and Teardown
+
+When you need to share resources across tests within a suite (e.g., an expensive object instantiated once), use static methods in your fixture class:
+
+- `static void SetUpTestSuite()`: Called once before the first test in the suite.
+- `static void TearDownTestSuite()`: Called once after the last test in the suite.
+
+Example:
+
+```cpp
+class FooTest : public ::testing::Test {
+protected:
+  static void SetUpTestSuite() {
+    shared_resource_ = new ExpensiveResource();
+  }
+
+  static void TearDownTestSuite() {
+    delete shared_resource_;
+    shared_resource_ = nullptr;
+  }
+
+  static ExpensiveResource* shared_resource_;
+};
+
+ExpensiveResource* FooTest::shared_resource_ = nullptr;
+```
+
+Use this pattern to avoid redundant expensive setups for each test.
+
+---
+
+## 6. Failure Types and Their Impact on the Flow
+
+GoogleTest distinguishes two main failure types:
+
+- **Fatal Failures:** Generated by `ASSERT_*` and `FAIL()` macros. These immediately abort the current function (usually the test body). If in sub-functions, control returns to the caller, not cancelling the entire test automatically.
+
+- **Nonfatal Failures:** Generated by `EXPECT_*` and `ADD_FAILURE()`. The test function continues execution, allowing multiple issues to be reported in a single test run.
+
+### Propagating Fatal Failures
+
+Since fatal failures abort only the current function, user code in subroutines may want to detect failures and stop further execution. Techniques include:
+
+- Using `ASSERT_NO_FATAL_FAILURE()` to assert no fatal failures occur within a statement block.
+- Calling `::testing::Test::HasFatalFailure()` to query if any fatal failure has occurred in the current test.
+- Using `SCOPED_TRACE()` to add descriptive trace messages to identify failures in nested calls.
+
+### Isolation Around Failures
+
+If a test hits a fatal failure, GoogleTest skips the remaining steps (teardown, etc.) related to that test to avoid compounding errors and protects overall test suite execution.
+
+---
+
+## 7. Integration Points for User Code
+
+GoogleTest exposes several user extension points to integrate custom test logic:
+
+- **Global Environments** (`::testing::Environment`): For global setup and teardown.
+- **Test Fixtures** (`::testing::Test` subclasses): For per-suite and per-test setup and teardown.
+- **Parameterized Tests:** Allow writing tests running multiple times with different inputs.
+- **Test Event Listeners:** Advanced users can hook into test lifecycle events to customize reporting or behavior.
+
+This extensibility enables you to tailor test execution precisely to your project needs.
+
+---
+
+## 8. Test Execution in Practice: Example Flow
+
+Let’s visualize a simplified lifecycle for three tests within a single run:
+
+```mermaid
+flowchart TD
+  Start([Start Test Run]) --> EnvSetup["Global Environment SetUp"]
+  EnvSetup --> SuiteSetup["Test Suite SetUp (SetUpTestSuite)"]
+
+  subgraph Test1
+    T1_Constructor[Test Fixture Construct]
+    T1_SetUp[SetUp()]
+    T1_Run[Test Body]
+    T1_TearDown[TearDown()]
+    T1_Destructor[Test Fixture Destruct]
+  end
+
+  subgraph Test2
+    T2_Constructor[Test Fixture Construct]
+    T2_SetUp[SetUp()]
+    T2_Run[Test Body]
+    T2_TearDown[TearDown()]
+    T2_Destructor[Test Fixture Destruct]
+  end
+
+  subgraph Test3
+    T3_Constructor[Test Fixture Construct]
+    T3_SetUp[SetUp()]
+    T3_Run[Test Body]
+    T3_TearDown[TearDown()]
+    T3_Destructor[Test Fixture Destruct]
+  end
+
+  SuiteSetup --> T1_Constructor
+  T1_Destructor --> T2_Constructor
+  T2_Destructor --> T3_Constructor
+  T3_Destructor --> SuiteTeardown["Test Suite TearDown (TearDownTestSuite)"]
+
+  SuiteTeardown --> EnvTeardown["Global Environment TearDown"]
+  EnvTeardown --> End([End Test Run])
+
+  %% Connections within each test
+  T1_Constructor --> T1_SetUp
+  T1_SetUp --> T1_Run
+  T1_Run --> T1_TearDown
+  T1_TearDown --> T1_Destructor
+
+  T2_Constructor --> T2_SetUp
+  T2_SetUp --> T2_Run
+  T2_Run --> T2_TearDown
+  T2_TearDown --> T2_Destructor
+
+  T3_Constructor --> T3_SetUp
+  T3_SetUp --> T3_Run
+  T3_Run --> T3_TearDown
+  T3_TearDown --> T3_Destructor
+```
+
+This diagram shows the sequential setup, execution, and teardown flow of each test, sandwiched by suite-level and environment-level lifecycle calls.
+
+---
+
+## 9. Best Practices and Common Pitfalls
+
+- **Reuse Expensive Resources at the Suite Level:** Use `SetUpTestSuite()` and `TearDownTestSuite()` for expensive shared resources to avoid overhead per test.
+- **Keep Tests Independent:** Avoid sharing test fixture instance between tests.
+- **Handle Fatal Failures Gracefully:** Remember that `ASSERT_*` abort only the current function, so propagate failures when using helper functions.
+- **Use `SCOPED_TRACE()` for Sub-test Detail:** Enhance failure messages in nested functions or loops.
+- **Utilize Global Environments for Integration:** For resources with a lifetime beyond test suites, prefer global environments.
+- **Avoid Side Effects in Death Tests:** Death tests run in subprocesses; do not rely on side effects affecting the parent process.
+
+---
+
+## 10. Troubleshooting Common Issues
+
+### Test Not Running
+
+- Verify `SetUp()` and test method names are spelled exactly (`SetUp`, not `Setup`).
+- Check filtering flags, like `--gtest_filter`, which may exclude your test.
+
+### Tests Skipped Unexpectedly
+
+- Check if `GTEST_SKIP()` was called in `SetUp()` or global environments.
+- Verify there are no fatal failures in `SetUpTestSuite()` or `SetUp()`.
+
+### Failures Not Causing Test Abort
+
+Remember fatal failures only abort the current function. Use `ASSERT_NO_FATAL_FAILURE` or check `HasFatalFailure()` to stop further execution manually.
+
+### Fixture Setup Not Effective
+
+- Confirm fixture setup in the constructor or `SetUp()` overrides, not misspelled.
+- For suite-wide setup, use static `SetUpTestSuite()`, not instance constructor.
+
+---
+
+## References
+
+- [Global Test Environment Documentation (Environment Interface)](reference/testing.md#Environment)
+- [Test Fixture and Test Case APIs](api-reference/core-testing-apis/test-fixture-and-test-case-apis.md)
+- [Test Execution APIs](api-reference/core-testing-apis/test-execution-apis.md)
+- [Advanced GoogleTest Topics](advanced.md#global-set-up-and-tear-down)
+- [Using SCOPED_TRACE for Adding Traces to Assertions](advanced.md#using-assertions-in-sub-routines)
+- [Death Tests and Failure Handling](advanced.md#death-tests)
+
+---
+
+This guide equips you to master the test flow inside GoogleTest, enabling effective test structuring, failure handling, and extension for robust C++ test suites.
