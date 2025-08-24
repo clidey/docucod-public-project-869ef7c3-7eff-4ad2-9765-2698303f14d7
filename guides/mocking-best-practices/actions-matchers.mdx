@@ -1,0 +1,280 @@
+---
+title: "Custom Actions, Matchers, and Return Values"
+description: "Teaches users how to create and apply custom actions and argument matchers to handle complex interaction patterns, including parameterized and variadic behaviors."
+---
+
+# Custom Actions, Matchers, and Return Values
+
+This guide teaches you how to create and apply custom actions and argument matchers within GoogleMock to handle complex mock interaction patterns, including parameterized and variadic behaviors.
+
+---
+
+## 1. Introduction
+
+Mock objects simulate the behavior of real objects in tests. While built-in GoogleMock actions and matchers cover most needs, your tests often require more customized logic to:
+
+- Perform complex or parameterized side effects when mock methods are invoked.
+- Match arguments that require tailored validation logic beyond the standard matchers.
+- Handle functions with variadic parameters or special calling conventions.
+
+This page focuses exactly on these advanced usage scenarios, empowering you to extend GoogleMock’s capabilities.
+
+---
+
+## 2. Prerequisites
+
+Before using custom actions and matchers, ensure the following:
+
+- You have defined mock classes and methods using `MOCK_METHOD` macros.
+- You understand the basics of `ON_CALL` and `EXPECT_CALL` to set default actions and expectations.
+- You have explored the built-in [Actions Reference](../reference/actions.md) and [Matchers Reference](../reference/matchers.md) for existing utilities.
+
+---
+
+## 3. Creating Custom Actions
+
+Custom actions let you define what happens when a mock method is called. When existing actions like `Return(value)` or `SetArgPointee<N>(value)` don’t fit your needs, create your own.
+
+### 3.1 Using Lambdas, Functors, or Callable Objects as Actions
+
+You can pass any callable (function, lambda, functor) with a compatible signature directly to `WillOnce()` or `WillRepeatedly()`.
+
+```cpp
+EXPECT_CALL(mock_object, Method(_))
+    .WillOnce([](int arg) { return arg * 2; });
+```
+
+This is the simplest way to write a custom action and often suffices.
+
+### 3.2 Defining New Actions Using Macros
+
+If you want reusable named actions, use the `ACTION` and `ACTION_P` macros:
+
+```cpp
+ACTION(Sum) { return arg0 + arg1; }
+ACTION_P(Plus, n) { return arg0 + n; }
+```
+
+Then use them like:
+
+```cpp
+EXPECT_CALL(mock, Method(_, _)).WillOnce(Sum());
+EXPECT_CALL(mock, Method(_)).WillOnce(Plus(5));
+```
+
+The macro-generated code automatically provides access to the mock function arguments as `arg0`, `arg1`, etc.
+
+### 3.3 Implementing Advanced Actions by Inheriting `ActionInterface`
+
+For tight control, you can implement `::testing::ActionInterface<F>` template for the mock’s function signature `F`. This lets you define exactly how your action performs.
+
+A minimal action class implements:
+
+```cpp
+template <typename F>
+class ActionInterface {
+ public:
+  virtual ~ActionInterface();
+  virtual typename Function<F>::Result Perform(
+      const typename Function<F>::ArgumentTuple& args) = 0;
+};
+```
+
+Use `MakeAction` to create an `Action<F>` from your implementation.
+
+---
+
+## 4. Creating Custom Matchers
+
+Matchers express expectations about mock method arguments, beyond exact value matches. Defining custom matchers lets you validate complex argument properties.
+
+### 4.1 Using the `MATCHER` Macros
+
+`MATCHER` macros offer a concise way to define a custom matcher:
+
+```cpp
+MATCHER(IsEven, "Checks if number is even") {
+  return (arg % 2) == 0;
+}
+
+EXPECT_CALL(mock, Method(IsEven()));
+```
+
+With parameters, use `MATCHER_P`, `MATCHER_P2`, ..., etc.
+
+### 4.2 Writing Matcher Classes
+
+For reusable matchers with rich behavior and good error messages, define a matcher class:
+
+```cpp
+class BarPlusBazEqMatcher {
+ public:
+  using is_gtest_matcher = void;
+  explicit BarPlusBazEqMatcher(int value) : value_(value) {}
+  bool MatchAndExplain(const Foo& foo, std::ostream* os) const {
+    return foo.bar() + foo.baz() == value_;
+  }
+  void DescribeTo(std::ostream* os) const {
+    *os << "bar() + baz() equals " << value_;
+  }
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "bar() + baz() does not equal " << value_;
+  }
+ private:
+  int value_;
+};
+
+Matcher<const Foo&> BarPlusBazEq(int value) {
+  return MakeMatcher(new MatcherImpl<BarPlusBazEqMatcher>(BarPlusBazEqMatcher(value)));
+}
+```
+
+### 4.3 Polymorphic Matchers
+
+To write matchers that work with multiple argument types (e.g., any pointer type), template your matcher’s `MatchAndExplain` method:
+
+```cpp
+template <typename T>
+bool MatchAndExplain(T* p, std::ostream*) const {
+  return p != nullptr;
+}
+
+PolymorphicMatcher<NotNullMatcher> NotNull() { ... }
+```
+
+---
+
+## 5. Working with Variadic Functions and Parameterized Behaviors
+
+GoogleMock does **not** support mocking variadic functions directly, as the number and type of arguments are unknown at compile time.
+
+### 5.1 Workarounds for Variadic Functions
+
+- Define **overloaded** mock methods with fixed argument counts.
+- Wrap the variadic call in a method with a fixed signature and mock that instead.
+
+Avoid variadic functions in C++ mocks if possible to ensure safety and meaningful tests.
+
+### 5.2 Parameterized Side Effects
+
+Often you want to perform different actions depending on arguments or invocation count. Use a sequence of `WillOnce()` and a `WillRepeatedly()` clause:
+
+```cpp
+EXPECT_CALL(mock, Foo(_))
+    .WillOnce(Return(5))
+    .WillOnce(Return(10))
+    .WillRepeatedly(Return(0));
+```
+
+If more complex parameterization is needed, use custom actions capturing additional state.
+
+---
+
+## 6. Best Practices and Tips
+
+- Use `ON_CALL` to specify default actions when you don't need to verify a call will happen.
+- Use `EXPECT_CALL` when you want to verify the call order, count, and parameters.
+- Prefer composing actions and matchers from existing building blocks before writing custom ones.
+- Use `RetiresOnSaturation()` to prevent sticky expectations blocking later calls.
+- Use `With()` to apply multi-argument matchers when arguments should be validated together.
+- Consider delegating actions to a fake or real object inside an action to reuse code.
+- Use `Invoke` family actions to call existing functions or lambdas.
+- When mocking methods with move-only types, use lambdas or functors rather than `Return()`.
+
+---
+
+## 7. Troubleshooting and Common Pitfalls
+
+### 7.1 Action Side Effects Are Evaluated Once
+
+The action expression in `WillOnce(Return(expr))` is evaluated when specified, not when called. To get varying results on each call, use lambdas or stateful actions.
+
+### 7.2 Uninteresting Calls
+
+By default, calls without expectations generate warnings (naggy behavior). To silence, use `NiceMock<T>`.
+
+### 7.3 Matching Variadic Functions
+
+GoogleMock cannot match C-style variadic functions. Overload or wrap these functions.
+
+### 7.4 Using `SetArgPointee` Requires a Corresponding Return Value
+
+When using `SetArgPointee()`, chain it with a `Return()` to supply a return value if needed.
+
+```cpp
+EXPECT_CALL(mock, Foo(_)).WillOnce(DoAll(SetArgPointee<0>(value), Return(true)));
+```
+
+---
+
+## 8. Examples
+
+### 8.1 Custom Action Using Lambda
+
+```cpp
+EXPECT_CALL(mock, Process(_))
+    .WillOnce([](int n) {
+      std::cout << "Processing " << n << " units" << std::endl;
+      return n * 10;
+    });
+```
+
+### 8.2 Custom Matcher With `MATCHER_P`
+
+```cpp
+MATCHER_P(IsDivisibleBy, divisor, "") {
+  return arg % divisor == 0;
+}
+
+EXPECT_CALL(mock, CheckValue(IsDivisibleBy(3)));
+```
+
+### 8.3 Using `InvokeArgument` to Call a Callback Argument
+
+```cpp
+EXPECT_CALL(mock, RegisterCallback(_))
+    .WillOnce(InvokeArgument<0>(42)); // Calls the 0th arg as function with 42
+```
+
+### 8.4 Delegating to a Fake in Default Action
+
+```cpp
+class FakeFoo : public Foo {
+ public:
+  int Compute(int x) { return x * 2; }
+};
+
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, Compute, (int x), (override));
+
+  void DelegateToFake() {
+    ON_CALL(*this, Compute).WillByDefault([this](int x) {
+      return fake_.Compute(x);
+    });
+  }
+
+ private:
+  FakeFoo fake_;
+};
+```
+
+---
+
+## 9. Next Steps & Related Documentation
+
+- [Mocking Reference](reference/mocking.md) - Overview of mocks, expectations, and mock object behavior.
+- [Actions Reference](reference/actions.md) - Complete list of built-in actions and how to use them.
+- [Matchers Reference](reference/matchers.md) - Comprehensive list of built-in and custom matchers.
+- [gMock Cookbook](gmock_cook_book.md) - Recipes for practical and advanced mock usage.
+- [Writing and Running Your First Test](guides/writing-tests/getting-started-basic-tests.mdx) - To start with mocks in tests.
+
+---
+
+<Tip>
+Enhance your testing power by learning to combine custom actions and matchers with sequences and expectation ordering to build robust, maintainable interaction tests.
+</Tip>
+
+---
+
+For additional examples and discussions, see the [Legacy gMock FAQ](gmock_faq.md), which covers common questions and troubleshooting tips related to custom actions and matchers.
