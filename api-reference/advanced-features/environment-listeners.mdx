@@ -1,0 +1,243 @@
+---
+title: "Custom Test Environments and Event Listeners"
+description: "Explains APIs to customize test environment setup/teardown and hook into test execution events. Shows how to implement and register global or suite-specific listeners and environment objects for advanced test orchestration."
+---
+
+# Custom Test Environments and Event Listeners
+
+GoogleTest empowers you to tailor the orchestration of your tests through powerful extension points: **custom test environments** and **test event listeners**. These APIs let you control global or suite-specific setup and teardown, as well as hook into fine-grained test execution events, unlocking advanced workflows such as resource management, customized reporting, or diagnostic tooling.
+
+---
+
+## 1. Custom Test Environments
+
+GoogleTest’s `Environment` class provides a structured way to define global setup and teardown logic that runs exactly once per test program execution. This is invaluable when your tests need shared resources or preconditions that extend beyond single test fixtures.
+
+### Defining a Custom Environment
+
+Create a subclass of `::testing::Environment` and override two virtual methods:
+
+- `SetUp()`: Called once before any test runs. Use it to allocate resources, open connections, or establish any global preconditions.
+- `TearDown()`: Called once after all tests finish, for cleanup.
+
+```cpp
+class MyCustomEnvironment : public ::testing::Environment {
+ public:
+  void SetUp() override {
+    // Initialize resources shared by tests
+  }
+
+  void TearDown() override {
+    // Release global resources
+  }
+};
+```
+
+### Registering Environments
+
+Before running tests (`RUN_ALL_TESTS()`), register your environment using:
+
+```cpp
+::testing::AddGlobalTestEnvironment(new MyCustomEnvironment);
+```
+
+GoogleTest takes ownership of the environment object, calling `SetUp()` and `TearDown()` accordingly.
+
+### Key Behavior and Best Practices
+
+- Multiple environments can be registered; their `SetUp()` methods are called in registration order, `TearDown()` in reverse.
+- If `SetUp()` causes a fatal failure or calls `GTEST_SKIP()`, tests are skipped.
+- `TearDown()` runs regardless of failures or skipped tests, ensuring cleanup.
+- Avoid complex dependencies between environments; order them carefully if needed.
+- For suite-specific shared setup, prefer `SetUpTestSuite()` and `TearDownTestSuite()` on fixture classes.
+
+### Example: Global Environment Setup
+
+```cpp
+class DatabaseEnvironment : public ::testing::Environment {
+ public:
+  void SetUp() override {
+    // Connect to test database
+  }
+  void TearDown() override {
+    // Disconnect and clean up
+  }
+};
+
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  ::testing::AddGlobalTestEnvironment(new DatabaseEnvironment);
+  return RUN_ALL_TESTS();
+}
+```
+
+---
+
+## 2. Test Event Listeners
+
+The `TestEventListener` interface allows you to receive callbacks for every major event during the lifecycle of a test program. This facility is ideal for creating custom output formats, integrating with external tools, or performing runtime analysis.
+
+### Core Listener Interface
+
+Implement the abstract class `::testing::TestEventListener` which provides virtual methods, invoked in this lifecycle order:
+
+- Test program start and end:
+  - `OnTestProgramStart(const UnitTest&)`
+  - `OnTestProgramEnd(const UnitTest&)`
+
+- Test iteration (repetition) start and end:
+  - `OnTestIterationStart(const UnitTest&, int iteration)`
+  - `OnTestIterationEnd(const UnitTest&, int iteration)`
+
+- Environment setup and teardown:
+  - `OnEnvironmentsSetUpStart(const UnitTest&)
+  - `OnEnvironmentsSetUpEnd(const UnitTest&)
+  - `OnEnvironmentsTearDownStart(const UnitTest&)
+  - `OnEnvironmentsTearDownEnd(const UnitTest&)
+
+- Test suite lifecycle:
+  - `OnTestSuiteStart(const TestSuite&)
+  - `OnTestSuiteEnd(const TestSuite&)
+
+- Test lifecycle:
+  - `OnTestStart(const TestInfo&)
+  - `OnTestDisabled(const TestInfo&)`
+  - `OnTestPartResult(const TestPartResult&)` (captures assertion results)
+  - `OnTestEnd(const TestInfo&)`
+
+*Note:* Older listener APIs such as `OnTestCaseStart()` and `OnTestCaseEnd()` are deprecated in favor of TestSuite equivalents.
+
+### Convenience Base Class
+
+`EmptyTestEventListener` provides empty default implementations of all methods. Subclass this to override only the events you need.
+
+```cpp
+class MyListener : public ::testing::EmptyTestEventListener {
+ public:
+  void OnTestStart(const ::testing::TestInfo& test_info) override {
+    std::cout << "Starting: " << test_info.test_suite_name()
+              << "." << test_info.name() << std::endl;
+  }
+
+  void OnTestPartResult(const ::testing::TestPartResult& result) override {
+    if (result.failed()) {
+      std::cout << "Failure in " << result.file_name() << ":"
+                << result.line_number() << ": " << result.summary() << std::endl;
+    }
+  }
+};
+```
+
+### Registering a Listener
+
+Add your listener to the global event listener list before running tests:
+
+```cpp
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  ::testing::TestEventListeners& listeners =
+      ::testing::UnitTest::GetInstance()->listeners();
+
+  // Optionally remove the default listener to suppress standard output.
+  delete listeners.Release(listeners.default_result_printer());
+
+  listeners.Append(new MyListener);
+  return RUN_ALL_TESTS();
+}
+```
+
+### Listener Invocation Flow
+
+Listeners are invoked in the order they are appended:
+
+- `On*Start()` and `OnTestPartResult()` events are sent in the order of registration.
+- `On*End()` events are sent in *reverse* order.
+
+You can add multiple listeners to perform layered processing.
+
+### Generating Failures in Listeners
+
+While it's possible for listeners to cause test failures by invoking `EXPECT_*` or `ASSERT_*` macros, there are restrictions:
+
+- You **cannot generate failures inside `OnTestPartResult()`** to avoid recursion.
+- Listeners that override `OnTestPartResult()` must not generate failures.
+
+To observe failures generated inside listeners, add them such that listeners handling `OnTestPartResult()` come first.
+
+### Example Listener: Minimalist Printer
+
+```cpp
+class MinimalistPrinter : public ::testing::EmptyTestEventListener {
+  void OnTestStart(const ::testing::TestInfo& info) override {
+    std::cout << "Starting Test " << info.test_suite_name()
+              << "." << info.name() << std::endl;
+  }
+
+  void OnTestEnd(const ::testing::TestInfo& info) override {
+    std::cout << "Finished Test " << info.test_suite_name()
+              << "." << info.name();
+    if (info.result()->Passed())
+      std::cout << " - Passed.";
+    else
+      std::cout << " - Failed.";
+    std::cout << std::endl;
+  }
+};
+```
+
+### Use Case: Custom Logging or Reporting
+
+You can create listeners that write test events to databases, emit JSON for dashboards, send notifications, or measure timing with custom precision.
+
+---
+
+## 3. User Workflows and Recommendations
+
+- **Global orchestrations:** Use custom `Environment` subclasses to prepare or clean up non-trivial shared resources like databases or network services.
+- **Dynamic diagnostics:** Use listeners for advanced logging, real-time progress bars, or integrating test outcomes with other infrastructure.
+- **Controlling output:** Remove default printers if you want to fully substitute GoogleTest’s console or XML output with your own.
+- **Combining approaches:** Register multiple listeners, some for basic progress, others for specialized processing, respecting the invocation order.
+
+---
+
+## 4. Troubleshooting Common Scenarios
+
+<AccordionGroup title="Global Environment Issues">
+<Accordion title="Tests Not Running Due to Environment Failures">
+If a global `Environment::SetUp()` causes a fatal failure or calls `GTEST_SKIP()`, no tests will run. Make sure your global setup completes successfully or handles failures non-fatally.
+</Accordion>
+<Accordion title="Ensuring TearDown Always Runs">
+Even if tests are skipped or fail, `Environment::TearDown()` will be invoked. Use this to guarantee cleanup regardless of test outcomes.
+</Accordion>
+</AccordionGroup>
+
+<AccordionGroup title="Event Listener Pitfalls">
+<Accordion title="Recursive Failures in OnTestPartResult">
+Listeners that override `OnTestPartResult()` must not generate assertions or failures inside this callback to avoid recursion and crashes.
+</Accordion>
+<Accordion title="Multiple Listeners and Output Mixing">
+If you append multiple listeners without removing the default printer, outputs will intermingle. Remove the default listener using `Release()` before adding a custom listener to prevent this.
+</Accordion>
+</AccordionGroup>
+
+---
+
+## 5. References and Further Exploration
+
+- [GoogleTest Environment Class Reference](reference/testing.md#Environment)
+- [Event Listener Interface](reference/testing.md#TestEventListener)
+- [Global Setup and Teardown Guide](advanced.md#global-set-up-and-tear-down)
+- [Sample9_unittest.cc](https://github.com/google/googletest/blob/main/googletest/samples/sample9_unittest.cc) example demonstrating event listeners
+
+---
+
+Harness the full power of GoogleTest’s orchestration APIs by defining finely-controlled global setups and rich event-driven listeners, elevating your test infrastructure beyond simple pass/fail output to a custom-tailored, production-grade testing ecosystem.
+
+
+<Callout title="Tip">
+Use `AddGlobalTestEnvironment()` early in your `main()` before `RUN_ALL_TESTS()`.
+</Callout>
+
+<Callout title="Best Practice">
+Subclass `EmptyTestEventListener` rather than `TestEventListener` to override only needed events.
+</Callout>
