@@ -1,0 +1,253 @@
+---
+title: "Creating Custom Actions and Behaviors"
+description: "Walks through implementing your own actions in mock expectations, using GoogleMock's flexible macros and action templates to shape mock responses for advanced testing needs."
+---
+
+# Creating Custom Actions and Behaviors
+
+GoogleMock enables you to precisely control mock method behavior by defining your own *actions*. Actions specify what a mocked function should do when invoked and allow you to extend testing possibilities beyond built-in behaviors like returning values or invoking callbacks.
+
+This guide walks you through creating custom actions, from concise lambdas to parameterized action templates, empowering you to tailor mock responses for advanced testing needs.
+
+---
+
+## Why Create Custom Actions?
+
+While GoogleMock comes with many built-in actions such as `Return()`, `Invoke()`, and `SetArgPointee()`, your tests may require behaviors that these do not cover. Custom actions help you:
+
+- Execute arbitrary logic when a mock method is called
+- Perform side effects such as modifying arguments or global state
+- Return values computed dynamically based on the call context
+- Implement reusable, parameterizable behavior across multiple mocks
+
+Creating custom actions unlocks the full power of GoogleMock, especially for sophisticated or asynchronous testing scenarios.
+
+---
+
+## Using Lambdas and Callables as Actions
+
+The simplest way to define a custom action is to use a lambda or callable directly in the `.WillOnce()` or `.WillRepeatedly()` clause. The callable's signature must be compatible with the mocked method.
+
+### Example: Basic Lambda Action
+
+```cpp
+class MockFoo {
+ public:
+  MOCK_METHOD(int, Calculate, (int x, int y), (override));
+};
+
+TEST(FooTest, LambdaAction) {
+  MockFoo mock;
+
+  EXPECT_CALL(mock, Calculate(_, _))
+      .WillOnce([](int x, int y) {
+        return x + y;  // Custom sum logic
+      });
+
+  EXPECT_EQ(mock.Calculate(3, 4), 7);
+}
+```
+
+This approach requires no additional boilerplate and is perfect for simple one-off behaviors.
+
+### Notes:
+- Lambdas can capture local variables for stateful behavior.
+- Lambdas used with `WillOnce` must be moveable if they capture.
+
+---
+
+## Defining Custom Actions with ACTION Macros
+
+For reusability and cleaner code, GoogleMock provides macros to define named custom actions. These macros hide boilerplate and let you refer to the action by name.
+
+### ACTION
+
+Defines an action with zero parameters.
+
+```cpp
+ACTION(IncrementArg0) {
+  return arg0 + 1;  // 'arg0' is the first argument of the mock method
+}
+
+// Usage:
+EXPECT_CALL(mock, Calculate(_,_)).WillOnce(IncrementArg0());
+```
+
+### ACTION_P (Parameterized Action)
+
+Define an action with one parameter.
+
+```cpp
+ACTION_P(AddToArg0, n) {
+  return arg0 + n;
+}
+
+EXPECT_CALL(mock, Calculate(_, _))
+    .WillOnce(AddToArg0(5));  // Adds 5 to first argument
+```
+
+### ACTION_Pk
+
+Define actions with multiple parameters (up to 10).
+
+```cpp
+ACTION_P2(AddArgs, a, b) {
+  return arg0 + a + b;
+}
+
+EXPECT_CALL(mock, Calculate(_, _))
+    .WillOnce(AddArgs(3, 4));
+```
+
+### Notes:
+- Inside the action body, `argN` variables map to each argument.
+- You can refer to argument types using `argN_type` and parameters using `paramN_type`.
+- Action macros must be defined at namespace scope, not inside classes or functions.
+
+---
+
+## ACTION_TEMPLATE: Advanced Parameterized Actions
+
+When you need explicit template parameters that can't be inferred (e.g., types or integral constants), use the `ACTION_TEMPLATE` macro.
+
+### Syntax
+
+```cpp
+ACTION_TEMPLATE(ActionName,
+                HAS_m_TEMPLATE_PARAMS(kind1, name1, ..., kind_m, name_m),
+                AND_n_VALUE_PARAMS(p1, ..., p_n)) {
+  // statements; can use args tuple and template params
+}
+```
+
+### Example: Copy the K-th argument to an output parameter
+
+```cpp
+ACTION_TEMPLATE(DuplicateArg,
+                HAS_2_TEMPLATE_PARAMS(int, k, typename, T),
+                AND_1_VALUE_PARAMS(output)) {
+  *output = T(::std::get<k>(args));
+}
+
+// Usage:
+int n;
+EXPECT_CALL(mock, Foo(_, _))
+    .WillOnce(DuplicateArg<1, unsigned char>(&n));
+```
+
+`args` is a tuple of all the call arguments. You can extract them using `std::get<N>`.
+
+### Notes:
+- Use this for complex actions requiring template metaprogramming.
+- Value argument types are deduced automatically.
+
+---
+
+## Using Callables with Invoke and InvokeWithoutArgs
+
+GoogleMock lets you use existing free functions, methods, functors, or lambdas as actions via the `Invoke` family of functions.
+
+- `Invoke(f)`: calls `f` with the mock method's arguments
+- `InvokeWithoutArgs(f)`: calls `f` with no arguments
+
+Example:
+
+```cpp
+int Add(int x, int y) { return x + y; }
+
+EXPECT_CALL(mock, Calculate(_, _)).WillOnce(Invoke(&Add));
+```
+
+---
+
+## Combining Multiple Actions with DoAll
+
+Use `DoAll(a1, a2, ..., an)` to perform multiple actions in a sequence, returning the result of the *last* action.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Mutate(_))
+    .WillOnce(DoAll(SetArgPointee<0>(5), Return(true)));
+```
+
+This assigns 5 to the first argument pointed to by the pointer, then returns true.
+
+---
+
+## Ignoring Action Return Values with IgnoreResult
+
+If you have an action that returns a non-void value but your mock method returns void, wrap the action with `IgnoreResult()`.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, VoidFunc())
+    .WillOnce(IgnoreResult(Invoke(SomeFuncReturningInt)));
+```
+
+This invokes `SomeFuncReturningInt` for side-effect but ignores its result.
+
+---
+
+## Writing Your Own Action Classes
+
+For complex custom behaviors, define a struct or class with a call operator matching the mocked method signature:
+
+```cpp
+struct MultiplyBy {
+  int factor;
+
+  template <typename... Args>
+  int operator()(Args...) const { return factor * 7; }
+};
+
+EXPECT_CALL(mock, Calculate(_, _))
+    .WillOnce(MultiplyBy{7});
+```
+
+This approach lets you keep state and implement rich logic.
+
+---
+
+## Important Best Practices
+
+- **Set expectations before invoking mock methods.** Setting them after is undefined behavior.
+- Use **`ON_CALL()` to set default behavior** that doesn't require an expectation.
+- Use **`EXPECT_CALL()` only where call count and order matter.**
+- Avoid **overly strict expectations** that create brittle tests.
+- Use **`RetiresOnSaturation()`** to automatically disable expectations that have fulfilled their cardinality.
+- Use **`NiceMock`** or **`StrictMock`** wrappers to control warnings about uninteresting calls.
+
+---
+
+## Troubleshooting Common Issues
+
+- **Too many WillOnce() actions:** Warning when the number of `WillOnce()` clauses exceeds expected calls. Fix by matching call count or removing unnecessary actions.
+- **Too few WillOnce() actions:** Warnings when cardinality exceeds `WillOnce()` count and no `WillRepeatedly` is present.
+- **Call order errors:** Verify sequences and `.After()` clauses are set correctly.
+- **Uninteresting call warnings:** Use `NiceMock` to suppress irrelevant warnings.
+- **Overloaded method ambiguity:** Help the compiler by specifying argument types or using `SelectOverload` techniques.
+
+Refer to the [Mocking Reference](../reference/mocking.md) for details.
+
+---
+
+## Next Steps & Related Guides
+
+- Read [Using and Customizing Matchers](../guides/core-workflows/using-matchers.md) to combine custom actions with powerful argument matchers.
+- Explore [Mocking Best Practices](../guides/core-workflows/mocking-best-practices.md) to design maintainable mocks.
+- See the [gMock Cookbook](../gmock_cook_book.md) for recipes using advanced actions.
+- Review [Mocking Reference](../reference/mocking.md) for the full list of macros, classes, and idioms.
+
+---
+
+## Additional Resources
+
+- [gMock for Dummies](../gmock_for_dummies.md) - Great starting point for mock basics.
+- [Actions Reference](../reference/actions.md) - Exhaustive list of built-in actions.
+- [gMock FAQ](../gmock_faq.md) - Common questions about advanced mocking.
+
+---
+
+Harness the full power of GoogleMock by crafting custom actions tailored to your test scenarios. Your mocks will be more expressive, flexible, and aligned tightly with your testing goals.
