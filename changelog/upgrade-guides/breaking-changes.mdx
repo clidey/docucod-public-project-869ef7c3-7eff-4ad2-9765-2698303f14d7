@@ -1,0 +1,246 @@
+---
+title: "Breaking Changes"
+description: "Document changes that may disrupt existing test suites or integrations, with clear guidance on what changed, when, and why. Each breaking change entry includes actionable steps and code examples to support smooth migration."
+---
+
+# Breaking Changes
+
+This page documents changes within GoogleMock that may disrupt existing test suites or integrations. Each entry clearly explains what has changed, when the change was introduced, why it was made, and how to address it. Our focus is to help you smoothly migrate and adapt your mock-based tests without surprises.
+
+---
+
+## Understanding Breaking Changes in GoogleMock
+
+Breaking changes typically occur when improvements, fixes, or refactorings modify how expectational syntaxes or mock behaviors operate. While GoogleMock strives to maintain backward compatibility, certain changes may invalidate existing tests or require adjustments, especially when they touch core mocking semantics or APIs.
+
+On this page, you will find _actionable_ guidance and concrete code examples demonstrating what each breaking change entails and how to modify your tests or mocks accordingly.
+
+---
+
+## Recent Breaking Changes
+
+### 1. Enforcement of Clause Ordering in `EXPECT_CALL` and `ON_CALL`
+
+#### What Changed
+
+GoogleMock now strictly checks and enforces the order in which certain clauses appear in `EXPECT_CALL` and `ON_CALL` statements at runtime. The clauses affected are `.With()`, `.Times()`, `.InSequence()`, `.After()`, `.WillOnce()`, `.WillRepeatedly()`, and `.RetiresOnSaturation()`.
+
+#### Impact
+
+- `.With()` must appear at most once and as the **first** clause after `EXPECT_CALL` or `ON_CALL`.
+- `.Times()` can appear at most once and must follow `.With()`.
+- `.RetiresOnSaturation()` must be the last clause if used.
+- `.InSequence()`, `.After()`, `.WillOnce()`, and `.WillRepeatedly()` must follow the expected order.
+- Violations result in helpful failure messages indicating which clause was misplaced.
+
+If your tests had clauses in a different order, they will now fail with a clear explanation.
+
+#### Migration
+
+Adjust the order of your expectation clauses to respect these rules. Here is an example migration:
+
+```cpp
+// Old usage (may cause runtime failure):
+EXPECT_CALL(mock, Foo(5))
+    .Times(1)
+    .With(HasSubstr("bar"))  // .With() after .Times() - invalid
+    .WillOnce(Return(42));
+
+// Corrected usage:
+EXPECT_CALL(mock, Foo(5))
+    .With(HasSubstr("bar"))  // .With() first
+    .Times(1)
+    .WillOnce(Return(42));
+```
+
+Adhere to the prescribed ordering to avoid runtime assertion failures.
+
+---
+
+### 2. Default Action Requirement for `ON_CALL`
+
+#### What Changed
+
+An `ON_CALL` statement must now be followed by exactly one `.WillByDefault()` clause, which specifies the default behavior of the mock method when called under matching arguments.
+
+Failure to specify `.WillByDefault()` leads to runtime failures or undefined behavior.
+
+#### Impact
+
+Tests that used `ON_CALL` without `WillByDefault()` will now fail or behave unpredictably.
+
+#### Migration
+
+Add `.WillByDefault()` to every `ON_CALL`, specifying the appropriate action. For example,
+
+```cpp
+// Before:
+ON_CALL(mock, Bar(_));  // No WillByDefault - invalid
+
+// After:
+ON_CALL(mock, Bar(_)).WillByDefault(Return(0));  // Proper
+```
+
+Ensure that every `ON_CALL()` statement has a `.WillByDefault()` clause defined.
+
+---
+
+### 3. `With()` Clause Restrictions
+
+#### What Changed
+
+The `.With()` clause is allowed at most once per `EXPECT_CALL` or `ON_CALL` and must be the first clause.
+
+Multiple usages of `.With()` or incorrectly delayed `.With()` clauses are rejected.
+
+#### Migration
+
+- Remove any duplicate `.With()` clauses.
+- Place `.With()` immediately after `EXPECT_CALL` or `ON_CALL`. Example:
+
+```cpp
+EXPECT_CALL(mock, Baz(_))
+    .With(Args<0,1>(Gt()))  // Must be the first clause
+    .Times(AnyNumber());
+```
+
+---
+
+### 4. Strict Evaluation of Argument Expressions in `EXPECT_CALL` and `ON_CALL`
+
+#### What Changed
+
+GoogleMock now evaluates the arguments of `EXPECT_CALL` and `ON_CALL` exactly once, as promised by its interface contract. Any side effects embedded in argument expressions will only occur once.
+
+This change prevents surprises due to argument evaluations happening multiple times during expectation declaration.
+
+#### Impact
+
+If you previously relied on side effects occurring multiple times within `EXPECT_CALL` or `ON_CALL` argument expressions, your tests may behave differently or failed due to missed side effects.
+
+#### Migration
+
+- Refactor argument expressions so that side effects occur outside of `EXPECT_CALL` or `ON_CALL` clauses.
+- Example of proper usage:
+
+```cpp
+int n = 0;
+EXPECT_CALL(mock, Foo(n));
+n++;  // Do not modify argument inside EXPECT_CALL
+```
+
+Or explicitly evaluate before:
+
+```cpp
+int n = 0;
+int arg = n++;
+EXPECT_CALL(mock, Foo(arg));
+```
+
+---
+
+### 5. Changes in Default Mock Behavior Flags
+
+#### What Changed
+
+The behavior of the `--gmock_verbose` flag, which controls mock call reporting verbosity, now strictly accepts `info`, `warning`, or `error`. Other values are normalized to `warning`.
+
+Also, warnings about uninteresting mock calls are now consistently reported based on the verbosity level.
+
+#### Impact
+
+- Tests or test runners using invalid `--gmock_verbose` values may see different warning outputs or missing diagnostics.
+
+#### Migration
+
+- Confirm `--gmock_verbose` is set only to `info`, `warning`, or `error`.
+- Use `info` for detailed mock invocation tracing, `warning` for warnings and errors, or `error` to suppress uninteresting call warnings.
+
+Example usage:
+
+```bash
+./my_test --gmock_verbose=info
+```
+
+---
+
+## Common Pitfalls and Troubleshooting
+
+### Excessive or Insufficient WillOnce Actions
+
+GoogleMock now reports warnings and errors whenever the number of `.WillOnce()` actions does not match the expected number of calls according to the specified cardinality.
+
+#### Failure Scenarios
+
+- Having more `.WillOnce()` clauses than the maximum allowed calls.
+- Having fewer `.WillOnce()` clauses than the minimum required calls without `.WillRepeatedly()`.
+
+#### Best Practice
+
+Ensure the number of `.WillOnce()` specifies matches the expectation or augment with `.WillRepeatedly()` for default continued behavior.
+
+### Uninteresting vs Unexpected Calls
+
+GoogleMock issues warnings for uninteresting calls (calls made to mock methods without expectation) and errors on unexpected calls (calls not matching any existing expectation).
+
+#### Best Practices
+
+- Use `NiceMock` to suppress uninteresting call warnings.
+- Use `StrictMock` to treat uninteresting calls as errors.
+- Always set explicit expectations for methods you care about.
+
+### Deleting Mocks in Actions
+
+GoogleMock supports deleting mock objects safely within mock method actions using the `Delete(object_ptr)` action. Ensure that deleting mocks does not cause deadlocks by following proper mock ownership rules.
+
+---
+
+## Example Migration: Enforcing Clause Ordering
+
+```cpp
+// Old (may cause runtime assertion failure):
+EXPECT_CALL(mock, DoSomething())
+    .Times(1)
+    .With(Args<0>(Gt(0)))  // Wrong position
+    .WillOnce(Return());
+
+// New (correct):
+EXPECT_CALL(mock, DoSomething())
+    .With(Args<0>(Gt(0)))  // Must be first
+    .Times(1)
+    .WillOnce(Return());
+```
+
+Failure messages clearly indicate clause ordering violations, enabling quick fixes.
+
+---
+
+## Summary
+
+To maintain compatibility and leverage GoogleMock’s powerful mocking capabilities, review your tests for these common breaking changes:
+
+- Correct ordering of `.With()`, `.Times()`, `.InSequence()`, `.After()`, `.WillOnce()`, `.WillRepeatedly()`, and `.RetiresOnSaturation()` clauses.
+- Adding `.WillByDefault()` after every `ON_CALL`.
+- Ensuring arguments within `EXPECT_CALL` and `ON_CALL` are evaluated once and without side effects.
+- Correct usage of mock behavior verbosity flags.
+
+For detailed usage patterns, consult the guides on mock expectations, actions, and strictness management.
+
+---
+
+## Additional Resources
+
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html) — Beginner-friendly introduction
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) — Practical usage recipes
+- [Mocking Reference](https://google.github.io/googletest/reference/mocking.html) — API documentation
+- [Advanced Mocking Patterns Guide](https://google.github.io/googletest/gmock/advanced-mocking-patterns/writing-maintainable-mocks.html) — Best practices for maintainable mocks
+- [Legacy gMock FAQ](https://google.github.io/googletest/gmock_faq.html) — Answers to common questions
+- [Actions Reference](https://google.github.io/googletest/reference/actions.html) — Built-in mock actions
+
+---
+
+If you encounter a breaking change not covered here or need further assistance, consider reaching the [GoogleTest GitHub Issues](https://github.com/google/googletest/issues) or community forums.
+
+---
+
+_Last updated: 2024-06_
