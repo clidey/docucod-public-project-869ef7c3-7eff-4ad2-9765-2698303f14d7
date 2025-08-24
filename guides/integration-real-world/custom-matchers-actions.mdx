@@ -1,0 +1,254 @@
+---
+title: "Creating Custom Matchers and Actions"
+description: "Learn how to extend GoogleTest and GoogleMock with your own matchers and actions to increase test expressiveness and closely mirror domain logic. This guide presents real-world examples and outlines best practices for maintainable customizations."
+---
+
+# Creating Custom Matchers and Actions
+
+Enhance the expressiveness and precision of your tests by extending GoogleTest and GoogleMock with your own **custom matchers** and **actions**. These extensions allow you to more closely model domain logic and perform complex behaviors in mocks without sacrificing clarity or maintainability.
+
+---
+
+## Why Create Custom Matchers and Actions?
+
+Built-in matchers and actions cover many common needs but sometimes you'll want to:
+
+- Validate specific properties or invariants that built-in matchers cannot express.
+- Mimic complex behaviors or side effects in mock methods not supported by default actions.
+- Encapsulate frequently used patterns to make tests more readable and maintainable.
+
+Custom matchers and actions are your toolkit for tailoring GoogleMock to your project's unique domain.
+
+---
+
+## Custom Matchers
+
+Custom matchers allow you to define predicates for matching values passed as arguments to mock functions. They enable precision in expecting specific conditions or domain properties.
+
+### How to Define a Custom Matcher
+
+You can create custom matchers quickly with GoogleMock's `MATCHER` macros or by writing matcher classes implementing specific interfaces.
+
+### Using `MATCHER` Macros
+
+The simplest way to define a matcher is as follows:
+
+```cpp
+MATCHER(Name, "Description") {
+  // Inside here, 'arg' is the value to test.
+  return /* condition on arg */;
+}
+```
+
+For example, a matcher to check divisibility by 7:
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  return (arg % 7) == 0;
+}
+// Usage:
+EXPECT_CALL(mock, Foo(IsDivisibleBy7()));
+```
+
+You can provide a custom failure message by streaming to `result_listener`:
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  if ((arg % 7) == 0) return true;
+  *result_listener << "the remainder is " << (arg % 7);
+  return false;
+}
+```
+
+### Parameterized Matchers
+
+Use `MATCHER_P`, `MATCHER_P2`, ..., up to `MATCHER_P10` to define matchers with parameters:
+
+```cpp
+MATCHER_P(HasAbsoluteValue, value, "") {
+  return std::abs(arg) == value;
+}
+// Usage:
+EXPECT_CALL(mock, Bar(HasAbsoluteValue(10)));
+```
+
+### Writing a Matcher Class for Advanced Use
+
+Implement a class with the following interface:
+
+- `bool MatchAndExplain(const T& value, std::ostream* os) const;` — Returns true if match succeeds, writes explanation to `os`.
+- `void DescribeTo(std::ostream* os) const;` — Describes what the matcher does for success messages.
+- `void DescribeNegationTo(std::ostream* os) const;` — Describes negation.
+
+Example:
+
+```cpp
+class BarPlusBazEqMatcher {
+ public:
+  using is_gtest_matcher = void;
+  explicit BarPlusBazEqMatcher(int expected_sum) : expected_sum_(expected_sum) {}
+
+  bool MatchAndExplain(const Foo& foo, std::ostream* os) const {
+    bool matched = (foo.bar() + foo.baz()) == expected_sum_;
+    if (!matched && os) {
+      *os << "bar() + baz() is " << (foo.bar() + foo.baz());
+    }
+    return matched;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "bar() + baz() equals " << expected_sum_;
+  }
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "bar() + baz() does not equal " << expected_sum_;
+  }
+ private:
+  int expected_sum_;
+};
+
+Matcher<const Foo&> BarPlusBazEq(int expected_sum) {
+  return MakeMatcher(new BarPlusBazEqMatcher(expected_sum));
+}
+```
+
+Then use
+
+```cpp
+EXPECT_THAT(foo, BarPlusBazEq(5));
+```
+
+---
+
+## Custom Actions
+
+Actions specify what a mock function should do when invoked.
+
+GoogleMock ships with many built-in actions such as `Return()`, `SetArgPointee()`, `Invoke()`, and composite actions like `DoAll()`. However, complex testing scenarios often benefit from defining your own actions.
+
+### Defining a Simple Custom Action Using Lambda or Functor
+
+The simplest way to create an action is to use a lambda or functor with a call operator matching the mock method's signature:
+
+```cpp
+// Suppose mock method signature is int Foo(int).
+EXPECT_CALL(mock, Foo(_)).WillOnce([](int arg) {
+  return arg * 2;  // Custom logic
+});
+```
+
+This action receives the function arguments and returns the result.
+
+### Using `ACTION` and `ACTION_P` Macros
+
+Legacy macro-based actions may be convenient for small reusable actions.
+
+Example without parameters:
+
+```cpp
+ACTION(ReturnNegativeOne) { return -1; }
+EXPECT_CALL(mock, Foo(_)).WillOnce(ReturnNegativeOne());
+```
+
+Example with parameter:
+
+```cpp
+ACTION_P(Add, n) { return arg0 + n; }
+EXPECT_CALL(mock, Foo(_)).WillOnce(Add(5));
+```
+
+Internally, `arg0`, `arg1`, etc., correspond to the arguments passed.
+
+### Writing Monomorphic Actions in Classes
+
+For fine-grained control, implement `::testing::ActionInterface<F>` for your function type `F`:
+
+```cpp
+typedef int MyFunc(bool flag);
+
+class IncrementIfTrue : public ActionInterface<MyFunc> {
+ public:
+  int Perform(const std::tuple<bool>& args) override {
+    return std::get<0>(args) ? 1 : 0;
+  }
+};
+
+...
+EXPECT_CALL(mock, Foo(_)).WillOnce(MakeAction(new IncrementIfTrue));
+```
+
+### Writing Polymorphic Actions
+
+To support multiple function signatures, write an implementation with a templated `Perform()` method and wrap it with `MakePolymorphicAction`:
+
+```cpp
+class ReturnSecondArgAction {
+ public:
+  template <typename R, typename Tuple>
+  R Perform(const Tuple& args) const {
+    return std::get<1>(args);
+  }
+};
+
+auto ReturnSecondArgument() {
+  return MakePolymorphicAction(ReturnSecondArgAction());
+}
+
+EXPECT_CALL(mock, Foo()).WillOnce(ReturnSecondArgument());
+```
+
+### Using Built-in Facilities to Invoke Callables or Arguments
+
+- Use `Invoke(f)` to call an existing function or functor
+- Use `InvokeWithoutArgs(f)` to invoke a callable ignoring mock function’s arguments
+- Use `InvokeArgument<N>(args...)` to invoke the N-th argument (if callable) with arguments
+
+### Combining Multiple Actions
+
+Use `DoAll(a1, a2, ..., an)` to perform multiple actions sequentially, returning the value of the last.
+
+```cpp
+EXPECT_CALL(mock, Foo(_))
+    .WillOnce(DoAll(SetArgPointee<1>(5), Return(true)));
+```
+
+### Selecting Specific Arguments for Inner Actions
+
+Use `WithArg<N>(action)`, `WithArgs<N1, N2>(action)`, or `WithoutArgs(action)` to apply an action to a subset or none of the mock function arguments.
+
+---
+
+## Best Practices and Tips
+
+- **Start simple:** Use built-in matchers and actions first. Only create custom ones when required by domain logic.
+- **Keep matchers pure:** Matchers must be functional and side-effect free.
+- **Reuse matchers and actions:** Assign complex logic to variables and reuse.
+- **Avoid over-mocking:** Use custom actions sparingly to maintain test clarity.
+- **Name your matchers/actions:** Use descriptive names for maintainability.
+- **Handle move-only types carefully:** See [mocking move-only types](docs/gmock_cook_book.md#Mocking Methods That Use Move-Only Types).
+
+---
+
+## Troubleshooting Custom Matchers and Actions
+
+- Ensure the matcher’s `MatchAndExplain` method correctly reflects the matching logic.
+- Provide understandable and informative descriptions in `DescribeTo` and `DescribeNegationTo`.
+- Avoid capturing state that can be invalid during test execution.
+- For actions, confirm the callable signature matches mock function.
+- Use `--gmock_verbose=info` to trace mock call matching and action invocations.
+
+---
+
+## Next Steps
+
+- Explore the [gMock Cookbook](docs/gmock_cook_book.md) for practical recipes.
+- Consult the [Actions Reference](docs/reference/actions.md) for built-in actions.
+- See Mocking Reference for details on expectations and macros.
+- Learn about writing complex matchers and actions in the [Matchers Reference](docs/reference/matchers.md).
+
+---
+
+For further reading, see also:
+- [gMock for Dummies](docs/gmock_for_dummies.md) - beginner-friendly introduction.
+- [Writing Effective and Maintainable Tests](guides/writing-effective-tests/using-mocks-effectively.mdx) - deeper mock usage.
+
+---

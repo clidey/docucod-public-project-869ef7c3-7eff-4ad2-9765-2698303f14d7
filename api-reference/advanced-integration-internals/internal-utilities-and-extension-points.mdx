@@ -1,0 +1,201 @@
+---
+title: "Internal Utilities and Extension Points"
+description: "For advanced integrators and contributors: documents internal utility interfaces, extension points, and hooks available for customizing test or mock behavior."
+---
+
+# Internal Utilities and Extension Points
+
+For advanced integrators and contributors: this document outlines the internal utility interfaces, extension points, and hooks available within GoogleTest and GoogleMock to customize test and mock behavior. This information is intended for users aiming to extend or deeply integrate with the framework beyond typical test authoring.
+
+---
+
+## Overview
+
+GoogleTest and GoogleMock are designed with extensibility in mind, providing several internal interfaces and utility points that can be used to customize or hook into their behavior. While typical usage involves only public APIs and macros for test and mock creation, advanced users may want to leverage these internals for specialized scenarios such as customized mocking frameworks, enhanced logging, or test environment integration.
+
+This page focuses on these internal utilities, carefully distinguishing user-facing APIs from extension hooks.
+
+---
+
+## Internal Synchronization and Safety
+
+- **Global Mutex (`g_gmock_mutex`)**: A statically defined mutex guards internal data structures related to mock objects, expectations, and function mockers. It protects access to the global mock registry, all function mockers, and expectations.
+
+- All internal state manipulations related to mocks and expectations need to acquire this mutex to ensure thread safety across tests running in parallel or multi-threaded test scenarios.
+
+---
+
+## Logging and Diagnostics
+
+- **Logging Functionality**: Logs messages with file and line metadata alongside a severity level (`Info`, `Warning`, or `Error`).
+
+- This facility supports detailed debug output for internal framework events such as expectation mismatches or leaks.
+
+- It respects verbosity settings configurable via flags to reduce noise or increase visibility as needed.
+
+---
+
+## ExpectationBase Class
+
+### Purpose
+
+Represents a single expectation on a mock method, encapsulating:
+- Source location and diagnostic text
+- Cardinality (how many times expected)
+- Matching and call count
+- Action clauses such as `.WillOnce()`, `.WillRepeatedly()`, and `.RetiresOnSaturation()`.
+
+### Key Features
+
+- Manages pre-requisite expectations to support partial ordering via `After()` and `InSequence()`.
+- Supports verification of call counts against expectation cardinality with detailed failure reporting.
+- Provides utilities to describe call counts and expectation state for error messages.
+- Ensures that actions and cardinalities conform to syntactic and semantic rules.
+
+### Usage Notes
+
+- Middleware manipulating expectations can check if all pre-requisites are satisfied.
+- Retires expectations and their pre-requisites appropriately.
+
+---
+
+## UntypedFunctionMockerBase
+
+The base interface for mocking any function, regardless of signature.
+
+### Responsibilities
+
+- Registers mock objects and their methods with the global registry.
+- Allows interrogating the mock object's identity and the method name.
+- Manages expectations associated with the mocked function.
+- Verifies and clears expectations, respecting synchronization guarantees.
+
+### Internal Lifecycle
+
+- Registers mock ownership and usage location for leak detection and diagnostics.
+- Supports clearing default actions and unregistering upon destruction.
+
+---
+
+## Mock Object Registry
+
+### Role
+
+A global stateful map tracking all live mock objects and their states:
+- File and line where the mock object was first used
+- Test suite and test name context
+- Leak suppression flags
+- Registered mock methods under each mock object
+
+### Leak Detection
+
+On program exit, it automatically checks for any leaked mock objects (mocks that were never destroyed) and prints detailed errors and locations. This assists developers in identifying improper mock lifecycle management.
+
+### Advice
+
+- Use `testing::Mock::AllowLeak(mock_obj)` to mark mocks exempt from leak checks.
+
+---
+
+## Uninteresting Call Behavior Control
+
+GoogleMock allows configuring how uninteresting calls (calls to mock methods without expectations) are handled on a per-mock-object basis:
+
+- **Allow**: Silently accept uninteresting calls.
+- **Warn** (default): Print a warning but allow.
+- **Fail**: Treat uninteresting calls as fatal failures.
+
+This can be configured using static methods:
+- `Mock::AllowUninterestingCalls(mock_obj)`
+- `Mock::WarnUninterestingCalls(mock_obj)`
+- `Mock::FailUninterestingCalls(mock_obj)`
+
+---
+
+## Verification and Clearing
+
+GoogleMock offers APIs to verify that all expectations on a mock object are met and then clear them:
+
+- `Mock::VerifyAndClearExpectations(mock_obj)` verifies expectations only.
+- `Mock::VerifyAndClear(mock_obj)` also clears default actions.
+
+Both functions generate detailed non-fatal failures if expectations aren't met.
+
+This verification can be called manually to force early checking, especially useful for mocks with complex ownership or lifetime.
+
+**Important:** Do not set new expectations after verification and clearing; results are undefined.
+
+---
+
+## Sequence and Ordering
+
+To control call order constraints, GoogleMock provides:
+
+- `Sequence` objects representing partial or total call order sequences.
+- `InSequence` scope object that implicitly introduces an anonymous `Sequence` for all expectations within its scope.
+
+Expectations can be linked via:
+- `.InSequence(sequences...)` clause to specify membership in one or more sequences.
+- `.After(expectations...)` clause to specify dependency on one or many prior expectations.
+
+These allow expressing intricate ordering and partial ordering of expected calls.
+
+---
+
+## Support for Thread Safety and Deadlock Avoidance
+
+- Mock actions and expectations are designed to be executed safely under concurrent invocation.
+- The framework ensures actions are performed outside critical sections to prevent deadlocks, even if mock functions invoke other mock functions.
+
+---
+
+## Memory and Object Lifetime
+
+- Registrations and life cycle tracking ensure mocks are verified upon destruction unless leak suppression is enabled.
+- The framework handles potential deadlocks and race conditions around destruction of interconnected mock objects.
+
+---
+
+## Best Practices for Extension
+
+- Use internal mutex for synchronization when extending.
+- Register mock usage location for better diagnostics.
+- Employ logging framework to convey clear diagnostic messages.
+- Coordinate action counts and cardinalities to avoid inconsistencies.
+
+---
+
+## Typical User Flow with Internal Hooks
+
+```text
+1. Create mock object.
+2. Call EXPECT_CALL() or ON_CALL() to set expectations or default behaviors.
+3. Mock::Register registers mock methods and usage.
+4. When mock method is called, verify match with expectations.
+5. Actions specified by WillOnce, WillRepeatedly executed.
+6. On test completion or mock destruction, Mock::VerifyAndClearVerify ensures expectations met.
+7. Leak detection performs checks if objects remain.
+```
+
+---
+
+## References & Further Reading
+
+For concrete usage of these extension points, see:
+
+- [GoogleMock API - Creating and Using Mock Classes](../gmock-api-core/creating-and-using-mocks.md)
+- [GoogleMock API - Expectations and Sequencing](../gmock-api-core/expectations-and-sequencing.md)
+- [GoogleMock Cookbook](../../docs/gmock_cook_book.md)
+- [Mocking Reference](../../docs/reference/mocking.md)
+
+---
+
+## Troubleshooting
+
+- Unexpected failures regarding over/under call counts often relate to incorrect cardinality or action clauses.
+- Deadlocks caused by mocks invoke one another within critical sections can be resolved by careful action design respecting framework conventions.
+- Leaked mocks can be debugged via file and line registration data output at program exit.
+
+---
+
+This documentation is intended for contributors and advanced users wishing to customize or extend the GoogleTest/GoogleMock internals. Regular users should refer to the public API references and guides for the standard test writing workflows.
