@@ -1,0 +1,284 @@
+---
+title: "Error Handling and Assertion Results"
+description: "Covers APIs for detailed assertion results, error reporting, and diagnostic messaging. Describes how errors and failures propagate through GoogleTest and GoogleMock, including success flags, custom messages, and test part results."
+---
+
+# Error Handling and Assertion Results
+
+This documentation page details the APIs and mechanisms provided by GoogleTest related to error handling, assertion outcomes, and detailed diagnostic messaging. It describes the lifecycle and handling of errors and failures, how assertion results propagate through tests, and the reporting structures that enable deep insight into test executions.
+
+---
+
+## 1. Test Part Results and Failure Reporting
+
+### Overview
+
+GoogleTest categorizes each assertion or explicit test part invocation (such as `FAIL()`, `ADD_FAILURE()`, or `SUCCEED()`) as a *Test Part*. Each Test Part produces a `TestPartResult` which encapsulates the outcome of that assertion or failure point.
+
+This module defines the data structures and interfaces crucial for capturing and managing these results, including the following key components:
+
+- **TestPartResult**: Represents the outcome and details of a single test part (assertion or failure).
+- **TestPartResultArray**: A collection of `TestPartResult` objects.
+- **TestPartResultReporterInterface**: Interface for objects that report test part results.
+
+### TestPartResult Class
+
+`TestPartResult` records the following information:
+
+- **Type of result**: Categorized as one of success, non-fatal failure, fatal failure, or skipped.
+- **Source location**: The source file name and line number where the event occurred.
+- **Message**: Textual failure or success message.
+- **Summary**: A shortened version of the message, typically excluding stack traces.
+
+Key methods include:
+
+- `type()` - fetches the `Type` enum.
+- `file_name()` - source file or `nullptr` if unknown.
+- `line_number()` - line number or -1 if unknown.
+- Accessors like `message()`, `summary()`, and predicates for checking pass/failure/skipped status.
+
+#### Example
+
+```cpp
+TestPartResult result(
+    TestPartResult::kNonFatalFailure, "foo.cc", 42, "Failure description");
+std::cout << "Failure message: " << result.message() << std::endl;
+```
+
+### TestPartResultArray Class
+
+Maintains an ordered list of `TestPartResult` objects that accumulate during test execution.
+
+Usage:
+
+- Append new results with `Append()`.
+- Query by index using `GetTestPartResult(int index)`.
+- Get the count using `size()`.
+
+### Reporting Interface
+
+`TestPartResultReporterInterface` declares a pure virtual method:
+
+```cpp
+virtual void ReportTestPartResult(const TestPartResult& result) = 0;
+```
+
+Any custom reporter must implement this method to handle incoming test part results.
+
+---
+
+## 2. Capturing and Mocking Test Results
+
+GoogleTest provides helper classes to intercept and examine test failures, especially useful in testing the framework itself or code built atop it.
+
+### ScopedFakeTestPartResultReporter
+
+Use this class to intercept test failures during a scoped lifetime. It reports failures to a user-supplied `TestPartResultArray`.
+
+```cpp
+TestPartResultArray captured_results;
+{
+  ScopedFakeTestPartResultReporter reporter(
+      ScopedFakeTestPartResultReporter::INTERCEPT_ONLY_CURRENT_THREAD,
+      &captured_results);
+
+  // Run code that might trigger assertions/failures here.
+}
+// Use captured_results to inspect what failures occurred
+```
+
+This class supports two modes of interception:
+- `INTERCEPT_ONLY_CURRENT_THREAD`: Captures test failures from the current thread.
+- `INTERCEPT_ALL_THREADS`: Captures test failures from all threads.
+
+The original reporter is restored on destruction.
+
+### SingleFailureChecker
+
+An internal helper used in macros like `EXPECT_FATAL_FAILURE` and `EXPECT_NONFATAL_FAILURE`. It checks whether exactly one test part result of a specific failure type exists, with an expected substring in the message.
+
+---
+
+## 3. Assertion and Failure Macros for Testing Failures
+
+GoogleTest facilitates testing that specific code blocks generate expected failures without aborting the entire test execution.
+
+- `EXPECT_FATAL_FAILURE(statement, substring)`: Verifies `statement` triggers exactly one fatal failure in the current thread with `substring` in the message.
+- `EXPECT_FATAL_FAILURE_ON_ALL_THREADS(statement, substring)`: Like above but intercepts failures from all threads.
+- `EXPECT_NONFATAL_FAILURE(statement, substring)`: Verifies `statement` triggers one non-fatal failure in the current thread.
+- `EXPECT_NONFATAL_FAILURE_ON_ALL_THREADS(statement, substring)`: Like above but all threads.
+
+#### Usage Example
+
+```cpp
+EXPECT_FATAL_FAILURE(ASSERT_TRUE(false), "Expected failure");
+EXPECT_NONFATAL_FAILURE(
+    EXPECT_EQ(1, 2), "Expected non-fatal failure");
+```
+
+**Restrictions:**
+- `statement` must not reference local non-static variables or non-static members.
+- `statement` cannot return a value.
+- Streaming to failure messages is not allowed inside these macros.
+
+---
+
+## 4. TestResult and Test Part Status Queries
+
+GoogleTest’s `TestResult` objects maintain a history of `TestPartResult` objects for each test execution. Useful methods enable querying:
+
+- Whether the overall test passed (`Passed()`), failed (`Failed()`), skipped, or had fatal/non-fatal failures.
+- Getting the total number of test parts recorded with `total_part_count()`.
+- Fetching individual test failures.
+
+The system also supports recording key-value pairs (properties) relevant to tests using `RecordProperty()`, which are emitted in test reports and XML output.
+
+**Property Recording Notes:**
+- Properties with reserved XML attribute names (like `name`, `time`, `classname`) are rejected with a non-fatal failure.
+- Properties are updated if a duplicate key is recorded.
+
+---
+
+## 5. Handling Fatal and Non-Fatal Failures in Tests
+
+GoogleTest assertions distinguish failure severities:
+
+- **Fatal failures**: Abort current function immediately (e.g. `ASSERT_*`, `FAIL()`).
+- **Non-fatal failures**: Log failure but continue execution (e.g. `EXPECT_*`, `ADD_FAILURE()`).
+
+Common user pitfalls involve misunderstanding where fatal failures abort execution:
+
+- Fatal assertions abort only the *current function*, not the entire test body.
+- To propagate failures correctly, GoogleTest provides:
+  - `HasFatalFailure()` to check if any fatal failure was encountered.
+  - Macros `ASSERT_NO_FATAL_FAILURE(statement)` and `EXPECT_NO_FATAL_FAILURE(statement)` to assert no fatal failures originated in `statement`.
+
+**Example**
+
+```cpp
+void Helper() {
+  ASSERT_EQ(1, 2);  // Fatal failure, but only aborts this function
+}
+
+TEST(MyTest, PropagatingFatal) {
+  Helper();
+  if (HasFatalFailure()) return;  // Abort test early
+  // Safe to continue executing if no fatal failure
+}
+```
+
+---
+
+## 6. Stack Trace Management
+
+GoogleTest optionally supplements failure messages with OS-level stack traces to aid debugging. Stack traces are emitted except for success or skip results.
+
+Developers can configure:
+- Stack trace depth via `--gtest_stack_trace_depth`
+- Whether internal GoogleTest stack frames are shown
+
+---
+
+## 7. Integration with Test Events and Listeners
+
+All test part results are dispatched to `TestEventListeners`. Multiple listeners can be installed to process events and augment or replace standard output and result reporting.
+
+### Hierarchy
+
+- **UnitTest** holds the main test framework state.
+- **TestSuite** represents a group of tests.
+- **TestInfo** represents individual test information and results.
+- **TestPartResult** represents a single assertion's outcome.
+
+Listeners get notifications at key points (test start, end, failure, suite start/end). Failures received during tests carry `TestPartResult` objects to the listeners.
+
+Listeners forward or absorb failures and can chain event propagation.
+
+---
+
+## 8. Best Practices and Troubleshooting
+
+- Use `EXPECT_*` for non-fatal assertions that allow the test to continue and report multiple failures.
+- Use `ASSERT_*` for fatal assertions where immediate exit from the current function is required.
+- When testing code that should fail, use the `EXPECT_FATAL_FAILURE` and `EXPECT_NONFATAL_FAILURE` macros to ensure the expected failures occur without aborting the test.
+- Avoid mixing `TEST` and `TEST_F` (or different fixture classes) within the same test suite; GoogleTest will issue errors.
+- Use `SCOPED_TRACE` to add contextual trace messages when complex subroutines involve multiple assertions.
+- Use `RecordProperty` to log additional test metadata and key-values that will appear in XML or JSON reports.
+
+---
+
+## 9. Example Code Snippets
+
+### Creating and Checking a `TestPartResult`
+
+```cpp
+#include <iostream>
+#include "gtest/gtest.h"
+
+int main() {
+  testing::TestPartResult result(
+      testing::TestPartResult::kNonFatalFailure, "file.cc", 42, "Value not equal");
+
+  std::cout << "Type: " << result.type() << std::endl;
+  std::cout << "File: " << result.file_name() << std::endl;
+  std::cout << "Line: " << result.line_number() << std::endl;
+  std::cout << "Message: " << result.message() << std::endl;
+  return 0;
+}
+```
+
+### Using ScopedFakeTestPartResultReporter to Catch Failures
+
+```cpp
+#include "gtest/gtest-spi.h"
+#include "gtest/gtest.h"
+
+using testing::TestPartResultArray;
+using testing::ScopedFakeTestPartResultReporter;
+
+void FailingFunction() {
+  EXPECT_EQ(1, 2) << "Expected failure.";
+}
+
+int main() {
+  TestPartResultArray failures;
+  {
+    ScopedFakeTestPartResultReporter reporter(
+        ScopedFakeTestPartResultReporter::INTERCEPT_ONLY_CURRENT_THREAD, &failures);
+    FailingFunction();
+  }
+
+  if (failures.size() == 1) {
+    std::cout << "One failure captured: " << failures.GetTestPartResult(0).message() << std::endl;
+  }
+  return 0;
+}
+```
+
+### Using EXPECT_FATAL_FAILURE to Verify a Fatal Failure
+
+```cpp
+EXPECT_FATAL_FAILURE(ASSERT_TRUE(false), "Expected failure");
+```
+
+---
+
+## See Also
+
+- [Assertions Reference](reference/assertions.md)
+- [Advanced GoogleTest Topics](docs/advanced.md)
+- [GoogleTest Primer](primer.md)
+- [Event Listener API](reference/testing.md#TestEventListener)
+- [Handling Failures Guide](guides/gtest-core-guides/using-assertions.mdx)
+
+---
+
+This page provides the foundation for understanding failure propagation, diagnostic message composition, and test part result handling essential to debugging and expanding GoogleTest test cases and tools.
+
+---
+
+<AccordionGroup title="Key Classes and Interfaces"> <Accordion title="TestPartResult"> Represents a single test part (assertion) result with type, file, line, and message details. </Accordion> <Accordion title="TestPartResultArray"> Container for multiple `TestPartResult` objects, enabling collection and access. </Accordion> <Accordion title="TestPartResultReporterInterface"> Interface for objects that report/funnel test part results elsewhere. </Accordion> <Accordion title="ScopedFakeTestPartResultReporter"> RAII helper that intercepts and records test part results during a scope for testing GoogleTest itself. </Accordion> <Accordion title="SingleFailureChecker"> Helper to verify that an expected failure is produced exactly once during a test. </Accordion> </AccordionGroup>
+
+<AccordionGroup title="Macros for Expecting Failures"> <Accordion title="EXPECT_FATAL_FAILURE"> Ensures a section of code triggers exactly one fatal failure in current thread. Useful for verifying assertions generate expected fatal failures. </Accordion> <Accordion title="EXPECT_NONFATAL_FAILURE"> Ensures a section of code triggers exactly one non-fatal failure in current thread. </Accordion> <Accordion title="_ON_ALL_THREADS variants"> Variants that capture failures from all threads, extending the scope beyond the current thread. </Accordion> </AccordionGroup>
+
+<AccordionGroup title="Common Pitfalls and Tips"> <Accordion title="Fatal Assertions Abort Only Current Function"> Fatal assertion macros abort only the current function, not the entire test. Use `HasFatalFailure()` to detect and propagate fatal failures manually. </Accordion> <Accordion title="Use SCOPED_TRACE for Contextual Diagnostics"> Use `SCOPED_TRACE` to add file/line/message context propagated in nested failures to aid debugging of multi-level test helpers. </Accordion> <Accordion title="RecordProperty for Metadata"> Use `RecordProperty()` inside tests or test suites to attach key/value pairs, which appear in XML or JSON reports. Avoid reserved keys. </Accordion> <Accordion title="Handling Disabled Tests and Filtering"> Disabled tests (names prefixed with `DISABLED_`) are skipped by default. Use filter flags to select tests to run. </Accordion> </AccordionGroup>
