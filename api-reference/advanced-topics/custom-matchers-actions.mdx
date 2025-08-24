@@ -1,0 +1,294 @@
+---
+title: "Custom Matchers & Actions"
+description: "Unlock advanced testing power by creating custom matchers and actions tailored to your codebase. Learn extension patterns, registration requirements, and best practices for maintainability."
+---
+
+# Custom Matchers & Actions
+
+Unlock advanced testing power by creating custom matchers and actions tailored to your codebase. This guide teaches you how to extend GoogleMock with your own matcher and action implementations, explains extension patterns, registration requirements, and shares best practices to maintain clear, reusable, and maintainable code.
+
+---
+
+## Overview
+
+GoogleMock ships with a rich set of built-in matchers and actions that cover most common testing needs. However, your project often requires specialized verification or custom behaviors that aren’t available out-of-the-box. This page shows you how to amplify your testing expressiveness by writing custom matchers and actions.
+
+By creating custom components, you can precisely describe the contracts your code enforces and define bespoke behaviors, sharpening the quality and readability of your tests.
+
+
+---
+
+## Why Create Custom Matchers and Actions?
+
+- **Custom Validation**: When built-in matchers don’t capture nuanced constraints or possible complex state.
+- **Codebase Specific Logic**: Encapsulate domain-specific predicates to improve test clarity.
+- **Reusable Match Conditions**: Share complex matching rules across multiple tests without duplication.
+- **Arbitrary Behavior on Calls**: Beyond returning fixed values, perform side-effects, callbacks, or chained operations during mock invocations.
+
+
+---
+
+## Writing Custom Matchers
+
+Matchers are predicates that verify whether function arguments meet expected criteria. Custom matchers allow you to define exactly what "matching" means.
+
+### Key Traits of Custom Matchers
+
+1. Must be *purely functional and side-effect free*. They should not mutate state or invoke mocks.
+2. Should provide meaningful descriptions used in failure messages.
+3. Support both match and explain features for detailed diagnostics.
+
+### Defining a Basic Matcher Class
+
+The recommended approach is to implement a matcher class following this pattern:
+
+```cpp
+class MyCustomMatcher {
+ public:
+  using is_gtest_matcher = void;  // Marker for GoogleTest matcher.
+
+  explicit MyCustomMatcher(ExpectedType expected) : expected_(expected) {}
+
+  // Returns true if arg matches, optionally explaining failures.
+  bool MatchAndExplain(const ValueType& arg, std::ostream* os) const {
+    if (!matches(arg)) {
+      if (os) {
+        *os << "because ... explanation ...";
+      }
+      return false;
+    }
+    return true;
+  }
+
+  // Describes the matcher in positive context (expected condition).
+  void DescribeTo(std::ostream* os) const {
+    *os << "is valid because ...";
+  }
+
+  // Describes the matcher negation.
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "is not valid because ...";
+  }
+
+ private:
+  ExpectedType expected_;
+
+  bool matches(const ValueType& value) const {
+    // Your matching logic here
+  }
+};
+
+// Matcher factory function.
+::testing::Matcher<ValueType> IsMyCustomMatcher(ExpectedType expected) {
+  return ::testing::MakeMatcher(new MyCustomMatcher(expected));
+}
+```
+
+### Example: Range Matcher
+
+```cpp
+class InRangeMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  InRangeMatcher(double low, double high) : low_(low), high_(high) {}
+
+  bool MatchAndExplain(double val, std::ostream* os) const {
+    bool result = val >= low_ && val <= high_;
+    if (!result && os) {
+      *os << "which is not in the range [" << low_ << ", " << high_ << "]";
+    }
+    return result;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "is within the range [" << low_ << ", " << high_ << "]";
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "is not within the range [" << low_ << ", " << high_ << "]";
+  }
+
+ private:
+  double low_, high_;
+};
+
+::testing::Matcher<double> InRange(double low, double high) {
+  return ::testing::MakeMatcher(new InRangeMatcher(low, high));
+}
+
+// Usage in tests:
+EXPECT_CALL(mock_obj, Foo(InRange(3.0, 5.0)));
+```
+
+### Writing Parameterized Matchers
+
+For matchers that take parameters, you can use the `MATCHER_P` macros which generate classes behind the scenes, or you can write classes manually that take parameters in their constructor and capture them.
+
+### Tips and Best Practices
+
+- Always provide clear, user-friendly descriptions to ease reading of test failures.
+- Avoid introducing side-effects or dependencies on global or mutable state within matchers.
+- Use `MatchAndExplain` for detailed mismatch descriptions.
+- Write factory functions for ergonomic usage.
+
+
+---
+
+## Writing Custom Actions
+
+Actions define what happens when a mock function is called. Creating custom actions enables you to implement any behavior your tests need, including complex side-effects.
+
+### Basics of a Custom Action Class
+
+You define an action class implementing `operator()` compatible with the mocked function's signature. For example:
+
+```cpp
+struct CustomAction {
+  ReturnType operator()(Arg1Type arg1, Arg2Type arg2) {
+    // Your custom behavior here
+    // Possibly perform side-effects or computations
+    return some_result;
+  }
+};
+
+// Usage
+EXPECT_CALL(mock_obj, Method(_))
+  .WillOnce(CustomAction());
+```
+
+### Recommended Pattern - Using `ACTION` Macros
+
+You can use `ACTION`, `ACTION_P`, etc. to define concise actions with access to arguments as `arg0`, `arg1`, etc:
+
+```cpp
+ACTION(PrintArg0) {
+  std::cout << "Arg0: " << arg0 << std::endl;
+}
+
+EXPECT_CALL(mock_obj, Func(_)).WillOnce(PrintArg0());
+```
+
+### Implementing Polymorphic Actions
+
+For actions usable with multiple signatures, implement a class with a templated `Perform()` method and create a polymorphic action using `MakePolymorphicAction()`:
+
+```cpp
+class ReturnSecondArgAction {
+ public:
+  template <typename R, typename Args>
+  R Perform(const Args& args) const {
+    return std::get<1>(args);
+  }
+};
+
+auto ReturnSecondArg() {
+  return ::testing::MakePolymorphicAction(ReturnSecondArgAction());
+}
+
+EXPECT_CALL(mock, Method(_)).WillOnce(ReturnSecondArg());
+```
+
+### Tips for Writing Actions
+
+- Use lambdas or functors for quick in-line actions.
+- Use pre-defined `Invoke()`, `InvokeWithoutArgs()`, and `InvokeArgument<N>()` for calling other functions or callbacks.
+- Chain multiple actions with `DoAll()` when multiple side effects are needed.
+- Use `IgnoreResult()` to discard return values if the mock method returns `void`.
+
+
+---
+
+## Using Custom Matchers and Actions in Your Tests
+
+### Integration Flow
+
+1. Define and implement your matcher or action.
+2. Provide a factory or constructor function for ergonomic use.
+3. Use your matcher in `EXPECT_CALL` or as part of argument matchers.
+4. Use your action in `WillOnce()`, `WillRepeatedly()`, or `WillByDefault()`.
+
+### Example: Using a Custom Matcher and Action
+
+```cpp
+class EvenNumberMatcher {
+ public:
+  using is_gtest_matcher = void;
+  bool MatchAndExplain(int n, std::ostream* os) const {
+    if (n % 2 == 0) return true;
+    if (os) *os << "which is odd";
+    return false;
+  }
+  void DescribeTo(std::ostream* os) const { *os << "is an even number"; }
+  void DescribeNegationTo(std::ostream* os) const { *os << "is not an even number"; }
+};
+
+::testing::Matcher<int> IsEven() {
+  return ::testing::MakeMatcher(new EvenNumberMatcher());
+}
+
+ACTION(PrintAndReturnOne) {
+  std::cout << "Called with " << arg0 << std::endl;
+  return 1;
+}
+
+// Usage
+EXPECT_CALL(mock_obj, Foo(IsEven())).WillOnce(PrintAndReturnOne());
+```
+
+
+---
+
+## Best Practices & Common Pitfalls
+
+- **Avoid side effects in matchers**. They must be pure predicates.
+- **Make descriptions helpful**. Failure messages are your first debugging tool.
+- **Retain code clarity** by factoring reusable complex matchers.
+- **Use `WillOnce` for move-only types or actions that must only run once**, lambdas or functors are particularly useful here.
+- **Beware of ownership and lifetime in actions** especially when capturing pointers or references.
+- **Use `RetiresOnSaturation()`** when chaining expectations that must be exclusive.
+- **Handle thread safety** properly, as many mocking rules assume single-threaded expectation setup.
+
+
+---
+
+## Troubleshooting
+
+### Issue: Custom matcher does not match expected type
+
+- Check that your matcher class has a typedef `using is_gtest_matcher = void;`.
+- Ensure your match function supports the argument type passed in.
+
+### Issue: Action causes compilation errors with move-only types
+
+- Use `WillOnce` instead of `WillRepeatedly`.
+- Use lambdas or functors with proper value capture semantics.
+
+### Issue: Matcher or action does not print descriptive messages
+
+- Implement `DescribeTo()` and `DescribeNegationTo()` methods.
+- Use `MatchAndExplain()` to provide detailed mismatch information.
+
+### Issue: Infinite recursion when delegating calls to real object
+
+- Use fully qualified base class calls inside delegate lambdas to avoid recursion.
+
+
+---
+
+## Related Pages & Further Reading
+
+- [Matchers Reference](/api-reference/core-apis/matchers) - comprehensive built-in matchers
+- [Actions Reference](/api-reference/mocking-apis/actions) - built-in actions and usage
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) - practical recipes for mocking
+- [Mocking Reference](/docs/reference/mocking.md) - detailed API for mocks and expectations
+- [Creating and Configuring Mocks](/api-reference/mocking-apis/creating-mocks) - mock class setup
+
+
+---
+
+## Source
+
+See the implementation and tests for detailed examples on custom matchers and actions:
+
+<Source url="https://github.com/google/googletest" branch="main" paths={[{"path": "googlemock/include/gmock/gmock-spec-builders.h", "range": "1-350"},{"path": "googlemock/src/gmock-spec-builders.cc", "range": "1-350"}]} />
