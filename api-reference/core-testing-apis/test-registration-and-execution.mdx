@@ -1,0 +1,249 @@
+---
+title: "Test Registration and Execution"
+description: "Covers macros and APIs for registering, organizing, and executing test cases and suites. Explains how users can structure tests, leverage test event listeners, and configure test runners for flexible execution."
+---
+
+# Test Registration and Execution
+
+This page details the macros, classes, and APIs GoogleTest provides to register, organize, and execute tests systematically. It covers the structure for defining individual tests and test fixtures, registering tests dynamically, managing test suites, and the flow of test execution from setup to teardown. Additionally, it explains how test event listeners can be used to track or customize the testing process and how the test runner interprets and runs tests.
+
+---
+
+## Defining and Organizing Tests
+
+### TEST Macro
+
+The `TEST` macro defines a basic test:
+
+```cpp
+TEST(TestSuiteName, TestName) {
+  ... test code ...
+}
+```
+
+- **TestSuiteName**: Logical grouping for related tests.
+- **TestName**: The individual test identifier within the suite.
+
+Requirements:
+- Both `TestSuiteName` and `TestName` must be valid C++ identifiers.
+- They should avoid underscores `_` as GoogleTest reserves these for internal uses and naming collisions.
+
+Each `TEST` expands into a class that inherits from `::testing::Test` and overrides `TestBody()`. GoogleTest handles test registration automatically.
+
+### TEST_F Macro (Using Test Fixtures)
+
+`TEST_F` allows tests to use a shared test fixture class.
+
+```cpp
+TEST_F(FixtureClassName, TestName) {
+  ... test using FixtureClassName ...
+}
+```
+
+- The fixture class must inherit from `::testing::Test`.
+- It can override `SetUp()` and `TearDown()` for per-test setup/cleanup.
+- A fresh fixture object is created for each test.
+
+### Test Fixture Class Pattern
+
+A test fixture class typically looks like:
+
+```cpp
+class FooTest : public testing::Test {
+ protected:
+  FooTest() { ... }
+  void SetUp() override { ... }
+  void TearDown() override { ... }
+  ~FooTest() override { ... }
+  // members common to multiple tests
+};
+```
+
+Tests use the fixture like this:
+
+```cpp
+TEST_F(FooTest, Bar) {
+  ... test code using fixture members ...
+}
+```
+
+### Test Suite and TestInfo
+
+GoogleTest internally organizes tests into `TestSuite`s (formerly called TestCases) that contain multiple `TestInfo` objects, each representing a test.
+
+---
+
+## Dynamic Test Registration
+
+For advanced scenarios, GoogleTest exposes the `RegisterTest` API to create tests dynamically at runtime:
+
+```cpp
+template <typename Factory>
+TestInfo* RegisterTest(const char* test_suite_name, const char* test_name,
+                       const char* type_param, const char* value_param,
+                       const char* file, int line, Factory factory);
+```
+
+- The factory produces a `Test`-derived object with a default constructor.
+- This method is useful for creating tests driven by external data or plugins.
+
+Example dynamic registration:
+
+```cpp
+class MyFixture : public testing::Test { ... };
+class MyTest : public MyFixture {
+ public:
+  explicit MyTest(int data) : data_(data) {}
+  void TestBody() override { ... }
+ private:
+  int data_;
+};
+
+void RegisterMyTests(const std::vector<int>& values) {
+  for (int v : values) {
+    ::testing::RegisterTest(
+      "MyFixture", ("Test" + std::to_string(v)).c_str(), nullptr,
+      std::to_string(v).c_str(), __FILE__, __LINE__,
+      [=]() -> MyFixture* { return new MyTest(v); });
+  }
+}
+
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  RegisterMyTests({1, 2, 3});
+  return RUN_ALL_TESTS();
+}
+```
+
+---
+
+## Test Execution Flow
+
+GoogleTest manages the test lifecycle as follows:
+
+1. Construct a test fixture object.
+2. Call `SetUp()` for per-test setup.
+3. Invoke the test's `TestBody()`.
+4. Call `TearDown()` to clean up.
+5. Destroy the fixture object.
+
+Each test runs independently with a fresh object to ensure isolation.
+
+---
+
+## Test Event Listeners
+
+GoogleTest exposes an event listener interface for observing or extending test execution:
+
+```cpp
+class TestEventListener {
+ public:
+  virtual ~TestEventListener() = default;
+
+  virtual void OnTestProgramStart(const UnitTest& unit_test) = 0;
+  virtual void OnTestIterationStart(const UnitTest& unit_test, int iteration) = 0;
+  virtual void OnEnvironmentsSetUpStart(const UnitTest& unit_test) = 0;
+  virtual void OnEnvironmentsSetUpEnd(const UnitTest& unit_test) = 0;
+  virtual void OnTestSuiteStart(const TestSuite& test_suite) {}
+  virtual void OnTestStart(const TestInfo& test_info) = 0;
+  virtual void OnTestPartResult(const TestPartResult& test_part_result) = 0;
+  virtual void OnTestEnd(const TestInfo& test_info) = 0;
+  virtual void OnTestSuiteEnd(const TestSuite& test_suite) {}
+  virtual void OnEnvironmentsTearDownStart(const UnitTest& unit_test) = 0;
+  virtual void OnEnvironmentsTearDownEnd(const UnitTest& unit_test) = 0;
+  virtual void OnTestIterationEnd(const UnitTest& unit_test, int iteration) = 0;
+  virtual void OnTestProgramEnd(const UnitTest& unit_test) = 0;
+};
+```
+
+- Override only the needed methods.
+- Can be used to customize output, collect metrics, or integrate with external systems.
+
+### Using Listeners
+
+Append listeners before running tests:
+
+```cpp
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  testing::TestEventListeners& listeners =
+      testing::UnitTest::GetInstance()->listeners();
+
+  // Remove the default printer if desired
+  delete listeners.Release(listeners.default_result_printer());
+
+  // Add custom listener
+  listeners.Append(new YourCustomListener);
+
+  return RUN_ALL_TESTS();
+}
+```
+
+### Listener Execution Order
+
+- Start events (`On*Start`) are delivered in listener registration order.
+- End events (`On*End`) are delivered in reverse registration order.
+
+
+---
+
+## Running Tests
+
+- Call `testing::InitGoogleTest(&argc, argv);` early in `main()` to parse flags and initialize.
+- Call `RUN_ALL_TESTS()` to execute all registered tests.
+- The return value indicates success (0) or failure (1).
+
+### Recommended `main()` Template
+
+```cpp
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
+}
+```
+
+
+---
+
+## Test Filtering and Configuration
+
+- Use command-line flags like `--gtest_filter` to run subsets of tests.
+- Use `--gtest_repeat` to rerun tests multiple times.
+- Use `--gtest_shuffle` to randomize test order.
+- Disable tests by prefixing names with `DISABLED_`.
+
+---
+
+## Summary
+
+This page focuses on the structure and APIs for defining and registering tests and test fixtures in GoogleTest, managing their execution lifecycle, and customizing behavior via event listeners. It guides users through static and dynamic test registration, execution sequence, and event-driven handling for enhanced control over the testing process.
+
+For detailed guidance on writing effective tests, consider the [GoogleTest Primer](primer.md) and learn advanced patterns in [Advanced GoogleTest Topics](advanced.md).
+
+---
+
+## Related Documentation
+
+- [GoogleTest Primer](primer.md) — Introductory guide on writing basic tests and fixtures
+- [Advanced GoogleTest Topics](advanced.md) — Deep dive into advanced testing strategies
+- [Assertions Reference](reference/assertions.md) — Comprehensive assertion macros and their usages
+- [Parameterized and Typed Tests](reference/testing.md#TEST_P) — Using value-parameterized and typed tests
+- [Test Event Listeners](reference/testing.md#TestEventListener) — Extending GoogleTest's behavior with custom listeners
+
+---
+
+## Practical Tips
+
+- Always ensure test suite and test names avoid underscores to prevent naming conflicts.
+- Use test fixtures (`TEST_F`) for tests sharing setup or teardown logic.
+- Prefer `RUN_ALL_TESTS()`'s return code in your test binary’s `main()` to properly report failures.
+- Take advantage of `RegisterTest` for data-driven or dynamically created tests.
+- Utilize event listeners to integrate test status into custom reporting systems.
+
+<Tip>
+Do not ignore the return value of `RUN_ALL_TESTS()` as failing to do so may cause your test binary to incorrectly report success.
+</Tip>
+
+<Warning>
+Using dynamic test registration requires careful management of fixture construction and ownership. Ensure your factory callable correctly creates and returns fixture instances.
+</Warning>
