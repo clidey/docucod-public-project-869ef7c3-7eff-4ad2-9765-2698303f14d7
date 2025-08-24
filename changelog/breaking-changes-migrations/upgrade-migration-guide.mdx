@@ -1,0 +1,309 @@
+---
+title: "Upgrade & Migration Guide"
+description: "Step-by-step walkthroughs for migrating from older versions to the latest, addressing both code-level adjustments and configuration updates. Provides actionable examples, links to relevant files, and highlights common pitfalls."
+---
+
+# Upgrade & Migration Guide
+
+This guide delivers a thorough, user-focused walkthrough for upgrading from older versions of GoogleTest and GoogleMock to the latest release. It addresses both code-level changes and configuration updates you need to make to ensure smooth migration, minimize breakages, and harness new capabilities effectively.
+
+---
+
+## 1. Preparing for the Upgrade
+
+Before starting an upgrade, ensure your environment satisfies the new requirements:
+
+- **C++ Standard**: The latest version requires **C++17** or higher. Update your build environment and compiler flags accordingly.
+
+- **Repository Integration**: GoogleTest and GoogleMock are now unified in a single repository. Ensure your source references and dependencies use the combined repository URL to avoid inconsistencies.
+
+- **Build System Compatibility**: Confirm your build system supports the updated CMakeLists and macro options (e.g., `FetchContent` with CMake 3.14+).
+
+- **Runtime Library Settings on Windows**: Address runtime linkage mismatches using the `gtest_force_shared_crt` CMake option when building with Visual Studio.
+
+---
+
+## 2. Updating Build Configuration
+
+### Using CMake
+
+- **Standalone Build**: When building GoogleTest alone, adjust build flags:
+
+  ```bash
+  cmake .. -DBUILD_GMOCK=ON
+  # Or, to exclude gMock
+  cmake .. -DBUILD_GMOCK=OFF
+  ```
+
+- **Integrating into Your Project**:
+  - Prefer using `FetchContent` as shown below to get the updated version during build configuration:
+
+  ```cmake
+  include(FetchContent)
+  FetchContent_Declare(
+    googletest
+    URL https://github.com/google/googletest/archive/<commit-hash>.zip
+  )
+  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(googletest)
+
+  add_executable(your_test your_test.cpp)
+  target_link_libraries(your_test GTest::gtest_main)
+  add_test(NAME your_test COMMAND your_test)
+  ```
+
+- **Specifying C++ Version in CMake**:
+
+  ```cmake
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+  ```
+
+### Addressing Visual Studio Runtime Mismatches
+
+By default, GoogleTest links statically to the C runtime, but Visual Studio projects default to dynamic linking, causing linker errors. Use:
+
+```cmake
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+```
+to make GoogleTest link against the dynamic runtime as well.
+
+---
+
+## 3. Migrating Mock Definitions
+
+### Transition to `MOCK_METHOD`
+
+- The modern interface for declaring mock methods uses the generic `MOCK_METHOD` macro:
+
+  ```cpp
+  MOCK_METHOD(ReturnType, MethodName, (Args...), (qualifiers));
+  ```
+
+- Common qualifiers include:
+
+  - `const`
+  - `override`
+  - `noexcept`
+  - `Calltype(...)` (especially for Windows calling conventions)
+  - `ref(...)` (for reference qualifiers)
+
+- **Handling Commas in Types**: For argument or return types containing commas (e.g., `std::pair` or templated types), wrap them in parentheses or use a type alias to avoid parsing errors.
+
+  Example:
+
+  ```cpp
+  using BoolIntPair = std::pair<bool, int>;
+  MOCK_METHOD(BoolIntPair, GetPair, ());
+  ```
+
+### Replacing Old `MOCK_METHODn` Macros
+
+- Replace `MOCK_METHODn` or `MOCK_CONST_METHODn` with `MOCK_METHOD` as above.
+
+- Migrate call type specifications from `_WITH_CALLTYPE` macros to `Calltype()` qualifier.
+
+- Example:
+
+  From:
+
+  ```cpp
+  MOCK_CONST_METHOD1_WITH_CALLTYPE(STDMETHODCALLTYPE, Foo, bool(int));
+  ```
+
+  To:
+
+  ```cpp
+  MOCK_METHOD(bool, Foo, (int), (const, Calltype(STDMETHODCALLTYPE))); 
+  ```
+
+### Mocking Overloaded and Template Methods
+
+- Continue to declare mocks for overloaded or templated methods using `MOCK_METHOD` with appropriate qualifiers.
+
+- Use `Const()` wrapper in `EXPECT_CALL` / `ON_CALL` to disambiguate const overloads.
+
+- Example:
+
+  ```cpp
+  MOCK_METHOD(int, Add, (int), (override));
+  MOCK_METHOD(int, Add, (Element), (override));
+
+  EXPECT_CALL(mock, Add(_)); // Non-const
+  EXPECT_CALL(Const(mock), Add(_)); // Const
+  ```
+
+---
+
+## 4. Updating Test Expectations and Behaviors
+
+### Leveraging `EXPECT_CALL` and `ON_CALL`
+
+- `EXPECT_CALL` sets expectations and behaviors; calls to mocked methods not meeting `EXPECT_CALL` criteria cause test failures.
+
+- Use `ON_CALL` to define default behaviors without enforcing call expectations.
+
+- The precedence rule: the *last* matching `EXPECT_CALL` or `ON_CALL` takes precedence.
+
+- For better control, use clauses such as `.Times()`, `.WillOnce()`, `.WillRepeatedly()`, `.InSequence()`, and `.RetiresOnSaturation()`.
+
+### Handling Move-Only Types
+
+- Move-only types (e.g., `std::unique_ptr<>`) are fully supported with `MOCK_METHOD`.
+
+- Return move-only values using lambdas if you need fresh instances on each call.
+
+  ```cpp
+  EXPECT_CALL(mock, Create()).WillRepeatedly([] { return std::make_unique<Foo>(); });
+  ```
+
+- For methods accepting move-only arguments, use lambdas or functors to define behaviors.
+
+### Managing Unexpected and Uninteresting Calls
+
+- Uninteresting calls (no matching `EXPECT_CALL`) will by default print warnings.
+
+- Use `NiceMock` to suppress these warnings for specific mocks.
+
+- Use `StrictMock` to turn uninteresting calls into failures.
+
+- Always define a catch-all expectation for liberal call acceptance if appropriate:
+
+  ```cpp
+  EXPECT_CALL(mock, Method(_)).Times(AnyNumber());
+  ```
+
+### Controlling Call Order
+
+- Use `InSequence` for strict sequential call order.
+
+- Use `After()` clauses or multiple `Sequence` objects to specify partial orderings.
+
+- Expectations retire after being saturated, or as sequences advance, if `.RetiresOnSaturation()` is used.
+
+---
+
+## 5. Adjusting Verification and Cleanup in Tests
+
+- Mock objects verify expectations upon destruction.
+
+- To force explicit verification and clearing before destruction, use:
+
+  ```cpp
+  ASSERT_TRUE(Mock::VerifyAndClearExpectations(&mock));
+  ```
+
+- To clear both expectations and default actions, use:
+
+  ```cpp
+  ASSERT_TRUE(Mock::VerifyAndClear(&mock));
+  ```
+
+- Avoid setting new expectations after verification clears.
+
+- Use `Mock::AllowLeak(&mock);` if a mock object is never destroyed deliberately.
+
+---
+
+## 6. Common Pitfalls and Troubleshooting Tips
+
+### Compilation Errors
+
+- Check C++ standard compliance (C++17 required).
+
+- Make sure your compiler supports variadic macros and modern language features.
+
+- Replace deprecated mocking macros with `MOCK_METHOD` as old macros may cause issues.
+
+### Linking Problems on Windows
+
+- Set `gtest_force_shared_crt` in CMake to match your project’s runtime linkage.
+
+### Unexpected Call Failures
+
+- Use the `--gmock_verbose=info` flag to get detailed insight into call matching and expectation failures.
+
+- Verify your `EXPECT_CALL` argument matchers carefully; the last matching expectation overshadows earlier ones.
+
+- Use `NiceMock` or catch-all `EXPECT_CALL`s to handle uninteresting calls.
+
+### Performance Impact
+
+- If compilation is slow, consider moving mock class constructors and destructors into `.cc` files.
+
+- Limit the number of complex mocked methods to improve build times.
+
+---
+
+## 7. Practical Examples
+
+### Migrating a Mock Class from Legacy to New Syntax
+
+**Old syntax:**
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MOCK_CONST_METHOD1(FooMethod, int(int));
+  MOCK_METHOD2(BarMethod, bool(int, std::string));
+};
+```
+
+**New syntax:**
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, FooMethod, (int), (const, override));
+  MOCK_METHOD(bool, BarMethod, (int, std::string), (override));
+};
+```
+
+### Specifying Default Behavior with `ON_CALL`
+
+```cpp
+MockFoo mock;
+ON_CALL(mock, FooMethod(_)).WillByDefault(Return(42));
+EXPECT_CALL(mock, FooMethod(5)).Times(1);
+auto result = mock.FooMethod(5);
+EXPECT_EQ(result, 42);
+```
+
+### Using a Sequence for Call Order
+
+```cpp
+Sequence seq;
+EXPECT_CALL(mock, Step1()).InSequence(seq);
+EXPECT_CALL(mock, Step2()).InSequence(seq);
+EXPECT_CALL(mock, Step3()).InSequence(seq);
+```
+
+---
+
+## 8. Related Documentation
+
+Consider consulting these additional resources for a comprehensive understanding of GoogleTest and GoogleMock:
+
+- [Project Setup Guide](/guides/getting_started/project_setup): For installation and build configuration.
+
+- [Mocking Patterns](/guides/mocking_patterns/defining_and_using_mocks): For deeper insights on creating and using mocks.
+
+- [Expectations and Actions](/guides/mocking_patterns/expectations_and_actions): For mastering `EXPECT_CALL`, `ON_CALL`, and action specifications.
+
+- [Breaking Changes & Deprecated Features](/changelog/breaking-changes-migrations/breaking-changes): To understand impacts on your existing tests.
+
+- [Latest Release Summary](/changelog/release-highlights/latest-release-summary): To learn about core new features and platform support.
+
+---
+
+## 9. Summary
+
+Upgrading to the latest GoogleTest and GoogleMock requires updating your build environment, modernizing mock method declarations to use `MOCK_METHOD`, adopting improved expectation rules, and adjusting for new default behaviors and runtime requirements. By following this guide, you ensure your tests remain reliable, maintainable, and able to leverage the latest features and performance improvements.
+
+If issues arise, use the diagnostic tools like verbose mode and consider consulting platform-specific build instructions. The integration with modern build systems ensures smooth adoption in continuous integration workflows.
+
+---
+
+For the exact source references, examples, and detailed macros, please refer to the [GoogleMock Mocking Reference](https://github.com/google/googletest/blob/main/docs/reference/mocking.md) and the [gMock Cookbook](https://github.com/google/googletest/blob/main/docs/gmock_cook_book.md).
+
+<Source url="https://github.com/google/googletest" branch="main" paths={[{"path": "docs/changelog/breaking-changes-migrations/upgrade-migration-guide.mdx", "range": "1-"}]} />

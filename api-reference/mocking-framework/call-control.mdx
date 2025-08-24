@@ -1,0 +1,283 @@
+---
+title: "Call Count, Cardinality, and Strictness Controls"
+description: "Control and verify how often mocks are called. Detail the APIs for specifying expected invocation counts, handling extra or missing calls, and toggling between tolerant (NiceMock) and strict behaviors. Illustrate with scenarios for defensive and flexible testing approaches."
+---
+
+# Call Count, Cardinality, and Strictness Controls
+
+Effectively controlling and verifying how many times your mocked methods are invoked plays a crucial role in writing robust and meaningful tests with GoogleMock. This section details the APIs for specifying expected call counts, handling extra or missing calls, and selecting the appropriate strictness level to govern the behavior of uninteresting calls.
+
+---
+
+## Configuring Expected Call Counts with `Times()`
+
+The `Times()` clause in your `EXPECT_CALL()` sets the **cardinality**—how many times a mock method is expected to be called. This enables you to create precise or flexible expectations about the interaction between your code under test and its dependencies.
+
+### Syntax
+
+```cpp
+EXPECT_CALL(mock_object, Method(matchers))
+    .Times(cardinality)
+    // ... other clauses ...
+```
+
+### Available Cardinalities
+
+GoogleMock provides a rich set of cardinalities in the `::testing` namespace:
+
+| Cardinality       | Meaning                                                                         |
+|-------------------|---------------------------------------------------------------------------------|
+| `AnyNumber()`     | The mock method can be called any number of times, including zero.              |
+| `AtLeast(n)`      | The method must be called at least `n` times.                                  |
+| `AtMost(n)`       | The method can be called at most `n` times.                                    |
+| `Between(m, n)`   | The method must be called between `m` and `n` times (inclusive).               |
+| `Exactly(n)` or `n` | The method must be called exactly `n` times. If `n` is zero, the call shouldn't happen. |
+
+
+### Inferred Cardinality Rules
+
+If you omit `Times()`, GoogleMock infers it based on the presence of `WillOnce()` and `WillRepeatedly()`:
+
+- **No `WillOnce` or `WillRepeatedly` clauses:** Defaults to `Times(1)`.
+- **`n` `WillOnce` clauses, no `WillRepeatedly`:** Inferred as `Times(n)`.
+- **`n` `WillOnce` clauses with `WillRepeatedly`:** Inferred as `Times(AtLeast(n))`.
+
+### Example
+
+```cpp
+using ::testing::Return;
+using ::testing::AtLeast;
+
+EXPECT_CALL(mock_turtle, PenDown())
+    .Times(AtLeast(1));  // Expect PenDown() to be called one or more times
+
+EXPECT_CALL(mock_turtle, GetX())
+    .Times(3)
+    .WillOnce(Return(100))
+    .WillOnce(Return(150))
+    .WillOnce(Return(200));
+```
+
+---
+
+## Handling Unexpected or Excessive Calls
+
+When mocked methods are called more or fewer times than expected, GoogleMock reacts as follows:
+
+- **Too Few Calls:** On destruction or explicit verification, GoogleMock will report failures if the expected minimum number of calls was not reached.
+- **Too Many Calls:** If a method is called more times than allowed by the cardinality, GoogleMock reports a failure immediately when the violation occurs.
+
+### Example of Excessive Calls
+
+```cpp
+EXPECT_CALL(mock_object, Foo())
+    .Times(1);
+
+mock_object.Foo();  // OK
+mock_object.Foo();  // ERROR: called more times than expected
+```
+
+### Default Action on Excess Calls
+
+When unexpected calls occur, GoogleMock attempts to perform the default action, if any is set either explicitly (`ON_CALL`) or implicitly (built-in).
+
+---
+
+## Controlling Uninteresting Calls: Nice, Naggy, and Strict Mocks
+
+Uninteresting calls are mock method invocations for which no `EXPECT_CALL()` expectation has been set.
+
+### Mock Behavior Modes
+
+- **NaggyMock (Default):** Prints warnings for uninteresting calls but allows them.
+- **NiceMock:** Suppresses warnings on uninteresting calls, letting them silently succeed.
+- **StrictMock:** Treats uninteresting calls as **test failures**, ensuring you explicitly verify all mock interactions.
+
+### Usage
+
+```cpp
+using ::testing::NiceMock;
+using ::testing::NaggyMock;
+using ::testing::StrictMock;
+
+NiceMock<MockFoo> nice_mock;     // Ignores uninteresting calls
+NaggyMock<MockFoo> naggy_mock;   // Prints warnings (default)
+StrictMock<MockFoo> strict_mock; // Fails on uninteresting calls
+```
+
+### When to Use
+
+- Use **NiceMock** when you want to focus tests on specific interactions without noise.
+- Use **NaggyMock** during development to get warnings for unexpected calls.
+- Use **StrictMock** to maximize test rigor and catch any unverified calls.
+
+---
+
+## Controlling Expectation Order
+
+By default, expectations can match calls in *any order.*
+
+### Enforcing Strict Order with `InSequence`
+
+Wrap your expectations in an `InSequence` scope to require calls happen in the order they are declared.
+
+```cpp
+using ::testing::InSequence;
+
+{
+  InSequence seq;
+
+  EXPECT_CALL(mock, FirstCall());
+  EXPECT_CALL(mock, SecondCall());
+  EXPECT_CALL(mock, ThirdCall());
+}
+```
+
+### Partial and Complex Ordering
+
+You can specify sequences explicitly via `Sequence` objects and use `.InSequence(seq1, seq2, ...)` on expectations for partial orderings.
+
+```cpp
+using ::testing::Sequence;
+Sequence s1, s2;
+
+EXPECT_CALL(mock, Reset()).InSequence(s1, s2);
+EXPECT_CALL(mock, GetSize()).InSequence(s1);
+EXPECT_CALL(mock, Describe()).InSequence(s2);
+```
+
+This setup requires `Reset()` to be called before both `GetSize()` and `Describe()`, but `GetSize()` and `Describe()` can occur in any order relative to each other.
+
+### Enforcing Relative Call Timing with `After` Clause
+
+Use `.After()` to specify that an expectation occurs only after one or more others.
+
+```cpp
+using ::testing::Expectation;
+
+Expectation init1 = EXPECT_CALL(mock, Init1());
+Expectation init2 = EXPECT_CALL(mock, Init2());
+EXPECT_CALL(mock, Report()).After(init1, init2);
+```
+
+---
+
+## Making Expectations Retire Automatically with `RetiresOnSaturation()`
+
+By default, once an expectation reaches its call count limit, it remains active and can cause "over-saturation" errors on subsequent matching calls.
+
+When called, `.RetiresOnSaturation()` silently retires the expectation as soon as it is saturated, allowing calls that match weaker expectations to succeed.
+
+```cpp
+EXPECT_CALL(mock, SetNumber(7))
+    .Times(2)
+    .RetiresOnSaturation();
+```
+
+Here, after two calls to `SetNumber(7)`, this expectation retires and no longer matches further calls.
+
+---
+
+## Best Practices and Tips
+
+- **Set Expectations Before Invoking Mocks:** GoogleMock’s behavior is undefined if you call mock methods before setting expectations.
+- **Use NiceMock to Reduce Noise:** Suppress warnings on uninteresting calls in large tests where you don’t care about all interactions.
+- **Use StrictMock for Verification:** To guarantee all usages of a mock are verified, opt for `StrictMock`.
+- **Use `RetiresOnSaturation()` for Sequential Calls:** When expecting calls in strict order, retire expectations to avoid conflicts.
+- **Handle Overloaded Methods Carefully:** Make matchers explicit when using overloaded methods to help GoogleMock resolve calls correctly.
+- **Avoid Over-Specification:** Only specify exact call counts when you have a clear need; otherwise consider fuzzy cardinalities (like `AtLeast`).
+
+---
+
+## Troubleshooting Call Count Failures
+
+### Too Few Calls Detected
+
+GoogleMock checks expectation satisfaction on mock destruction or when `VerifyAndClearExpectations()` is called. If expected calls are missing, you’ll see failure messages indicating the expectation and actual calls.
+
+### Too Many Calls Detected
+
+If too many calls happen, GoogleMock reports the failure immediately at the call site, with detailed traces of the method name, arguments, and expectation.
+
+### Uninteresting Call Warnings
+
+By default, calls to mock methods without expectations print warnings to alert you. Suppress them with `NiceMock` or by adding a catch-all expectation with `EXPECT_CALL(mock, Method(_)).Times(AnyNumber());`.
+
+### Sample Error Message for Exceeding Expected Calls
+
+```
+path/to/my_test.cc:119: Failure
+Mock function called more times than expected - returning default value.
+    Function call: Foo(7)
+         Expected: to be called once
+           Actual: called twice - over-saturated and active
+```
+
+---
+
+## Summary
+
+Controlling call counts and expectation strictness in GoogleMock helps you write tests that are both robust and expressive. Accurate use of `Times()`, combined with ordering controls like sequences and the right choices between `NiceMock`, `NaggyMock`, and `StrictMock`, allow you to tailor your tests to your exact verification needs. Use these mechanisms to catch bugs early, avoid brittle tests, and provide clear failure diagnostics.
+
+---
+
+## Additional Resources
+
+- [EXPECT_CALL (Mocking Reference)](reference/mocking.md#EXPECT_CALL)
+- [Using Sequences and Ordering (gMock Cookbook)](gmock_cook_book.md#OrderedCalls)
+- [Nice, Naggy, and Strict Mocks (gMock Cookbook)](gmock_cook_book.md#NiceStrictNaggy)
+- [Mocking Reference](reference/mocking.md)
+- [gMock for Dummies](gmock_for_dummies.md)
+- [Actions and Return Values](api-reference/mocking-framework/actions-and-return-values.md)
+
+---
+
+## Code Example: Combining Key Concepts
+
+```cpp
+#include <gmock/gmock.h>
+using ::testing::Return;
+using ::testing::AtLeast;
+using ::testing::InSequence;
+using ::testing::NiceMock;
+using ::testing::StrictMock;
+
+class MockDatabase {
+public:
+    MOCK_METHOD(bool, Connect, (), ());
+    MOCK_METHOD(int, Query, (int id), ());
+    MOCK_METHOD(void, Disconnect, (), ());
+};
+
+// Test enforcing strict call counts and order.
+TEST(DatabaseTest, QuerySequence) {
+    StrictMock<MockDatabase> mock_db;
+
+    {
+        InSequence seq;
+
+        EXPECT_CALL(mock_db, Connect())
+            .Times(Exactly(1))
+            .WillOnce(Return(true));
+
+        EXPECT_CALL(mock_db, Query(42))
+            .Times(AtLeast(1))
+            .WillRepeatedly(Return(100));
+
+        EXPECT_CALL(mock_db, Disconnect())
+            .Times(Exactly(1));
+    }
+
+    // System under test uses mock_db here...
+}
+
+// Test using NiceMock to suppress uninteresting call warnings.
+TEST(DatabaseTest, UninterestingCalls) {
+    NiceMock<MockDatabase> mock_db;
+
+    ON_CALL(mock_db, Connect()).WillByDefault(Return(true));
+
+    // Only interested in Connect call, ignore others.
+    EXPECT_CALL(mock_db, Connect()).Times(1);
+}
+```
