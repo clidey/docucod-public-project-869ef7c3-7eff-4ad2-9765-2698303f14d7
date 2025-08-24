@@ -1,0 +1,205 @@
+---
+title: "Security Model & Sandboxed Execution"
+description: "Explains the security considerations and how the framework safely handles error cases like death tests. Covers the approach to sandboxing, isolation, and test environment separation to ensure safe and predictable test execution."
+---
+
+# Security Model & Sandboxed Execution
+
+GoogleTest is designed not only to help developers write and run tests efficiently but also to ensure that test execution happens safely and in a controlled environment. This page explains how the framework approaches security considerations, isolates tests, and handles potentially risky or unstable situations such as death tests.
+
+---
+
+## Why Security and Isolation Matter in Testing
+
+Tests, by nature, often involve running code that checks for failure conditions including crashing, aborting, or otherwise behaving unexpectedly. In particular, *death tests* check that programs fail correctly under unsafe or invalid conditions.
+
+Without proper safeguards, such tests might inadvertently compromise the host environment by crashing the entire test suite or leaving residual side effects. GoogleTest incorporates a security-conscious design that provides sandboxed execution and isolation to protect test stability and reliability.
+
+---
+
+## Core Principles of GoogleTest's Security Model
+
+### Sandboxed Execution
+
+GoogleTest isolates the execution of tests that can cause abnormal termination, especially death tests. This sandboxing ensures that such tests do not destabilize the entire test process.
+
+### Test Environment Separation
+
+Global test environments and test suites run under well-defined lifecycle phases with explicit setup and teardown. This separation limits unintentional interactions between tests that could cause conflicts or data corruption.
+
+### Fail-Safe Test Runner
+
+Failure in one test will not cause other tests to be skipped or the whole suite to crash, unless explicitly configured (e.g., fail-fast mode). This guarantees that tests can be run independently and that failures yield informative output.
+
+---
+
+## Handling Death Tests Safely
+
+### What Are Death Tests?
+
+Death tests verify that certain code paths cause an expected fail-stop behavior like process termination (e.g., via `abort()`, `exit()`, or a fatal signal).
+
+### Execution Isolation via Subprocesses
+
+GoogleTest runs each death test in a separate subprocess. There are two main styles:
+
+- **Fast Style:** Uses `fork()` (or `clone()` on Linux) to create the child process quickly with minimal overhead.
+- **Threadsafe Style:** Runs the death test in a fully re-invoked subprocess, increasing reliability in multi-threaded environments at the cost of execution speed.
+
+This subprocess approach effectively sandboxs death tests, preventing them from crashing the main test runner. If the subprocess exits unexpectedly, GoogleTest captures the failure and reports it.
+
+### Death Test Execution Flow
+
+1. **Test Parent Process:** Controls the overall test run.
+2. **Subprocess Creation:** For a death test, GoogleTest forks or spawns a subprocess.
+3. **Child Process Execution:** The death test code executes in isolation.
+4. **Parent Process Monitors:** Collects the exit code, termination status, and output matching.
+5. **Failure Handling:** If the subprocess does not die as expected (e.g., fails to exit or the signal differs), the death test fails.
+
+### Protective Measures
+
+- Tests are run in a deterministic order, with death tests prioritized to minimize thread interference.
+- The framework detects multiple active threads before death tests and warns the user.
+- The death test subprocess cleanup mechanism deletes temporary files and state used during isolation.
+
+---
+
+## Per-Test and Per-Test Suite Setup and Teardown for Safety
+
+GoogleTest encourages the use of `SetUp()`, `TearDown()`, `SetUpTestSuite()`, and `TearDownTestSuite()` methods to isolate test artifacts and shared resources.
+
+- **Per-Test Setup/Teardown:** Ensures that each individual test leaves the environment clean for the next test.
+- **Per-Test Suite Setup/Teardown:** Manages shared expensive resources with proper isolation.
+
+These mechanisms support sandboxing by reducing cross-test contamination and allowing tests to be repeatable and reliable.
+
+---
+
+## Runtime Safety Features
+
+### Exception Handling
+
+GoogleTest catches C++ exceptions (where enabled) and converts unexpected exceptions into test failures rather than crashing the test runner.
+
+### Signal and Fatal Failure Handling
+
+The framework installs signal handlers where supported to gracefully handle fatal signals, capturing stack traces in the event of crashes and providing rich diagnostics.
+
+### Assertions and Failures
+
+Assertions (`EXPECT_`, `ASSERT_`, `FAIL()`, `SUCCEED()`) serve as control points for test validation. GoogleTest differentiates between fatal and non-fatal failures to maintain test flow without unintentional aborts. Fatal failures immediately abort the current test while allowing others to proceed.
+
+---
+
+## Isolation of Test Results and Metadata
+
+Tests maintain isolated result states (`TestResult`, `TestPartResult`) to prevent intermingling of failure or success information. This encapsulation supports generating accurate XML/JSON reports and clean post-test analysis.
+
+Test metadata and user properties logged via `RecordProperty()` are similarly scoped to the current test or test suite, preserving sandboxed context information.
+
+---
+
+## User Workflow: Writing Reliable, Safe Tests
+
+### Step 1: Define Tests Normally
+Use the usual GoogleTest macros (`TEST()`, `TEST_F()`, `TEST_P()`) to write your tests.
+
+### Step 2: Isolate Side Effects
+Ensure your tests clean up after themselves using `TearDown()`, and when using shared resources, employ `SetUpTestSuite()`/`TearDownTestSuite()` appropriately.
+
+### Step 3: Use Death Tests Safely
+Write death tests using `ASSERT_DEATH()` or `EXPECT_DEATH()`. Name test suites with the "DeathTest" suffix to get correct ordering and sandboxing.
+
+### Step 4: Configure as Needed
+Adjust flags such as `--gtest_death_test_style` for thread safety, and enable `--gtest_break_on_failure` to catch failures under a debugger.
+
+### Step 5: Interpret Results
+GoogleTest will report failures per test with diagnostic information and isolate failures even when exit codes or abnormal termination occur.
+
+---
+
+## Troubleshooting Common Security-Related Issues
+
+<AccordionGroup title="Common Security and Sandboxing Issues">
+<Accordion title="Death Test Hangs or Crashes">
+If a death test hangs or causes the test binary to hang:
+- Ensure no other threads are running when the death test starts.
+- Use the "threadsafe" death test style for increased reliability in multithreaded environments.
+- Avoid freeing memory within death tests to prevent heap checker failures.
+- Check system compatibility with `fork()` or `clone()`.
+</Accordion>
+<Accordion title="Unexpected Test Failures After Setup/Teardown">
+Make sure shared resources are properly initialized and cleaned in `SetUpTestSuite()` and `TearDownTestSuite()`. Avoid residual state across tests.
+</Accordion>
+<Accordion title="Premature Test Exit Detection">
+GoogleTest creates a temporary file when running tests to detect premature exit. Failure to delete this file may indicate abrupt test program termination.
+</Accordion>
+</AccordionGroup>
+
+---
+
+## Diagram: Overview of Secure Test Execution
+
+```mermaid
+flowchart TD
+  subgraph Main_Process
+    MP["Test Runner (GoogleTest Main Process)"]
+  end
+  subgraph Death_Test_Subprocess
+    DTSP["Death Test Subprocess"]
+  end
+
+  MP -->|Run normal tests| NormalTests["Normal Test Suites"]
+
+  MP -->|For each Death Test Suite|
+  MP -.-> DTSP
+
+  DTSP -->|Execute Death Test Code| DeathTestCode["Test Body (dies as expected)"]
+
+  DeathTestCode -->|Exit status, output| MP
+
+  MP -->|Collect Results & Report| TestReporting["Test Results & Reports"]
+
+  subgraph TestEnvironments
+    Setup["Global/TestSuite Setup"]
+    Teardown["Global/TestSuite Teardown"]
+  end
+
+  MP --> Setup --> NormalTests
+  NormalTests --> Teardown --> MP
+
+  classDef subProcess fill:#f9f,stroke:#333,stroke-width:1px;
+  class DTSP subProcess;
+```
+
+This diagram illustrates how GoogleTest runs normal tests inside the main process while isolating death tests into subprocesses, managing setup and teardown to ensure test environment isolation.
+
+---
+
+## References
+
+- [Death Assertions Reference](reference/assertions.md#death)
+- [Advanced Topics: Death Tests](guides/core-testing-workflows/assertions-best-practices.mdx#death-tests)
+- [Advanced GoogleTest Topics](docs/advanced.md#death-tests) — Section on Death Test Safety
+- [Global Setup and Tear-Down](docs/advanced.md#global-set-up-and-tear-down)
+
+---
+
+## Summary
+
+GoogleTest's security model concentrates on running tests, especially death tests, in isolated and sandboxed environments to avoid destabilizing the test runner or host environment. By using subprocess isolation, lifecycle-managed test environments, and robust failure detection and reporting, GoogleTest ensures predictable and safe test execution.
+
+This approach empowers users to write effective failure-checking tests without risking unintended consequences to the overall test suite, seamlessly blending safety and test expressiveness.
+
+---
+
+## Additional Tips
+
+- Always follow naming conventions by suffixing death test suites with `DeathTest` to utilize ordering and isolation optimizations.
+- Use GoogleTest flags to customize test behavior and safety, e.g., `--gtest_death_test_style=threadsafe`.
+- Place expensive shared resources in `SetUpTestSuite()` and clean in `TearDownTestSuite()` to avoid side effects across tests.
+- Use `RecordProperty()` inside your test or environment setup to add metadata while keeping test isolation.
+
+---
+
+This page complements the [Test Discovery & Execution Lifecycle](concepts/core-architecture/test-discovery-lifecycle.mdx) and [Advanced GoogleTest Topics](docs/advanced.md) by reinforcing trusted and fail-safe test execution patterns.
