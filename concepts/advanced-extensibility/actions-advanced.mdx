@@ -1,0 +1,281 @@
+---
+title: "Custom Actions and Advanced Mocking"
+description: "Unlock advanced behaviors in GoogleMock by composing complex actions, customizing mock responses, and leveraging advanced composition of matchers and actions. This page demonstrates how to build intricate test scenarios for challenging interfaces."
+---
+
+# Custom Actions and Advanced Mocking
+
+Unlock advanced behaviors in GoogleMock by composing complex actions, customizing mock responses, and leveraging advanced composition of matchers and actions. This guide demonstrates how to build intricate test scenarios for challenging interfaces using custom and polymorphic actions.
+
+---
+
+## Introduction to Custom Actions
+
+In GoogleMock, **actions** define what a mock function does when it is called. While many built-in actions exist to cover common scenarios, writing **custom actions** empowers you to express complex behavior that fits your testing needs precisely.
+
+### When to Use Custom Actions?
+
+- You need the mock method to perform side effects beyond returning simple values.
+- The built-in actions do not support the interaction you need to simulate.
+- You want to combine multiple effects into a single response.
+- Your action’s behavior depends on multiple input arguments or external state.
+
+### Key Principles
+
+- Actions focus on *what* happens when a mock method is called, abstracting away internal implementation details.
+- They are written in a way that maximizes reuse and composability with existing GoogleMock facilities.
+- Custom actions can be parameterized, allowing tailor-made behavior per each test.
+
+---
+
+## Defining Simple Custom Actions
+
+You can define custom actions using the `ACTION` and `ACTION_P` macros. These macros provide an easy way to define actions without implementing complex classes.
+
+### Defining an Action Without Parameters
+
+```cpp
+ACTION(ReturnFive) { return 5; }
+```
+
+This defines an action named `ReturnFive()` that always returns 5 regardless of the mock function's input.
+
+### Example Usage
+
+```cpp
+EXPECT_CALL(mock, GetNumber()).WillOnce(ReturnFive());
+```
+
+### Defining Parameterized Actions
+
+Use `ACTION_P` to create actions that accept parameters:
+
+```cpp
+ACTION_P(AddN, n) { return arg0 + n; }
+```
+
+`AddN` adds the parameter `n` to the first argument `arg0`.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Compute(_))
+    .WillOnce(AddN(10));  // Returns arg0 + 10
+```
+
+### Multiple Parameters
+
+For multiple parameters, use `ACTION_P2`, `ACTION_P3`, etc., up to 10:
+
+```cpp
+ACTION_P2(Concat, prefix, suffix) {
+  return prefix + arg0 + suffix;
+}
+```
+
+---
+
+## Implementing Monomorphic Actions for Precise Control
+
+For more complex scenarios, implement the `ActionInterface<F>` interface where `F` is the mock method's function signature. This approach requires creating a class with a `Perform` method that is invoked when the mock method is called.
+
+### Minimal Example
+
+```cpp
+template <typename F>
+class ActionInterface {
+ public:
+  virtual ~ActionInterface() = default;
+  virtual typename std::result_of<F>::type Perform(const std::tuple<Args...>& args) = 0;
+};
+```
+
+Define your action by subclassing `ActionInterface<F>`, implementing `Perform`:
+
+```cpp
+class MyCustomAction : public ActionInterface<int(int)> {
+ public:
+  int Perform(const std::tuple<int>& args) override {
+    int input = std::get<0>(args);
+    return input * 2;  // Example: double the input
+  }
+};
+
+// Helper factory function.
+Action<int(int)> MakeMyCustomAction() {
+  return MakeAction(new MyCustomAction());
+}
+```
+
+Use:
+
+```cpp
+EXPECT_CALL(mock, Func(_)).WillOnce(MakeMyCustomAction());
+```
+
+### Benefits
+
+- Full access to input arguments as a tuple.
+- Full control over return value and side effects.
+- Useful when the behavior requires complex computation or state.
+
+---
+
+## Creating Polymorphic Actions
+
+If you want your action to work with multiple function signatures, create a **polymorphic action** by implementing a generic `Perform` method template.
+
+### Polymorphic Action Interface
+
+```cpp
+class MyPolyAction {
+ public:
+  template <typename Result, typename ArgumentTuple>
+  Result Perform(const ArgumentTuple& args) const {
+    // Example generic behavior
+    return std::get<0>(args);
+  }
+};
+```
+
+Wrap it with GoogleMock's helper:
+
+```cpp
+inline PolymorphicAction<MyPolyAction> MakeMyPolyAction() {
+  return MakePolymorphicAction(MyPolyAction());
+}
+```
+
+Use it on various mock methods with compatible signatures:
+
+```cpp
+EXPECT_CALL(mock1, Func(int arg1))
+    .WillOnce(MakeMyPolyAction());
+EXPECT_CALL(mock2, Func(const std::string& arg1))
+    .WillOnce(MakeMyPolyAction());
+```
+
+---
+
+## Combining Multiple Actions
+
+GoogleMock’s `DoAll()` action allows combining multiple actions to be run sequentially when a mock method is called, returning the result of the last action.
+
+### Usage
+
+```cpp
+EXPECT_CALL(mock, Mutate(_))
+    .WillOnce(DoAll(SetArgPointee<0>(5), Return(true)));
+```
+
+Here `SetArgPointee<0>(5)` sets the output pointed to by argument 0, and `Return(true)` returns `true` as the mock’s return value.
+
+### Key Guidelines
+
+- Only the last action produces the return value.
+- All preceding actions must return `void`.
+- Useful for combining side effects and return values in one expectation.
+
+---
+
+## Using Arguments in Actions
+
+You can target specific arguments of the mock method when defining actions.
+
+### Actions on Arguments
+
+- `SaveArg<N>(pointer)`: Saves the N-th argument by copy.
+- `SaveArgByMove<N>(pointer)`: Saves the N-th argument by move.
+- `SetArgPointee<N>(value)`: Assigns to the object pointed to by the N-th argument.
+- `SetArgReferee<N>(value)`: Assigns to the reference argument at N.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Mutate(_))
+    .WillOnce(SetArgPointee<0>(42));
+```
+
+### Composing Arguments for Nested Actions
+
+- `WithArg<N>(action)`: Passes the N-th argument to the given action.
+- `WithArgs<N1, N2>(action)`: Passes selected arguments in specified order.
+- `WithoutArgs(action)`: Calls the action ignoring mock arguments.
+
+Example with `WithArg`:
+
+```cpp
+EXPECT_CALL(mock, Foo(_, _))
+    .WillOnce(WithArg<1>(Invoke(SomeFunction)));
+```
+
+---
+
+## Invoking Callable Arguments
+
+If a mock method accepts a callback or function object as an argument, you can use `InvokeArgument<N>(args...)` to invoke it with custom parameters.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, RegisterCallback(_))
+    .WillOnce(InvokeArgument<0>(42));  // Calls the 0-th argument as callback with 42
+```
+
+- Use `std::ref()` to pass arguments by reference if needed.
+
+---
+
+## Handling Move-Only Types in Actions
+
+GoogleMock fully supports mocking methods that take move-only types such as `std::unique_ptr`.
+
+### Returning Move-Only Types
+
+Use `Return(ByMove(std::move(ptr)))` or provide a lambda that creates the value on each call.
+
+```cpp
+EXPECT_CALL(mock, MakeUnique())
+    .WillOnce(Return(ByMove(std::make_unique<int>(5))));
+```
+
+### Accepting Move-Only Parameters
+
+Actions that move from arguments should be written carefully, and some built-in actions (e.g., `DoAll`) may not work with move-only parameters directly. Using lambdas or functors ensures flexibility.
+
+---
+
+## Tips and Best Practices
+
+- **Order Actions Correctly:** When combining `WillOnce` and `WillRepeatedly`, define `WillOnce` actions first, then `WillRepeatedly`.
+- **Prefer ON_CALL for Defaults:** Use `ON_CALL` for general behavior, `EXPECT_CALL` to assert expectations.
+- **Use `RetiresOnSaturation()` for Non-Sticky Expectations:** This avoids issues with overlapping expectations.
+- **Leverage Polymorphic Actions for Reusability:** Polymorphic actions handle multiple mock signatures elegantly.
+- **Use `IgnoreResult()` to discard return values in void context.**
+
+---
+
+## Summary
+
+By mastering custom actions, you gain the full power of GoogleMock to:
+
+- Create tailored mock behavior using parameterized and polymorphic actions.
+- Combine multiple side effects and return values with `DoAll()`.
+- Operate on specific arguments with convenient selectors like `WithArg`, `SaveArg`, and so forth.
+- Invoke callable arguments inside mocks dynamically.
+- Support advanced scenarios including move-only types safely.
+
+These capabilities let you write clean, expressive, and maintainable tests for complex interfaces.
+
+---
+
+## Further Reading and References
+
+- [GoogleMock Actions Reference](../reference/actions.md)
+- [gMock Cookbook: Writing New Actions](guides/core-workflow/writing-mocks.md#writing-new-actions)
+- [Mocking with GoogleMock](guides/core-workflow/writing-mocks.md)
+- [Setting Expectations in GoogleMock](api-reference/mocking-framework/setting-expectations.md)
+- [Matchers for Fine-Grained Argument Verification](api-reference/core-testing-framework/matchers-api.md)
+
+
+---

@@ -1,0 +1,296 @@
+---
+title: "Real-World Testing Examples"
+description: "Explore representative, real-world test cases using GoogleTest and GoogleMock. This guide presents complex, yet typical scenarios such as object interaction verification, death tests, and integration patterns, to accelerate your practical skillset."
+---
+
+# Real-World Testing Examples
+
+Explore how to apply GoogleTest and GoogleMock in complex, practical situations that reflect the challenges you will face in real projects. This guide focuses on showing you how to verify object interactions, handle death tests safely, and implement integration patterns that enhance test reliability and clarity.
+
+---
+
+## Workflow Overview
+
+- **Task Description:** Learn to write and manage representative real-world tests using GoogleTest and GoogleMock, going beyond basic unit tests to cover interaction testing, failure scenarios, and integration verification.
+- **Prerequisites:** Basic familiarity with writing tests using GoogleTest (`TEST`, `TEST_F`), and mocking with GoogleMock (`MOCK_METHOD`, `EXPECT_CALL`). Knowledge of test fixtures and assertions.
+- **Expected Outcome:** You will confidently write tests that use mocks for complex interaction verification, understand how to create reliable death tests, and apply integration patterns that ease maintenance and improve test clarity.
+- **Time Estimate:** 30-60 minutes to read and implement examples
+- **Difficulty Level:** Intermediate to Advanced
+
+---
+
+## Writing Interaction-Based Tests
+
+GoogleMock empowers you to specify exactly how your code under test should *interact* with its dependencies. This means you aren't limited to checking outputs, but can verify sequences, call counts, argument values, and call orders.
+
+### Step 1: Define Mock Classes
+
+Start by defining mock classes for the interfaces or abstract classes your code depends on. Use `MOCK_METHOD` macros in the `public` section regardless of the original method’s access level.
+
+```cpp
+class MockDatabase : public Database {
+ public:
+   MOCK_METHOD(bool, Connect, (const std::string& url), (override));
+   MOCK_METHOD(int, GetRecordCount, (), (const, override));
+   MOCK_METHOD(void, Disconnect, (), (override));
+};
+```
+
+**Tip:** Use type aliases or wrapping parentheses when your method signatures include complex types with commas to avoid macro parsing issues.
+
+### Step 2: Set Expectations Using `EXPECT_CALL`
+
+For each mock method you want to verify, specify what calls are expected. Include matchers for argument matching and actions for behavior.
+
+```cpp
+using ::testing::Return;
+using ::testing::_;
+
+MockDatabase mock_db;
+EXPECT_CALL(mock_db, Connect("mysql://localhost"))
+    .Times(1)
+    .WillOnce(Return(true));
+EXPECT_CALL(mock_db, GetRecordCount())
+    .Times(AtLeast(1))
+    .WillRepeatedly(Return(42));
+EXPECT_CALL(mock_db, Disconnect())
+    .Times(1);
+```
+
+- `Times()` controls call count, with flexible options such as `AtLeast()`, `Between()`, and `Exactly()`.
+- Actions like `Return()` specify what the method returns when called.
+
+### Step 3: Use `InSequence` for Order Verification
+
+When verifying that particular calls occur in a defined order, wrap your expectations in an `InSequence` object.
+
+```cpp
+{
+  InSequence s;
+  EXPECT_CALL(mock_db, Connect(_));
+  EXPECT_CALL(mock_db, GetRecordCount());
+  EXPECT_CALL(mock_db, Disconnect());
+}
+```
+
+This ensures `Connect` happens before `GetRecordCount` which happens before `Disconnect`.
+
+### Step 4: Use `ON_CALL` for Default Behaviors
+
+To specify default actions without setting rigid expectations, use `ON_CALL`. These are especially useful in a test fixture’s setup phase.
+
+```cpp
+ON_CALL(mock_db, GetRecordCount()).WillByDefault(Return(0));
+```
+
+Default actions do not imply expectations; use `EXPECT_CALL` when you want to verify calls explicitly.
+
+---
+
+## Testing Failure and Termination Behavior (Death Tests)
+
+Death tests check that your code properly terminates upon certain severe conditions. GoogleTest supports these safely using child processes.
+
+### Step 1: Write Death Tests with `EXPECT_DEATH` or `ASSERT_DEATH`
+
+The test statement must cause the program to terminate (crash, throw fatal error).
+
+```cpp
+EXPECT_DEATH(DoSomethingInvalid(), "fatal error");
+```
+
+- The second argument is a regex matching the error output.
+
+### Step 2: Use Separate Test Suites for Death Tests
+
+Since death tests run in child processes, GoogleTest requires death tests to belong to test suites with the suffix `DeathTest`.
+
+```cpp
+class FooDeathTest : public ::testing::Test {};
+TEST_F(FooDeathTest, TerminatesOnNullPointer) {
+  ASSERT_DEATH(foo.Process(nullptr), ".*null pointer.*");
+}
+```
+
+### Step 3: Beware of Side Effects and Threads
+
+- Death tests run in a subprocess; in-memory side effects will not be visible to the parent.
+- Avoid multi-threading before death tests to prevent flaky behavior.
+
+---
+
+## Integration and Composition Patterns
+
+Reliable testing of components interacting with dependencies requires thoughtful patterns.
+
+### Pattern: Delegate Mock Behavior to Fakes for Complex Logic
+
+If you already have a fake implementation, delegate mock calls to it to reuse logic.
+
+```cpp
+class FakeNetwork : public NetworkInterface { ... };
+
+class MockNetwork : public NetworkInterface {
+ public:
+   MOCK_METHOD(bool, Send, (const Packet&), (override));
+
+   void DelegateToFake() {
+     ON_CALL(*this, Send).WillByDefault(
+       [this](const Packet& p) { return fake_.Send(p); });
+   }
+
+ private:
+   FakeNetwork fake_;
+};
+```
+
+### Pattern: Use `SaveArg` and `DoAll` to Capture Arguments in Complex Assertions
+
+Validate multiple arguments by saving them for separate assertions.
+
+```cpp
+std::vector<int> captured_list;
+std::string captured_message;
+
+EXPECT_CALL(mock_logger, Log(_, _))
+    .WillOnce(DoAll(SaveArg<0>(&captured_list), SaveArg<1>(&captured_message)));
+
+// run code
+
+EXPECT_THAT(captured_list, ElementsAre(1, 2, 3));
+EXPECT_THAT(captured_message, HasSubstr("error"));
+```
+
+### Pattern: Partial Ordering of Calls
+
+Use `Sequence` objects to impose partial order without enforcing strict total ordering.
+
+```cpp
+Sequence s1, s2;
+EXPECT_CALL(mock, A()).InSequence(s1, s2);
+EXPECT_CALL(mock, B()).InSequence(s1);
+EXPECT_CALL(mock, C()).InSequence(s2);
+EXPECT_CALL(mock, D()).InSequence(s2);
+```
+
+---
+
+## Practical Examples
+
+### Example: Testing a FIFO Queue with Fixtures and Mock Interactions
+
+```cpp
+class MockDatabase {
+ public:
+   MOCK_METHOD(void, Insert, (int value), (override));
+};
+
+class QueueTest : public testing::Test {
+ protected:
+   QueueTest() {
+     queue_.Enqueue(10);
+     queue_.Enqueue(20);
+   }
+
+   Queue queue_;
+   MockDatabase mock_db_;
+};
+
+TEST_F(QueueTest, DequeueCallsDatabaseInsert) {
+   EXPECT_CALL(mock_db_, Insert(10));
+
+   int* val = queue_.Dequeue();
+   ASSERT_NE(val, nullptr);
+   EXPECT_EQ(*val, 10);
+   delete val;
+}
+```
+
+### Example: Death Test Ensuring Null Pointer Processing Crashes
+
+```cpp
+TEST(FooDeathTest, NullPointerTerminates) {
+   Foo foo;
+   ASSERT_DEATH(foo.Process(nullptr), ".*null pointer.*");
+}
+```
+
+### Example: Using Sequences to Verify Call Ordering
+
+```cpp
+Sequence s;
+EXPECT_CALL(mock_turtle, PenDown()).InSequence(s);
+EXPECT_CALL(mock_turtle, Forward(100)).InSequence(s);
+EXPECT_CALL(mock_turtle, PenUp()).InSequence(s);
+```
+
+### Example: Setting Default Behavior and Overriding in Tests
+
+```cpp
+class MockNetwork : public NetworkInterface {
+ public:
+   MOCK_METHOD(bool, Send, (const Packet& packet), (override));
+
+   MockNetwork() {
+     ON_CALL(*this, Send).WillByDefault(Return(true));
+   }
+};
+
+TEST(NetworkTest, SendReturnsTrueByDefault) {
+  MockNetwork mock_net;
+  EXPECT_TRUE(mock_net.Send(Packet()));
+}
+
+TEST(NetworkTest, CanOverrideSend) {
+  MockNetwork mock_net;
+  EXPECT_CALL(mock_net, Send(_)).WillOnce(Return(false));
+  EXPECT_FALSE(mock_net.Send(Packet()));
+}
+```
+
+---
+
+## Troubleshooting & Tips
+
+### Common Issues
+
+- **Unmatched mock calls:** If a mock method is called with arguments that do not match any `EXPECT_CALL`, gMock will report an error.
+- **Overly strict expectations:** Avoid setting too many strict `EXPECT_CALL`s that make tests brittle.
+- **Ordering Errors:** If calls come in unexpected order, use `InSequence` or `Sequence` objects properly.
+- **Death Test Failures:** Verify the regex pattern matches the error output; ensure death tests are isolated.
+
+### Best Practices
+
+- Use `ON_CALL` to specify common mock behaviors across many tests.
+- Use `EXPECT_CALL` sparingly for interactions you want to verify explicitly.
+- Make expectations non-sticky by using `.RetiresOnSaturation()` when sequencing multiple calls.
+- Name your sequences clearly when managing partial orders.
+- Avoid mocking classes you don't own; use adaptor interfaces instead.
+
+---
+
+## Next Steps & Related Content
+
+- **What's Next:** Implement your own mock classes and write interaction-based tests and death tests.
+- **Related Guides:**
+  - [Writing Your First Test](../core-workflow/getting-started-tests.md)
+  - [Mocking with GoogleMock](../core-workflow/writing-mocks.md)
+  - [Advanced Usage: Parameterized and Typed Tests](../advanced-usage/parameterized-tests.md)
+  - [Handling Death Tests and Asynchronous Tests](../advanced-usage/test-fixtures-best-practices.md)
+- **API References:**
+  - [Mocking Methods and Classes](../../api-reference/mocking-framework/mocking-and-method-mocking.md)
+  - [Setting Expectations](../../api-reference/mocking-framework/setting-expectations.md)
+  - [Actions and Matchers for Mocks](../../api-reference/mocking-framework/actions-and-matchers.md)
+
+---
+
+## Useful Resources
+
+- [GoogleTest Primer](../primer.md) – Start here if you are new.
+- [gMock for Dummies](../gmock_for_dummies.md) – Simplified guide to mocking.
+- [gMock Cookbook](../gmock_cook_book.md) – Recipes for common mock usage patterns.
+- [GoogleTest FAQ](../faq.md) – Answers to common questions.
+
+---
+
+Emphasizing effective patterns in real-world scenarios will accelerate your mastery with GoogleTest and GoogleMock, moving you from simple tests to robust, maintainable testing suites.
