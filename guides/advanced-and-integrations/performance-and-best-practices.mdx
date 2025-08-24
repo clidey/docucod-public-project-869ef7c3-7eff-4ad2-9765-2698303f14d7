@@ -1,0 +1,272 @@
+---
+title: "Performance, Scalability, and Best Practices"
+description: "Techniques to keep your test suites fast, maintainable, and robust, including running tests in parallel, handling large codebases, and avoiding common performance pitfalls. Highlights patterns used by large-scale users like Chromium and LLVM."
+---
+
+# Performance, Scalability, and Best Practices
+
+GoogleTest is designed to help you write robust, maintainable, and scalable tests for C++ projects of any size. This guide focuses specifically on techniques and strategies to optimize your test suites for performance and scalability, as well as best practices to avoid common pitfalls that can slow down or destabilize your testing.
+
+Whether you are working on a small codebase or a large project like Chromium or LLVM, applying these practices will help keep your tests fast, reliable, and easy to maintain.
+
+---
+
+## 1. Workflow Overview
+
+### Purpose
+This guide helps you understand and apply best practices related to:
+
+- Running tests efficiently and in parallel
+- Managing complex test suites with many tests and dependencies
+- Avoiding common performance issues and flaky tests
+- Leveraging GoogleMock effectively without impacting test performance
+
+### Prerequisites
+
+- Familiarity with writing tests using GoogleTest and GoogleMock
+- A working test suite for your codebase
+- Basic knowledge of your build system and how test execution is configured
+
+### Expected Outcome
+
+By following this guide, you will:
+
+- Optimize test execution time using parallelization and smarter organization
+- Prevent common scalability bottlenecks in large test suites
+- Reduce flakiness and non-determinism
+- Improve mock usage patterns to balance maintainability and speed
+
+### Time Estimate
+
+Most optimizations can be adopted incrementally; expect:
+
+- 1-2 hours to implement basic parallel test execution
+- Several days for large-scale organization and fine tuning
+
+### Difficulty Level
+
+Intermediate to Advanced
+
+---
+
+## 2. Step-by-Step Instructions
+
+### Step 1: Enable Parallel Test Execution
+
+GoogleTest natively supports running tests in parallel processes which can dramatically reduce total runtime.
+
+- Use the `--jobs=N` flag with your test runner or build system to run tests in parallel across N processes.
+- On CI environments, set `N` to match the number of CPU cores or a suitable fraction to avoid contention.
+
+**Expected results:**  Tests run concurrently, reducing wall-clock time proportionally to available cores.
+
+**Tip:** Ensure your tests are independent and can run in any order to safely enable parallelization.
+
+### Step 2: Organize Tests into Logical Suites
+
+Proper organization improves discoverability and allows selective execution.
+
+- Group related tests into test suites using GoogleTest's `TEST_F` or `TEST_P` constructs.
+- Use naming conventions to reflect logical layers or features.
+- Run subsets of tests selectively via test filters (e.g. `--gtest_filter=SuiteName.*`).
+
+**Expected results:** Easier test management, faster debugging by limiting test execution.
+
+### Step 3: Minimize Test Setup and Teardown Costs
+
+Heavy setup or teardown slows each test.
+
+- Use test fixtures (`TEST_F`) to share setup code among multiple tests.
+- For expensive global setup (e.g. databases), use `SetUpTestSuite()` and `TearDownTestSuite()`.
+- Avoid expensive operations inside individual tests or repeated unnecessarily.
+
+**Expected results:** Lower per-test overhead, faster test execution.
+
+### Step 4: Avoid Over-Specification in Expectations
+
+Overly strict mocks hurt maintainability and can lead to brittle tests.
+
+- Use `ON_CALL` for common default behaviors instead of excessive `EXPECT_CALL` specifiers.
+- Limit the use of strict mocks unless precise call sequence verification is needed.
+- Prefer `NiceMock` wrappers for mocks when you want to silence warnings on uninteresting calls.
+
+**Expected results:** More robust and maintainable test expectations with less false failures.
+
+### Step 5: Use Sequences and Partial Orders Judiciously
+
+Sequences (`InSequence`) enforce call order but can slow tests and introduce fragility.
+
+- Apply sequences only when call order verification is critical.
+- Use partial ordering with `After()` clauses to specify flexible constraints.
+
+**Expected results:** More precise interaction verification without unnecessary complexity.
+
+### Step 6: Leverage Default Actions and Avoid Unnecessary Custom Actions
+
+Default mock method return values accelerate test execution.
+
+- Use the built-in default actions for simple return types.
+- Avoid defining complex custom actions unless needed.
+
+**Expected results:** Simpler test code and faster test runs.
+
+### Step 7: Detect and Fix Flaky Tests
+
+Non-deterministic tests degrade trust in your suite.
+
+- Run tests with `--gtest_repeat=N` and `--gtest_shuffle` to detect flakiness.
+- Increase verbosity with `--gmock_verbose=info` to trace mock interactions.
+- Address issues like race conditions, uninitialized data, or timing dependencies.
+
+**Expected results:** Stable, deterministic test suites.
+
+### Step 8: Force Verification of Mocks When Needed
+
+Ensure mock objects' expectations are checked even if destructors aren't called.
+
+- Call `Mock::VerifyAndClearExpectations(&mock_obj)` explicitly when ownership is unclear.
+
+**Expected results:** Catches verification errors promptly.
+
+### Step 9: Use Heap Checkers and Leak Detection
+
+- Enable heap checkers in your test environment to catch leaks caused by mocks without virtual destructors or improper cleanup.
+
+**Expected results:** Cleaner tests and reduced memory leaks.
+
+---
+
+## 3. Examples & Patterns
+
+### Parallel Test Execution Example
+
+```shell
+# Run all tests with 8 parallel jobs
+./my_tests --jobs=8
+```
+
+### Using NiceMock to Silence Uninteresting Call Warnings
+
+```cpp
+#include <gmock/gmock.h>
+using ::testing::NiceMock;
+
+class MockDatabase {
+ public:
+  MOCK_METHOD(bool, Connect, (), ());
+  MOCK_METHOD(void, Disconnect, (), ());
+  MOCK_METHOD(int, Query, (const std::string& query), ());
+};
+
+TEST(MyTest, UsesDatabase) {
+  NiceMock<MockDatabase> mock_db;
+  ON_CALL(mock_db, Connect()).WillByDefault(Return(true));
+
+  // No EXPECT_CALL for Disconnect, silent if called
+  EXPECT_CALL(mock_db, Query("SELECT * FROM users")).WillOnce(Return(5));
+
+  // Code to test here uses mock_db...
+}
+```
+
+### Controlling Call Order with InSequence
+
+```cpp
+using ::testing::InSequence;
+
+TEST(SequenceTest, CallsInOrder) {
+  MockFoo foo;
+
+  {
+    InSequence s; // All EXPECT_CALLs inside the scope are ordered
+    EXPECT_CALL(foo, Init()).Times(1);
+    EXPECT_CALL(foo, Process()).Times(1);
+    EXPECT_CALL(foo, Cleanup()).Times(1);
+  }
+
+  foo.Init();
+  foo.Process();
+  foo.Cleanup();
+}
+```
+
+### Forcing Early Verification
+
+```cpp
+std::unique_ptr<MockBar> bar = std::make_unique<MockBar>();
+EXPECT_CALL(*bar, DoSomething());
+
+// ... pass bar to code under test ...
+
+// Before bar is destroyed, verify expectations explicitly
+ASSERT_TRUE(::testing::Mock::VerifyAndClearExpectations(bar.get()));
+```
+
+---
+
+## 4. Troubleshooting & Tips
+
+### Common Issues
+
+- **Tests running slower over time:** Frequently caused by expensive global setup or leaks
+- **Flaky tests on CI but stable locally:** Check for race conditions, environment dependencies, timing issues
+- **Excessive warnings about uninteresting calls:** Use `NiceMock` or add generic `EXPECT_CALL(...).Times(AnyNumber())` for those methods
+- **Mock expectations failing unexpectedly:** Use `--gmock_verbose=info` to trace call matching
+- **Mock leaks leading to no verification:** Ensure mocks have virtual destructors or call `Mock::AllowLeak` explicitly if intentional
+
+### Best Practices Summary
+
+- Keep mocks and test fixtures simple and lightweight
+- Verify expectations early when ownership is ambiguous
+- Use `ON_CALL` for default behaviors, `EXPECT_CALL` for important assertions
+- Configure your test run for parallel execution
+- Isolate external dependencies via mocks or fakes to speed up tests
+
+### Performance Considerations
+
+- Moving tests to run in parallel reduces wall time but needs thread-safe code
+- Avoid shared mutable state or side effects across tests
+- Cache expensive objects across tests at the suite level when possible
+
+### Alternative Approaches
+
+- Use fakes when mocking is cumbersome or unstable
+- Consider property-based or randomized testing to cover broad cases efficiently
+
+---
+
+## 5. Next Steps & Related Content
+
+### What’s Next
+- Explore the [Installing and Setup guide](../getting-started/installation-setup) to ensure your environment is optimized
+- Read the [Organizing and Managing Test Suites](../core-testing-workflows/organizing-test-suites) guide for maintaining large test sets
+- Review [Mocking Dependencies with GoogleMock](../core-testing-workflows/mocking-with-googlemock) to refine your mock usage
+
+### Related Guides
+
+- [Advanced Mocking Patterns and Strategies](../advanced-and-integrations/advanced-mocking-patterns)
+- [Integrating with Build and CI Systems](../advanced-and-integrations/integrating-with-build-systems)
+- [Troubleshooting Common Test Issues](../advanced-and-integrations/troubleshooting-common-issues)
+
+### Resources
+
+- GoogleMock [Cookbook](https://google.github.io/googletest/gmock_cook_book.html)
+- GoogleMock [Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html)
+
+---
+
+<AccordionGroup title="FAQ Highlights">
+<Accordion title="How to handle flaky or slow tests?">
+Run flaky tests multiple times using `--gtest_repeat` and investigate using `--gmock_verbose=info` to trace calls and find source of flakiness.
+</Accordion>
+<Accordion title="Why do I get warnings about uninteresting calls?">
+By default, gMock warns about methods called without `EXPECT_CALL`. Use `NiceMock` to suppress warnings or add generic catch-all `EXPECT_CALL`.
+</Accordion>
+<Accordion title="How to verify mocks before destruction?">
+Call `Mock::VerifyAndClearExpectations` explicitly if your test setup or ownership patterns delay mock destruction.
+</Accordion>
+</AccordionGroup>
+
+<Tip>
+Regularly profile and monitor your test suite's execution time to identify bottlenecks. Incorporate these performance best practices into your test development workflow to maintain fast and reliable tests as your project grows.
+</Tip>
