@@ -1,0 +1,311 @@
+---
+title: "Debugging Test Failures and Common Pitfalls"
+description: "Explains practical troubleshooting techniques for when tests do not run, do not produce expected results, or when users face surprising error messages. Covers frequent issues like assertion misuse, improper matcher usage, or failing to register tests, with clear steps for diagnosis and solution."
+---
+
+# Debugging Test Failures and Common Pitfalls
+
+GoogleTest is designed to help you write reliable, maintainable, and fast C++ tests. Yet, when tests fail unexpectedly, don’t run, or produce confusing errors, it can be frustrating. This page provides practical troubleshooting techniques and insights focused on the most common issues users encounter during test writing, running, and debugging.
+
+---
+
+## 1. Tests Do Not Run or Are Missing
+
+### Why Are Some Tests Not Executed?
+- **Disabled Tests**: Tests and test suites prefixed with `DISABLED_` are excluded from test runs by default. To include these, run with `--gtest_also_run_disabled_tests`.
+- **Filtering**: The `--gtest_filter` flag or `GTEST_FILTER` environment variable restricts tests run to only those matching the filter pattern.
+- **Test Sharding**: If environment variables `GTEST_TOTAL_SHARDS` and `GTEST_SHARD_INDEX` are set, tests are split across shards. Some tests may run in other shards.
+- **Mismatch Between TEST and TEST_F**: Mixing simple `TEST` and fixture-based `TEST_F` in the same test suite causes GoogleTest to ignore some tests. Use one style consistently within a test suite.
+- **Uninstantiated Parameterized Tests**: Parameterized tests defined with `TEST_P` must be instantiated with `INSTANTIATE_TEST_SUITE_P`, or the tests will not run.
+
+### How to Verify Tests Are Registered and Discovered
+- Use `--gtest_list_tests` to print all recognized tests without running them.
+- Check test suite and test names to avoid name collisions.
+- Avoid duplicate test names and fixture conflicts.
+
+<Check>
+Make sure you have not mixed `TEST` and `TEST_F` macros in the same test suite, and that all parameterized tests are properly instantiated.
+</Check>
+
+---
+
+## 2. Tests Run But Fail Unexpectedly
+
+### Understanding Assertion Failures
+- **Check the Failure Messages**: GoogleTest prints the file, line number, and details of the assertion failure — read them carefully.
+- **Use Appropriate Assertions**:
+  - Use `EXPECT_*` when you want execution to continue after failure for comprehensive reporting.
+  - Use `ASSERT_*` when failure should cause the current test to abort immediately.
+- **Pointer vs Value Comparison**: For C strings, prefer `EXPECT_STREQ` over `EXPECT_EQ` to compare contents correctly.
+
+### Common Pitfalls in Assertions
+- **Non-void Functions and Fatal Assertions**: Fatal assertions (`ASSERT_*`, `FAIL()`) can only be used in void-returning functions. Using them in functions returning values will cause compile errors.
+- **Proper Use of Matchers**: When using matchers (`EXPECT_THAT`) from GoogleMock, ensure arguments and predicates are correctly defined.
+- **Floating-point Comparisons**: Use `EXPECT_FLOAT_EQ`, `EXPECT_DOUBLE_EQ`, or `EXPECT_NEAR` instead of `EXPECT_EQ` for floats/doubles.
+
+### Debugging Failures in Subroutines
+Fatal failures abort the current function only, not the entire test. This means:
+
+```cpp
+void Helper() {
+  ASSERT_EQ(1, 2);  // Fatal failure, but only returns from Helper()
+}
+
+TEST(FooTest, Bar) {
+  Helper();          // Test continues even after Helper failure
+  int* p = nullptr;
+  *p = 3;            // Crash!
+}
+```
+
+To handle this:
+- Use `HasFatalFailure()` after calling a subroutine to decide whether to return early.
+- Or use `ASSERT_NO_FATAL_FAILURE(Helper());` to enforce no fatal failure inside.
+- Or enable exceptions and add a listener that throws on fatal failures to propagate them.
+
+<Tip>
+Check your subroutine calls for fatal failures not propagating by either explicitly checking with `HasFatalFailure()` or restructuring your tests.
+</Tip>
+
+### Adding Trace Context to Failures
+When assertions in helper functions fail, you may not know which call triggered it. Use `SCOPED_TRACE` to add context:
+
+```cpp
+void CheckValue(int n) {
+  SCOPED_TRACE(testing::Message() << "Checking n = " << n);
+  EXPECT_EQ(n, 5);
+}
+
+TEST(TraceTest, Demo) {
+  CheckValue(3);
+  CheckValue(5);
+}
+```
+
+Failure output will show trace points pointing to the exact `SCOPED_TRACE` location.
+
+---
+
+## 3. Common Error Messages and Their Meaning
+
+### Mixed TEST and TEST_F in One Test Suite
+```
+All tests in the same test suite must use the same test fixture class.
+However, in test suite FooTest, you defined test Bar using TEST and test Baz
+using TEST_F with different fixtures.
+```
+
+**Cause**: Mixing `TEST` (no fixture) and `TEST_F` (fixture) in the same test suite.
+
+**Fix**: Use only one style consistently for a given test suite.
+
+### Uninstantiated Parameterized Test Suite
+```
+Parameterized test suite FooTest is defined via TEST_P but never instantiated.
+None of the test cases will run.
+```
+
+**Cause**: Defined parameterized tests are not instantiated with `INSTANTIATE_TEST_SUITE_P`.
+
+**Fix**: Make sure you instantiate all parameterized test suites with parameters.
+
+### Disabled Tests Not Running
+If you see tests not running without explanation, check if their names start with `DISABLED_`. 
+
+Run using `--gtest_also_run_disabled_tests` to include them.
+
+### Assertion Macro Misuse Messages
+- Using `ASSERT_*` in a function with a non-void return type will cause a compile error.
+- `EXPECT_EQ` on pointers compares addresses; use `EXPECT_STREQ` for C strings.
+
+### Fatal Failure in Constructor or Destructor
+Fatal assertions in constructors or destructors do not abort the test as you might expect; they abort only the constructor or destructor.
+
+**Fix**: Use `SetUp()` and `TearDown()` methods for fatal assertions instead.
+
+---
+
+## 4. Diagnosing Test Registration and Execution Issues
+
+### Use `--gtest_list_tests` to Enumerate Registered Tests
+This lets you validate that all your expected tests are recognized by GoogleTest.
+
+### Print Test Names and Details in Code
+Use:
+
+```cpp
+const auto* test_info = ::testing::UnitTest::GetInstance()->current_test_info();
+if (test_info) {
+  std::cout << "Currently running test: " << test_info->test_suite_name() << "." << test_info->name() << std::endl;
+}
+```
+
+### Check for Mixing Disallowed Test Patterns
+Do not mix `TEST()` with `TEST_F()` or different fixture classes within the same test suite.
+
+### Confirm Proper Instantiation of Parameterized and Typed Tests
+Ensure `INSTANTIATE_TEST_SUITE_P` or `INSTANTIATE_TYPED_TEST_SUITE_P` is invoked for every `TEST_P` or `TYPED_TEST_P` declared.
+
+---
+
+## 5. Troubleshooting Assertion Failures
+
+### Reading the Failure Output
+GoogleTest outputs information about:
+- The expression tested
+- Actual and expected values (with differences)
+- File and line number
+- Stack trace (if enabled)
+
+Use this output to pinpoint failures.
+
+### Use Scoped Traces To Clarify Failures in Utility Functions
+Wrap helper functions or loops with `SCOPED_TRACE()` to see contextual messages when assertions fail.
+
+### Using `ASSERT_NO_FATAL_FAILURE` and `EXPECT_NO_FATAL_FAILURE`
+Use these to check that called statements do not yield fatal failures, allowing you to detect unexpected test interruptions early.
+
+### Address Pointer vs Value Comparisons
+Remember:
+- `EXPECT_EQ(ptr1, ptr2)` compares addresses
+- `EXPECT_STREQ(cstr1, cstr2)` compares C string values
+
+### Handling Floating-Point Comparisons
+Use specialized assertions:
+- `EXPECT_FLOAT_EQ` and `ASSERT_FLOAT_EQ` for `float`
+- `EXPECT_DOUBLE_EQ` and `ASSERT_DOUBLE_EQ` for `double`
+- `EXPECT_NEAR` and `ASSERT_NEAR` with a tolerance
+
+Avoid using plain equality (`EXPECT_EQ`) with floating-point numbers due to precision issues.
+
+---
+
+## 6. Tips for Advanced Debugging
+
+### Catching Failures in Subroutines with Exceptions
+By adding a custom listener that throws on fatal failures, you can make fatal failures act like exceptions to stop test execution immediately:
+
+```cpp
+class ThrowingListener : public ::testing::EmptyTestEventListener {
+  void OnTestPartResult(const ::testing::TestPartResult& result) override {
+    if (result.fatally_failed()) {
+      throw ::testing::AssertionException(result);
+    }
+  }
+};
+
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  ::testing::UnitTest::GetInstance()->listeners().Append(new ThrowingListener);
+  return RUN_ALL_TESTS();
+}
+```
+
+### Using `HasFatalFailure()` to Early Exit
+Use `if (::testing::Test::HasFatalFailure()) return;` after subroutine calls to prevent dals beyond failed assertions.
+
+---
+
+## 7. Quick Checklist for Debugging
+
+- [ ] Did you forget to call `RUN_ALL_TESTS()` in `main()`?
+- [ ] Are your tests named correctly (no underscores, no disallowed characters)?
+- [ ] Are disabled tests running? Use the `--gtest_also_run_disabled_tests` flag.
+- [ ] Are all parameterized tests instantiated properly?
+- [ ] Are you mixing `TEST` and `TEST_F` or different fixtures in one suite?
+- [ ] Are assertions used correctly respecting void-return types?
+- [ ] Did you add `SCOPED_TRACE` to gain more context in helper function failures?
+- [ ] Are you using value comparison assertions for pointers correctly?
+- [ ] Are you using floating-point assertions instead of plain equality for floats?
+- [ ] Use `ASSERT_NO_FATAL_FAILURE` and `EXPECT_NO_FATAL_FAILURE` to catch unexpected fatal failures inside statements.
+
+---
+
+## 8. Additional Resources
+
+For deeper troubleshooting and understanding, see:
+
+- [Assertions Reference](../reference/assertions.md)
+- [GoogleTest Primer](../docs/primer.md)
+- [Writing Your First Test](../guides/getting-started/writing-your-first-test.md)
+- [Common Installation & Configuration Issues](../getting-started/setup-troubleshooting/common-issues.md)
+- [Using Matchers](../guides/core-testing-workflows/using-matchers.md)
+- [Mocking Techniques](../guides/core-testing-workflows/mocking-techniques.md)
+
+You may also enable verbose output with flags such as `--gtest_brief=0` and `--gtest_print_time=1` for more detail.
+
+---
+
+## Summary
+This page guides you through practical approaches to tackle GoogleTest test failures, missing tests, and confusing error outputs. By understanding test discovery, correct assertion use, test fixture consistency, and leveraging diagnostic macros like `SCOPED_TRACE` and fatal failure detection, you will better manage your test debugging workflow.
+
+<Tip>
+As a best practice, always ensure tests are properly registered and instantiated, use the right assertions tailored to your data types, and employ context tracing to accelerate root cause analysis.
+</Tip>
+
+---
+
+*This documentation is focused on diagnosing and solving test run and failure issues specific to GoogleTest’s user-facing testing experience.*
+
+
+---
+
+### Example: Using `SCOPED_TRACE` to Distinguish Failing Calls
+```cpp
+void ValidateItem(int value) {
+  SCOPED_TRACE(::testing::Message() << "Value is " << value);
+  EXPECT_GT(value, 0);
+}
+
+TEST(MyTests, MultipleValues) {
+  ValidateItem(3);  // Passes
+  ValidateItem(0);  // Fails with trace info
+  ValidateItem(-1); // Fails with trace info
+}
+```
+
+This output points you exactly to the failure context.
+
+
+### Example: Propagating Fatal Failures when Calling Subroutines
+```cpp
+void Helper() {
+  ASSERT_TRUE(Something());
+}
+
+TEST(MyTest, Example) {
+  Helper();
+  if (::testing::Test::HasFatalFailure()) {
+    return;  // Abort test due to fatal failure in Helper
+  }
+  // Safe to continue
+}
+```
+
+
+### Troubleshooting Disabled or Missing Tests
+- Ensure that test or test suite names do not begin with `DISABLED_` unless you intend to disable them.
+- If you want to include disabled tests, run with:  
+  ```
+  ./your_test_binary --gtest_also_run_disabled_tests
+  ```
+- Check your filter settings by running:
+  ```
+  ./your_test_binary --gtest_list_tests
+  ```
+
+
+### Understanding Common GoogleTest Failure Messages
+GoogleTest failure messages provide valuable diagnostics:
+
+- File and line number pinpoint where assertion failed.
+- Expression conditions describe what was expected and what was actual.
+- Stack traces (with `--gtest_stack_trace_depth`) show failure call paths.
+
+Read failure messages carefully to identify test logic errors or setup issues.
+
+---
+
+<Info>
+Still stuck? The [Common Installation & Configuration Issues](../getting-started/setup-troubleshooting/common-issues.md) page covers environment and setup troubleshooting that often underlies unexpected test behavior.
+</Info>
