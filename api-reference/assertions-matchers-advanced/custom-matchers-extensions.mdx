@@ -1,0 +1,293 @@
+---
+title: "Custom Matchers and Extending Assertions"
+description: "Guides power users through defining custom matchers, extending the assertion framework, and best practices for integrating custom validation logic into test code for maintainability and readability."
+---
+
+# Custom Matchers and Extending Assertions
+
+This guide empowers you to enhance GoogleTest's assertion capabilities by defining **custom matchers** and extending the core assertion framework. Custom matchers enable precise, readable, and maintainable validation logic tailored to your domain-specific needs, improving test expressiveness and diagnostic clarity.
+
+---
+
+## Why Create Custom Matchers?
+
+Out-of-the-box matchers in GoogleTest cover a wide range of generic cases, but sometimes you need to assert conditions that are unique or complex in your codebase. Writing custom matchers allows you to:
+
+- Encapsulate complex validation logic behind a simple, expressive interface
+- Produce clear failure messages that explain mismatches effectively
+- Reuse validation across multiple tests for consistency
+- Integrate seamlessly with `EXPECT_THAT()` and `ASSERT_THAT()` assertions
+
+Before you write a custom matcher, consider if combining existing matchers or using predicate formatters (`EXPECT_PRED_FORMAT*`) meet your needs.
+
+---
+
+## Defining a Basic Custom Matcher
+
+GoogleTest provides a set of macros and interfaces for writing matchers in different styles. The simplest way is to use the `MATCHER` family of macros.
+
+### Using the `MATCHER` Macro
+
+This macro lets you quickly define a matcher with an intuitive name and a predicate body.
+
+```cpp
+MATCHER(IsEven, "") {
+  return (arg % 2) == 0;
+}
+```
+
+This defines a matcher named `IsEven`. You can use it as:
+
+```cpp
+EXPECT_THAT(value, IsEven());
+```
+
+When the match fails, GoogleTest prints a failure message like:
+
+```
+Value of: value
+Expected: is even
+  Actual: 7
+```
+
+#### Adding Custom Failure Messages
+
+Improve diagnostic clarity by streaming additional details to the `result_listener`:
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  if ((arg % 7) == 0) return true;
+  *result_listener << "the remainder is " << (arg % 7);
+  return false;
+}
+```
+
+If the assertion fails, it outputs:
+
+```
+Value of: some_expression
+Expected: is divisible by 7
+  Actual: 27 (the remainder is 6)
+```
+
+### Parameterized Matchers
+
+For matchers that take arguments, use `MATCHER_P` (or `MATCHER_P2`, up to `MATCHER_P10`):
+
+```cpp
+MATCHER_P(HasAbsoluteValue, val, "") {
+  return std::abs(arg) == val;
+}
+```
+
+Usage:
+
+```cpp
+EXPECT_THAT(number, HasAbsoluteValue(10));
+```
+
+This will print descriptions involving parameter values automatically.
+
+---
+
+## Implementing Advanced Custom Matcher Classes
+
+For highly reusable or complex matchers, define your own matcher class implementing the matcher interface:
+
+```cpp
+class BarPlusBazEqMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  explicit BarPlusBazEqMatcher(int expected_sum) : expected_sum_(expected_sum) {}
+
+  bool MatchAndExplain(const Foo& foo, std::ostream* os) const {
+    return (foo.bar() + foo.baz()) == expected_sum_;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "bar() + baz() equals " << expected_sum_;
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "bar() + baz() does not equal " << expected_sum_;
+  }
+
+ private:
+  const int expected_sum_;
+};
+
+// Factory function
+Matcher<const Foo&> BarPlusBazEq(int expected_sum) {
+  return BarPlusBazEqMatcher(expected_sum);
+}
+```
+
+### Benefits of Custom Matcher Classes
+
+- Fine-grained control over argument and return types
+- Ability to override match explanation and negation descriptions
+- Better compiler diagnostics when misused
+- Capability to implement polymorphic matchers (see next section)
+
+---
+
+## Polymorphic Matchers
+
+Polymorphic matchers work across multiple types and adapt their logic depending on the argument type. To create one, define a class with a templated `MatchAndExplain` method:
+
+```cpp
+class NotNullMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  template <typename T>
+  bool MatchAndExplain(T* p, std::ostream* /* listener */) const {
+    return p != nullptr;
+  }
+
+  void DescribeTo(std::ostream* os) const { *os << "is not NULL"; }
+  void DescribeNegationTo(std::ostream* os) const { *os << "is NULL"; }
+};
+
+PolymorphicMatcher<NotNullMatcher> NotNull() {
+  return MakePolymorphicMatcher(NotNullMatcher());
+}
+```
+
+Use like:
+
+```cpp
+EXPECT_THAT(ptr, NotNull());
+```
+
+GoogleTest automatically instantiates these for matching compatible pointer types.
+
+---
+
+## Extending Built-in Assert Macros with MATCHERs
+
+`EXPECT_THAT()` supports any matcher that fits the matcher interface, including custom ones. Combining with your own matchers:
+
+```cpp
+MATCHER_P(LessThanOrEqualTo, max, "") {
+  return arg <= max;
+}
+
+EXPECT_THAT(result, LessThanOrEqualTo(10));
+```
+
+Leverage these with existing filters or chain them with combinators like `AllOf()`, `AnyOf()`, and `Not()`.
+
+---
+
+## Using Matchers in Your Mocks
+
+Define expectations with `EXPECT_CALL()` using matchers to specify argument constraints:
+
+```cpp
+EXPECT_CALL(mock, Foo(Lt(5), NotNull()));
+```
+
+Use custom matchers to encapsulate logic for arguments:
+
+```cpp
+EXPECT_CALL(mock, Bar(IsDivisibleBy7()));
+```
+
+---
+
+## Practical Tips & Best Practices
+
+- **Keep matchers pure**: Avoid side effects in matchers; they may be invoked multiple times.
+- **Provide descriptive messages**: Use the listener to improve failure diagnostics.
+- **Reuse matchers**: Store complex or composite matchers in variables.
+- **Prefer `ON_CALL` for default behaviors** and `EXPECT_CALL` for actual expectations to maintain test clarity.
+- **Use `MATCHER_Pk` macros for parameterized matchers** to get readable error output.
+- **Carefully manage polymorphism**, especially in generic tests, to get the right type deductions.
+
+---
+
+## Troubleshooting Common Issues
+
+- **Matcher not matching**: Check that the types are compatible; consider using `SafeMatcherCast` to help.
+- **Unexpected matcher error messages**: Use `MatchAndExplain` to stream debug info for clearer diagnostics.
+- **Compilation errors with templated matchers**: Explicitly specify parameter types if automatic deduction fails.
+- **Side effects causing flaky tests**: Ensure that matchers do not modify global or external state.
+
+---
+
+## Examples
+
+### Simple Custom Matcher
+
+```cpp
+MATCHER(IsPositive, "") {
+  return arg > 0;
+}
+...
+EXPECT_THAT(value, IsPositive());
+```
+
+### Parameterized Matcher
+
+```cpp
+MATCHER_P(IsMultipleOf, factor, "") {
+  return (arg % factor) == 0;
+}
+...
+EXPECT_THAT(num, IsMultipleOf(5));
+```
+
+### Complex Matcher Class
+
+```cpp
+class SumInRangeMatcher {
+ public:
+  SumInRangeMatcher(int low, int high) : low_(low), high_(high) {}
+
+  bool MatchAndExplain(const Foo& foo, std::ostream* os) const {
+    int sum = foo.bar() + foo.baz();
+    if (sum < low_ || sum > high_) {
+      if (os) *os << "sum is " << sum;
+      return false;
+    }
+    return true;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "sum in range [" << low_ << ", " << high_ << "]";
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "sum not in range [" << low_ << ", " << high_ << "]";
+  }
+
+ private:
+  int low_, high_;
+};
+
+Matcher<const Foo&> HasSumInRange(int low, int high) {
+  return SumInRangeMatcher(low, high);
+}
+```
+
+Usage:
+
+```cpp
+EXPECT_THAT(foo, HasSumInRange(10, 20));
+```
+
+---
+
+## References & Further Reading
+
+- [Matchers Reference](https://google.github.io/googletest/reference/matchers.html) — Complete list of built-in matchers.
+- [Assertions Reference](../../docs/reference/assertions.md) — How to use `EXPECT_THAT` and related assertions.
+- [Mocking Reference](../../docs/reference/mocking.md) — Guide on using mocks with matchers.
+- [gMock Cookbook: Writing New Matchers Quickly](../../docs/gmock_cook_book.md#WritingNewMatchers) — Step-by-step recipes.
+- [Matchers Header Implementation](https://github.com/google/googletest/blob/main/googlemock/include/gmock/gmock-matchers.h) — Source code for custom matcher interfaces.
+
+---
+
+Custom matchers strengthen your test clarity and resilience by letting you articulate precise validation criteria with clean syntax and rich diagnostics. Mastering them is essential for effective GoogleTest-based testing at scale.
