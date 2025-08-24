@@ -1,0 +1,264 @@
+---
+title: "Performance and Best Practices"
+description: "Practical recommendations for minimizing test runtime, isolating slow tests, and structuring tests for long-term maintainability. Boost overall test effectiveness through proven strategies."
+---
+
+# Performance and Best Practices
+
+Practical recommendations for minimizing test runtime, isolating slow tests, and structuring tests for long-term maintainability. Boost overall test effectiveness through proven strategies.
+
+---
+
+## 1. Overview
+
+Performance tuning and maintainability are essential for large test suites using GoogleTest and GoogleMock. Slow or brittle tests impede developer productivity and extend feedback loops.
+
+This guide shows you how to:
+
+- Minimize test execution time
+- Detect and isolate slow or flaky tests
+- Organize tests to promote clear intent and maintainability
+
+Estimated completion time to apply this guide: 30-60 minutes depending on suite size.
+
+Difficulty: Intermediate
+
+---
+
+## 2. Minimizing Test Runtime
+
+### 2.1 Identify Slow Tests Early
+
+Regularly monitor and profile your test suite to pinpoint tests that take disproportionate time.
+
+- Use `--gtest_list_tests` combined with timing runs under tools like `time` or CI profiling to find outliers.
+- Instrument slow tests with GoogleTest `--gtest_filter` to run them separately and verify their distinctiveness.
+
+### 2.2 Use Mocking to Eliminate Expensive Dependencies
+
+Avoid slow tests caused by real external dependencies (e.g. databases, networks). Use GoogleMock to:
+
+- Mock interfaces of slow resources
+- Simulate behaviors deterministically
+- Define controlled scenarios to speed up testing
+
+For example, replace real database calls with mock objects:
+
+```cpp
+// Interface
+class Database {
+ public:
+  virtual bool Connect() = 0;
+  virtual int GetRecordCount() const = 0;
+  virtual ~Database() = default;
+};
+
+// Mock
+class MockDatabase : public Database {
+ public:
+  MOCK_METHOD(bool, Connect, (), (override));
+  MOCK_METHOD(int, GetRecordCount, (), (const, override));
+};
+```
+
+Mocking avoids network delays, disk I/O, or other resource contention.
+
+### 2.3 Leverage Test Sharding
+
+Split your tests to run concurrently across multiple cores or machines.
+
+GoogleTest supports test sharding via environment variables:
+
+```bash
+export GTEST_TOTAL_SHARDS=4
+export GTEST_SHARD_INDEX=0
+./your_test_binary
+```
+
+Repeat with different `GTEST_SHARD_INDEX` values to run parallel shards.
+
+Best practices:
+
+- Keep shards balanced in workload
+- Avoid test interdependencies which cause flaky behavior
+
+### 2.4 Avoid Over-Specification in Expectations
+
+Setting too-strict expectations in GoogleMock can slow down tests due to repeat failures or over-verification.
+
+- Prefer `ON_CALL()` for setting common default behavior to save overhead.
+- Use `EXPECT_CALL()` sparingly only when verifying critical interactions.
+
+See [Expectations and Behaviors](./expectations-behaviors) for detailed guidelines.
+
+---
+
+## 3. Isolating Slow or Flaky Tests
+
+### 3.1 Mark and Group Slow Tests
+
+Label slow tests explicitly (e.g. via naming or categories).
+
+- Prefix or suffix test names with `Slow`.
+- Use test suites to group slow tests.
+
+This enables running fast tests alone during rapid development cycles.
+
+### 3.2 Use Timed Test Framework or Wrappers
+
+Implement custom wrappers or use CI tooling to measure individual test times and generate reports.
+
+Example timing wrapper (simplified):
+
+```cpp
+class TimingTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    start_ = std::chrono::steady_clock::now();
+  }
+  void TearDown() override {
+    auto end = std::chrono::steady_clock::now();
+    auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(end - start_);
+    std::cout << "Test took: " << diff.count() << " ms\n";
+  }
+  std::chrono::steady_clock::time_point start_;
+};
+```
+
+Use such feedback to spot slow tests for remediation.
+
+### 3.3 Flaky Tests Handling
+
+Flaky tests produce intermittent failures and undermine confidence.
+
+- Isolate flaky tests using `--gtest_filter` and run them repeatedly.
+- Analyze logs for timings, shared resources, or order dependencies.
+- Use `InSequence` and `Sequence` constructs to enforce expected call orders and suppress concurrency-induced flakiness when possible.
+
+---
+
+## 4. Structuring Tests for Maintainability
+
+### 4.1 Use Test Fixtures Effectively
+
+Group related tests using fixtures to share setup and teardown code.
+
+Example:
+
+```cpp
+class FooTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    // common setup
+  }
+  void TearDown() override {
+    // cleanup
+  }
+  MockFoo mock_foo_;
+};
+
+TEST_F(FooTest, DoesThis) {
+  EXPECT_CALL(mock_foo_, Bar(5));
+  // test code
+}
+```
+
+This reduces redundancy and clarifies intent.
+
+### 4.2 Logical Grouping and Naming
+
+- Use descriptive names for tests and fixtures.
+- Organize tests in directories reflecting feature or component boundaries.
+
+Avoid mixing unrelated tests in a single unit to aid discoverability.
+
+### 4.3 Limit Test Complexity
+
+- Each test should verify one behavior only.
+- Avoid long and nested tests; split into smaller logical tests.
+- Use parameterized and typed tests for repetitive patterns ([see Parameterized Tests Guide](../guides/writing-effective-tests/parameterized-typed-tests)) to reduce duplicated code.
+
+### 4.4 Keep Mocks Concise and Focused
+
+- Define mock classes close to the owner of the interface for easier maintenance.
+- Avoid mocking classes you do not own unless necessary. Consider creating adaptor interfaces for such cases.
+
+See [gMock for Dummies](./gmock_for_dummies) and [gMock Cookbook](./gmock_cook_book) for design best practices.
+
+### 4.5 Use Default Actions (`ON_CALL`) Wisely
+
+Set common behaviors once in the fixture or mock constructor using `ON_CALL`. Reserve `EXPECT_CALL` for verifying critical calls. This reduces test brittleness.
+
+---
+
+## 5. Practical Tips & Common Pitfalls
+
+- **Do not mock non-virtual methods unless using advanced template-based mocking.** Prefer interfaces with virtual methods.
+- **Always ensure destructors of interfaces are virtual** to prevent unexpected behavior in mock destruction.
+- **Beware of over-mocking:** excessive mocking leads to brittle tests and slow compilation. Use fakes or stubs where appropriate.
+- **Avoid doing heavy logic in mock actions.** Delegate complex behavior to fakes or helper methods.
+- **Manage order strictly only when needed.** Use `InSequence` or `Sequence` clauses carefully to avoid brittle tests.
+- **Use `RetiresOnSaturation()` when expectations represent limited calls that should no longer be used after being hit.**
+- **Suppress uninteresting call warnings deliberately by using `NiceMock<>` if the warnings clutter the output but do not indicate real issues.**
+
+---
+
+## 6. Troubleshooting & Optimization
+
+### 6.1 Slow Compilation
+
+- Move mock class constructor and destructor definitions to `.cc` files.
+- Minimize number and complexity of mocks within each test.
+
+### 6.2 Unexpected/Wrong Matching in Mocks
+
+- Use `--gmock_verbose=info` to trace matching expectations and calls.
+- Ensure expectations (`EXPECT_CALL`) precede exercising the mocks.
+- Disambiguate overloaded function expectations using `Const()` or type-safe matchers.
+
+### 6.3 Race Conditions and Thread Issues
+
+- Setup mocks in one thread before usage in others.
+- GoogleMock method calls and actions will be executed in the threads that invoke the methods.
+- Add thread synchronization to mocks’ expectations if needed.
+
+### 6.4 Memory Leaks in Tests
+
+- Use heap checking; leaks can result from missing or misused virtual destructors.
+- Use `Mock::AllowLeak()` if you intentionally keep mocks alive beyond test scope (rare).
+
+---
+
+## 7. Next Steps
+
+- Read [gMock Cookbook](./gmock_cook_book) for recipes on advanced mocking.
+- Explore [Writing Effective Tests](../guides/writing-effective-tests/test-patterns) to improve organization.
+- Review [Integration & Dependencies](../overview/architecture-core-concepts/integration-and-dependencies) for build and CI best practices.
+- Use [Test Organization and Patterns](../guides/writing-effective-tests/test-patterns) to structure your suites further.
+
+---
+
+## References
+
+- [gMock for Dummies](./gmock_for_dummies)
+- [gMock Cheat Sheet](./gmock_cheat_sheet)
+- [Expectations and Behaviors](../guides/mocking-real-world/expectations-behaviors)
+- [GoogleTest Primer](../guides/getting-started/primer)
+- [Parameterized and Typed Tests Guide](../guides/writing-effective-tests/parameterized-typed-tests)
+- [Integration with CI](../guides/solutions-and-patterns/integration-ci)
+
+---
+
+<Tip>
+Optimizing your test suite performance is a continuous process. Start small, measure regularly, and iterate. Keep tests focused, fast, and reliable to accelerate development velocity.
+</Tip>
+
+<Warning>
+Avoid overusing mock strictness and complex ordering constraints. Over-specification leads to brittle tests and maintenance overhead.
+</Warning>
+
+<Note>
+Using GoogleMock's verbose logging (`--gmock_verbose=info`) is the most effective debugging aid for expectations and call mismatches. Enable it during test development.
+</Note>
+
+---
