@@ -1,0 +1,248 @@
+---
+title: "Isolating and Testing Production Code with Mocks"
+description: "Real-world guidance on adopting mocking to isolate complex objects, stabilize tests, and safely validate integration points between components."
+---
+
+# Isolating and Testing Production Code with Mocks
+
+Real-world guidance on adopting mocking to isolate complex objects, stabilize tests, and safely validate integration points between components.
+
+---
+
+## Workflow Overview
+
+### Task Description
+
+This guide helps you learn to isolate production code dependencies through mock objects using GoogleMock, enabling you to write stable, focused, and reliable integration tests. It focuses on techniques that let you replace complex or external components with mocks to validate interactions safely without executing real implementations.
+
+### Prerequisites
+
+- Familiarity with GoogleTest and GoogleMock basics, including mock class creation via `MOCK_METHOD`, setting expectations with `EXPECT_CALL`, and default behaviors via `ON_CALL`.
+- A C++ project setup with GoogleMock correctly installed and integrated.
+- Understanding of interfaces or abstract classes to mock.
+
+### Expected Outcome
+
+By following this guide, you will be able to:
+- Define mock classes that isolate production code dependencies.
+- Use strictness policies (`NiceMock`, `NaggyMock`, `StrictMock`) to control uninteresting calls behavior.
+- Set up expectations and default behaviors for mocks to precisely control test interactions.
+- Safely test your production components by verifying their integration with dependencies through mocks.
+
+### Time Estimate
+
+Approximately 30 to 45 minutes, depending on familiarity with GoogleMock concepts.
+
+### Difficulty Level
+
+Intermediate — familiarity with GoogleMock basics is assumed.
+
+---
+
+## Step-by-Step Instructions
+
+### 1. Define Mock Interfaces for Production Dependencies
+
+Begin by identifying the interfaces or abstract classes representing the dependencies you want to isolate (e.g., database connectors, network clients).
+
+Mock these interfaces by:
+- Creating a subclass with GoogleMock's `MOCK_METHOD` macros for each virtual method.
+
+Example:
+```cpp
+class NetworkClient {
+ public:
+  virtual ~NetworkClient() = default;
+  virtual bool Connect(const std::string& url) = 0;
+  virtual std::string GetData(int id) = 0;
+};
+
+class MockNetworkClient : public NetworkClient {
+ public:
+  MOCK_METHOD(bool, Connect, (const std::string& url), (override));
+  MOCK_METHOD(std::string, GetData, (int id), (override));
+};
+```
+
+<Tip>
+Always ensure the base class destructor is virtual to allow safe polymorphic deletes.
+</Tip>
+
+### 2. Choose an Appropriate Mock Strictness Level
+
+GoogleMock provides three wrappers to control handling of uninteresting calls (calls without expectations):
+- **`NiceMock<T>`**: Suppresses warnings for uninteresting calls. Recommended for most cases to avoid test noise.
+- **`NaggyMock<T>`**: Prints warnings on uninteresting calls (default mock behavior).
+- **`StrictMock<T>`**: Treats uninteresting calls as test failures for the strictest validation.
+
+Example of usage:
+```cpp
+using ::testing::NiceMock;
+NiceMock<MockNetworkClient> mock_client;
+```
+
+<Info>
+Use `NiceMock` to stabilize tests when you are not interested in all method calls. Switch to `StrictMock` when you want to enforce all interactions strictly.
+</Info>
+
+### 3. Setup Default Behaviors with `ON_CALL`
+
+Configure how your mocks should behave when called without explicit expectations using `ON_CALL`.
+
+Example:
+```cpp
+ON_CALL(mock_client, Connect).WillByDefault(Return(true));
+ON_CALL(mock_client, GetData).WillByDefault(Return("default data"));
+```
+
+This stabilizes your tests by providing safe default return values.
+
+### 4. Set Expectations Using `EXPECT_CALL` Where Interaction Matters
+
+Explicitly specify important calls you want to verify with `EXPECT_CALL`. This defines your test's contract for interaction.
+
+Example:
+```cpp
+EXPECT_CALL(mock_client, Connect("https://api.example.com"))
+    .Times(1)
+    .WillOnce(Return(true));
+
+EXPECT_CALL(mock_client, GetData(42))
+    .Times(AtLeast(1))
+    .WillRepeatedly(Return("mocked data"));
+```
+
+<Tip>
+Avoid over-specifying expectations: only verify calls relevant to the test’s intent.
+</Tip>
+
+### 5. Inject Mocks into Your Production Code Under Test
+
+Pass the mock objects to the production components, preferably via constructor injection or setter injection, to isolate real dependencies.
+
+Example:
+```cpp
+class DataFetcher {
+ public:
+  explicit DataFetcher(NetworkClient* client) : client_(client) {}
+  std::string Fetch(int id) {
+    if (!client_->Connect("https://api.example.com")) return "";
+    return client_->GetData(id);
+  }
+ private:
+  NetworkClient* client_;
+};
+
+// In test:
+DataFetcher fetcher(&mock_client);
+auto result = fetcher.Fetch(42);
+EXPECT_EQ(result, "mocked data");
+```
+
+### 6. Run and Verify Your Tests
+
+When your test completes, GoogleMock automatically verifies that all expectations were met when the mock object is destructed.
+
+<Tip>
+If your mocks are heap-allocated and ownership is transferred elsewhere, call `::testing::Mock::VerifyAndClearExpectations(mock_ptr)` to ensure verification does not get skipped.
+</Tip>
+
+---
+
+## Practical Examples
+
+### Example: Isolating a Logger in Production
+
+Suppose your production code depends on a Logger interface:
+
+```cpp
+class Logger {
+ public:
+  virtual ~Logger() {}
+  virtual void LogInfo(const std::string& message) = 0;
+  virtual void LogError(const std::string& message) = 0;
+};
+
+class MockLogger : public Logger {
+ public:
+  MOCK_METHOD(void, LogInfo, (const std::string& message), (override));
+  MOCK_METHOD(void, LogError, (const std::string& message), (override));
+};
+```
+
+In your test:
+
+```cpp
+using ::testing::StrictMock;
+using ::testing::_;
+
+StrictMock<MockLogger> mock_logger;
+
+EXPECT_CALL(mock_logger, LogInfo(_)).Times(AnyNumber());
+EXPECT_CALL(mock_logger, LogError("Critical failure")).Times(1);
+
+// Inject mock_logger and test production code
+// that will produce a single critical failure log.
+```
+
+This test ensures that `LogError` with the message "Critical failure" is called exactly once while allowing any number of `LogInfo` calls.
+
+### Example: Using NiceMock to Suppress Uninteresting Call Warnings
+
+```cpp
+using ::testing::NiceMock;
+
+NiceMock<MockNetworkClient> mock_client;
+ON_CALL(mock_client, Connect).WillByDefault(Return(true));
+
+// No expectations for GetData, so uninteresting calls won’t trigger warnings.
+```
+
+---
+
+## Troubleshooting & Tips
+
+### Common Issues
+
+- **Uninteresting Call Warnings:** Use `NiceMock` to suppress or explicitly write `EXPECT_CALL(...).Times(AnyNumber())` for methods you don’t want to verify.
+- **Unexpected Calls Failures:** Add matching `EXPECT_CALL` for calls your tests actually perform, or use `Times(AnyNumber())` where needed.
+- **Mock Destruction Not Triggering Verification:** Ensure mock objects are deleted or use `Mock::VerifyAndClearExpectations()`.
+- **Non-Virtual Destructors:** Make all interfaces you mock have virtual destructors to avoid undefined behavior.
+
+### Best Practices
+
+- Use `ON_CALL` to define common default behaviors shared by many tests.
+- Use `EXPECT_CALL` primarily to verify interactions specific to each test.
+- Wrap related `EXPECT_CALL`s with `InSequence` if call order matters.
+- Prefer to mock interfaces or abstract classes rather than concrete classes.
+- Avoid exposing implementation details; test interactions and outcomes.
+
+### Performance Considerations
+
+- Mock only as much as necessary; over-mocking can slow tests and increase maintenance.
+- Use `NiceMock` to reduce test output noise and speed up test writing.
+
+### Alternative Approaches
+
+- Use fake classes with working implementations for integration-level tests instead of mocks, when behavior matters more than the interaction verification.
+
+---
+
+## Next Steps & Related Content
+
+- **Getting Started Guides:**  Explore the [GoogleTest Primer](https://google.github.io/googletest/primer.html) and [Quickstart Overviews](../getting-started/quickstart-overview).
+- **Mocking Basics:** Deepen your knowledge in the [Introduction to Mocking](../core-testing-workflows/mocking-basics).
+- **Matchers and Actions:** Learn flexible verification with [Using Matchers](../core-testing-workflows/using-matchers) and advanced action techniques from the [gMock Cookbook](docs/gmock_cook_book.md).
+- **Debugging Mocks:** Consult [Troubleshooting Common Mocking Errors](../faq/common-problems-advanced/troubleshooting-mock-errors).
+- **Performance Optimization:** For better test speed, see [Performance and Test Suite Optimization](../advanced-patterns/performance-and-parallel).
+
+---
+
+## References
+
+- [Mocking Reference](../reference/mocking)
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html)
+- [gMock Cookbook](docs/gmock_cook_book.md)
+- [Feature Overview](../overview/architecture-and-concepts/feature-overview)
+
+---
