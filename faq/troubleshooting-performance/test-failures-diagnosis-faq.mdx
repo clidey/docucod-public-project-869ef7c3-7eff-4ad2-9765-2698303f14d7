@@ -1,0 +1,201 @@
+---
+title: "Common Test Failures and Their Solutions"
+description: "Explains frequent causes of unexpected test failures, assertion mismatches, flaky tests, or surprising behaviors in mocks, with actionable steps to identify and resolve the underlying issues."
+---
+
+# Common Test Failures and Their Solutions
+
+This page explains frequent causes of unexpected test failures, assertion mismatches, flaky tests, or surprising behaviors in mocks, with actionable steps to identify and resolve the underlying issues.
+
+---
+
+## 1. Unexpected Test Failures
+
+### Why Does My Test Fail Even Though My Code Is Correct?
+
+Tests failing unexpectedly can often be traced to incorrect assumptions about the mocks or the test environment. Here's what to check:
+
+- **Missing or incorrect expectations:** Confirm that all relevant mock methods have `EXPECT_CALL()`s that correctly describe expected calls. Without properly set expectations, calls may cause errors or warnings.
+- **Incorrect argument matchers:** Make sure your argument matchers in `EXPECT_CALL()` or `ON_CALL()` correctly capture the arguments passed at runtime. Use `_` for wildcards and built-in matchers for precision.
+- **Call order issues:** If you use sequences or ordering constraints (`InSequence`, `After`), ensure the calls are being made in the correct order.
+- **Uninitialized mocks:** The mock class' destructor verifies expectations upon object destruction. If your mock object is never destroyed (e.g., leaked or permanently allocated), verification is not triggered - leading to false positives or hiding failures.
+
+<Tip>
+Always set up all `EXPECT_CALL()` statements before exercising code that uses the mocks. gMock requires expectations to be defined upfront to detect failures on the precise context.
+</Tip>
+
+### Common Scenarios
+
+- Calls to mock methods without expectations produce **uninteresting call warnings**.
+- Overly strict expectations cause tests to fail when the code changes call cardinality or ordering unexpectedly.
+- Missing `RetiresOnSaturation()` on expectations with upper bounds can cause spurious saturation errors after expected calls.
+
+
+## 2. Assertion Mismatches
+
+### What Does "Actual function call count doesn't match this expectation" Mean?
+
+This failure indicates that a mocked method was called more or fewer times than expected:
+
+- **Too few calls:** Verify that your code path triggers calls you indicated with `EXPECT_CALL`.
+- **Too many calls:** The mock was invoked more than the cardinality set in `Times()`. You might need to relax the cardinality or check for unintended repetitive calls.
+
+Example:
+```cpp
+EXPECT_CALL(mock_obj, Foo(42)).Times(2);
+// If Foo(42) is called 3 times, test fails with this error.
+```
+
+### How to Fix?
+
+- Use more flexible cardinalities such as `AtLeast(n)` or `AnyNumber()` if exact call count isn't crucial.
+- Add `RetiresOnSaturation()` to disable an expectation once it has been fulfilled.
+- Inspect call stack traces (run with `--gmock_verbose=info`) to ensure the test behavior and expectations match reality.
+
+
+## 3. Flaky Tests Due to Mock Behavior
+
+### What Causes Tests to Flake Sometimes?
+
+Flakiness often comes from:
+
+- **Unstable or non-deterministic mock expectations**, such as wrong cardinalities or order.
+- **Shared global or static state in mocks** causing interference among tests.
+- **Unintended side effects in actions**, especially when `WillOnce` and `WillRepeatedly` mixed improperly.
+
+### Recommendations
+
+- Use sequences (`InSequence`) to force order when necessary.
+- Avoid global mutable state in mocks.
+- Use clear, deterministic actions. Prefer lambdas or stateless actions over mutable functors.
+- For repeated calls returning different values, chain `WillOnce()` calls **in call order** and use `.RetiresOnSaturation()` to avoid sticky expectations issues.
+
+Example of flaky cause:
+```cpp
+EXPECT_CALL(turtle, GetX())
+    .WillOnce(Return(1))
+    .WillOnce(Return(2));
+EXPECT_CALL(turtle, GetX())  // a 2nd expectation overrides
+    .WillOnce(Return(3));
+```
+This setup causes ambiguity and flakiness. Better to consolidate in one expectation.
+
+
+## 4. Surprising Behavior in Mocks
+
+### Real Method Called Instead of Mock?
+
+- Ensure the method is **`virtual`** in the base class. Mocking non-virtual methods is unsupported except by special delegation patterns.
+- Check mock method declaration: `MOCK_METHOD` macros only mock virtual methods.
+
+<Warning>
+Trying to mock non-virtual functions directly will result in fallback to real method calls, defeating the purpose.
+</Warning>
+
+### Macros Not Parsing Comma-containing Types?
+
+- Use parentheses around return or argument types containing commas to prevent parsing errors in `MOCK_METHOD`.
+
+Example:
+```cpp
+MOCK_METHOD((std::pair<int, int>), GetPair, ());
+```
+Or define type aliases to simplify.
+
+
+### Expectations Not Matching Expected Calls?
+
+- Confirm matchers are correct. Use `_` as wildcard if argument values are unimportant.
+- When matching multiple expectations on the same method, later expectations override earlier ones.
+- Use default actions (`ON_CALL`) for typical behavior without strict call limits.
+
+
+## 5. Troubleshooting Steps
+
+<Steps>
+<Step title="Enable Verbose Mock Logging">
+Run your test executable with the `--gmock_verbose=info` flag to see traces of all mock calls and expectation evaluations.
+</Step>
+<Step title="Check Mock Object Lifetime">
+Ensure your mock objects are destroyed properly to trigger expectation verification. If allocated on the heap, ensure correct ownership and deletion.
+</Step>
+<Step title="Inspect Cardinalities and Sequences">
+Review `Times()` settings for each expectation; consider using sequences for call order enforcement.
+</Step>
+<Step title="Simplify Expectations">
+Reduce complex expectations to minimal matchers like `_` to identify if argument matching causes failures.
+</Step>
+<Step title="Use Nice or Strict Mocks as Needed">
+Use `NiceMock<T>` to suppress warnings on uninteresting calls, or `StrictMock<T>` to treat them as failures, helping isolate call origin issues.
+</Step>
+<Step title="Check for Sticky Expectations">
+If you have multiple `EXPECT_CALL`s on the same method, ensure they use `.RetiresOnSaturation()` or sequences to avoid overlapping/mismatched triggers.
+</Step>
+</Steps>
+
+## 6. Best Practices to Prevent Failures
+
+- **Set expectations before exercising mocks.**
+- **Use argument matchers wisely:** specify only what's needed.
+- **Use sequences and `RetiresOnSaturation`** for ordered and non-sticky expectations.
+- **Leverage `ON_CALL` for default behaviors.**
+- **Avoid mocking non-virtual methods directly.** Use dependency injection or adapters instead.
+- **Prefer `NiceMock` to suppress noisy warnings, use `StrictMock` only when tests require strict validation.**
+
+
+## 7. Useful Quick Tips
+
+- To assert a method is never called: use `.Times(0)` on its `EXPECT_CALL`.
+
+  ```cpp
+  EXPECT_CALL(foo, Bar(_)).Times(0);
+  ```
+
+- To ignore uninteresting calls without warnings, use `NiceMock`.
+
+- To verify expectations explicitly before destruction, call `Mock::VerifyAndClearExpectations(&mock);`.
+
+- Use `SCOPED_TRACE` to add context to assertion failures inside helper functions or loops.
+
+- Always include virtual destructors in base classes to avoid memory leaks with mocks.
+
+
+## 8. Troubleshooting Common Error Messages
+
+<AccordionGroup title="Common GoogleMock Error Messages">
+<Accordion title="Actual function call count doesn't match expectation">
+This error means your mock method was called more or fewer times than expected. Verify your call counts and `Times()` settings.
+</Accordion>
+<Accordion title="Uninteresting function call encountered - default action taken">
+This warning means a mock method was called without any matching `EXPECT_CALL`. Either add an expectation or use `NiceMock` to suppress warnings.
+</Accordion>
+<Accordion title="Mocks not destroyed - expectations not verified">
+Ensure your mock objects are properly destroyed so that gMock can verify expectations at teardown.
+</Accordion>
+<Accordion title="MOCK_METHOD macro parsing error with commas in arguments or return types">
+Wrap complex types containing commas in parentheses or use type aliases to fix parsing.
+</Accordion>
+</AccordionGroup>
+
+
+## 9. Where to Get More Help
+
+- Visit the [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html) tutorial for introductory guidance.
+- Consult the [Mocking Reference](../docs/reference/mocking.md) for detailed API and usage.
+- Review the [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) for recipes and practical tips.
+- Use the `--gmock_verbose=info` flag to get detailed diagnostic output at runtime.
+
+---
+
+## See Also
+
+- [GoogleTest Primer](../docs/primer.md) - Basics of writing tests.
+- [gMock Cookbook](../docs/gmock_cook_book.md) - Advanced mocking techniques.
+- [gMock Cheat Sheet](../docs/gmock_cheat_sheet.md) - Quick reference for mocks.
+- [Assertions Reference](../docs/reference/assertions.md) - Learn about assertions in GoogleTest.
+
+---
+
+<Note>
+This document covers core user-facing issues related specifically to common test failures encountered when using GoogleTest and gMock mocks as documented in the Mocking Reference and gMock for Dummies. For environment setup and build issues, see the Getting Started and Integration Troubleshooting FAQs.
+</Note>
