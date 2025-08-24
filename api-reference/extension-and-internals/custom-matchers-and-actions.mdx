@@ -1,0 +1,334 @@
+---
+title: "Custom Matchers and Actions Extension"
+description: "Detailed explanation of creating your own matchers and actions to extend the behavior and expressiveness of your tests. Covers macro-based and template-based extensibility points for integrating domain-specific logic."
+---
+
+# Custom Matchers and Actions Extension
+
+Extend your tests’ expressiveness by creating your own custom matchers and actions. This page guides you through defining matchers and actions using macro-based and template-based extensibility points, enabling domain-specific logic to be integrated seamlessly into your GoogleTest and GoogleMock code.
+
+---
+
+## Why Create Custom Matchers and Actions?
+
+Default matchers and actions cover many common cases, but real-world testing often demands more tailored validation of complex objects and behaviors. Custom matchers allow you to precisely specify how arguments should be validated beyond built-in patterns. Custom actions enable specific behaviors when mock functions are called, directly reflecting domain logic or side effects.
+
+Crafting your own matchers and actions helps achieve:
+
+- **Clearer, more expressive tests:** Tailor the test specification to your domain language.
+- **Better diagnostics:** Provide richer failure messages that point to the real issue.
+- **Reusability:** Share domain-specific test idioms across your team and projects.
+
+---
+
+## Defining Custom Matchers Using Macros
+
+GoogleMock provides a straightforward and concise way to define custom matchers through the `MATCHER` family of macros. This approach is ideal for quick, expressive matchers that focus on the logic to decide a match and how to describe the matcher.
+
+### Basic Syntax
+
+```cpp
+MATCHER(Name, "description") {
+  // 'arg' is the value being matched.
+  // Return true if 'arg' matches the criteria.
+  return /* boolean expression */;
+}
+```
+
+- `Name` is the matcher name.
+- Inside, `arg` is the actual value your matcher checks.
+- The description string documents the matcher, used in failure messages.
+
+### Example: Checking Divisibility by 7
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  return (arg % 7) == 0;
+}
+```
+
+Use the matcher in tests:
+
+```cpp
+EXPECT_CALL(mock_foo, Bar(IsDivisibleBy7()));
+EXPECT_THAT(value, IsDivisibleBy7());
+```
+
+This matcher yields failure messages like:
+
+```
+Value of: value
+Expected: is divisible by 7
+  Actual: 27 (the remainder is 6)
+```
+
+(You can stream more info to `result_listener` for richer messages.)
+
+### Parameterized Matchers
+
+Use `MATCHER_P`, `MATCHER_P2`, ..., to create matchers with parameters.
+
+```cpp
+MATCHER_P(HasAbsoluteValue, value, "") {
+  return std::abs(arg) == value;
+}
+```
+
+Example usage:
+
+```cpp
+EXPECT_THAT(expression, HasAbsoluteValue(10));
+```
+
+This approach nicely integrates parameters into the failure messages.
+
+### Writing Rich Failure Messages
+
+Inside the matcher, you can stream explanation to `*result_listener`:
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  if ((arg % 7) == 0) return true;
+  *result_listener << "the remainder is " << (arg % 7);
+  return false;
+}
+```
+
+This improves diagnostics by telling users why a match failed.
+
+### Using `EXPECT_` Inside Matchers
+
+You can also use `EXPECT_` assertions for concise failure info:
+
+```cpp
+MATCHER(IsPositive, "") {
+  EXPECT_GT(arg, 0);
+  return true;
+}
+```
+
+This can simplify complex predicates, but should be used judiciously.
+
+---
+
+## Writing Custom Monomorphic and Polymorphic Matchers
+
+If you require more control or reusable matchers, implement matcher classes directly.
+
+### Monomorphic Matcher Class
+
+Implements match logic for one specific type `T`.
+
+Required:
+
+- A typedef: `using is_gtest_matcher = void;`
+- A method: `bool MatchAndExplain(const T& value, std::ostream* listener) const;`
+- Methods: `void DescribeTo(std::ostream* os) const;` and `void DescribeNegationTo(std::ostream* os) const;`
+
+Example:
+
+```cpp
+class DivisibleBySevenMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  bool MatchAndExplain(int n, std::ostream* os) const {
+    if (n % 7 == 0) return true;
+    if (os != nullptr) *os << "the remainder is " << (n % 7);
+    return false;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "is divisible by 7";
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "is not divisible by 7";
+  }
+};
+
+::testing::Matcher<int> DivisibleBySeven() {
+  return ::testing::Matcher<int>(DivisibleBySevenMatcher());
+}
+```
+
+### Polymorphic Matcher Class
+
+Can be used to match multiple types. Implement `MatchAndExplain` as a template method.
+
+Example:
+
+```cpp
+class NotNullMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  template <typename T>
+  bool MatchAndExplain(T* p, std::ostream* /* os */) const {
+    return p != nullptr;
+  }
+
+  void DescribeTo(std::ostream* os) const { *os << "is not NULL"; }
+  void DescribeNegationTo(std::ostream* os) const { *os << "is NULL"; }
+};
+
+::testing::PolymorphicMatcher<NotNullMatcher> NotNull() {
+  return ::testing::MakePolymorphicMatcher(NotNullMatcher());
+}
+```
+
+### Best Practices
+
+- Ensure matchers are *pure functions* without side effects.
+- Provide clear `DescribeTo` and `DescribeNegationTo` for human-readable failures.
+- Use `MatchResultListener` to provide detailed match explanations.
+
+---
+
+## Defining Custom Actions
+
+Actions specify what the mock method should do when called. You can define them using lambdas, functors, or classes.
+
+### Using Callables Directly
+
+You can use lambdas or functors as actions without extra boilerplate:
+
+```cpp
+EXPECT_CALL(mock, Method(_))
+    .WillOnce([](ArgType arg) { return /* custom result */; });
+```
+
+The callable must be compatible with the mocked method's signature.
+
+### Writing Action Classes
+
+Implement an action class with a call operator matching the mock function.
+
+Example:
+
+```cpp
+struct MultiplyBy {
+  int factor;
+  int operator()(int arg) const { return arg * factor; }
+};
+
+EXPECT_CALL(mock, Multiply(_))
+    .WillOnce(MultiplyBy{7});
+```
+
+### Distinguishing WillOnce and WillRepeatedly
+
+- `WillOnce` can take move-only types and supports callables that may be invoked at most once.
+- `WillRepeatedly` requires copyable callables and will be invoked multiple times.
+
+### Legacy Macro-Based Actions
+
+GoogleMock previously supported `ACTION` and `ACTION_P` macros to define actions. While `ACTION` macros remain supported, prefer using lambdas or callable classes for clarity and easier debugging.
+
+Example:
+
+```cpp
+ACTION(IncrementArg1) { return ++(*arg1); }
+EXPECT_CALL(mock, Foo(_)).WillOnce(IncrementArg1());
+```
+
+### Parameterized Actions
+
+Use `ACTION_P` macros to add parameters to your actions.
+
+Example:
+
+```cpp
+ACTION_P(AddN, n) {
+  return arg0 + n;
+}
+EXPECT_CALL(mock, Foo()).WillOnce(AddN(5));
+```
+
+### Defining Polymorphic Actions
+
+For actions to be usable with mock methods of different signatures, implement a class with the template method:
+
+```cpp
+template <typename ResultType, typename ArgumentTuple>
+ResultType Perform(const ArgumentTuple& args) const;
+```
+
+Wrap it with `MakePolymorphicAction()` to produce a polymorphic action.
+
+Example:
+
+```cpp
+class ReturnSecondArgumentAction {
+ public:
+  template <typename R, typename Args>
+  R Perform(const Args& args) const {
+    return std::get<1>(args);
+  }
+};
+
+auto ReturnSecondArgument() {
+  return ::testing::MakePolymorphicAction(ReturnSecondArgumentAction());
+}
+```
+
+This can be used with any mock method whose second argument is convertible to the return type.
+
+---
+
+## Practical Tips and Best Practices
+
+- Use **custom matchers** when built-in ones don't express your intent clearly.
+- Keep matchers **pure and side-effect free**.
+- Provide **descriptive failure messages** to simplify debugging.
+- Use **parameterized matchers** for flexible matching.
+- Prefer **lambdas or functors** for custom actions.
+- When writing custom actions used by multiple mock methods of different signatures, implement polymorphic actions.
+- Use `WillOnce` for actions that only run once; `WillRepeatedly` for persistent behaviors.
+
+---
+
+## Example: Creating a Custom Matcher
+
+```cpp
+#include <gmock/gmock.h>
+
+MATCHER_P(IsBetween, range, "") {
+  return arg >= range.first && arg <= range.second;
+}
+
+// Usage in test
+EXPECT_CALL(mock_obj, GetValue(IsBetween(std::make_pair(5, 10))));
+```
+
+---
+
+## Example: Creating a Custom Action
+
+```cpp
+#include <gmock/gmock.h>
+
+struct MultiplyAction {
+  int factor;
+
+  int operator()(int x) { return x * factor; }
+};
+
+// Usage in test
+EXPECT_CALL(mock_obj, Compute(_))
+    .WillOnce(MultiplyAction{3});
+```
+
+---
+
+## See Also
+
+- [Mock Objects and Method Expectations](/api-reference/mocking-framework/mock-objects-and-methods)
+- [Matchers and Call Strictness](/api-reference/mocking-framework/matchers-and-strictness)
+- [Actions and Cardinalities](/api-reference/mocking-framework/actions-and-cardinalities)
+- [Writing Effective Tests: Advanced Matchers](/guides/writing-effective-tests/advanced-matchers)
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html)
+
+---
+
+Embrace the power of custom matchers and actions to write tests that speak your language and uncover subtle bugs with clarity and precision.
