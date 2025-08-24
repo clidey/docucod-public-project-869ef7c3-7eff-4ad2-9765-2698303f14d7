@@ -1,0 +1,262 @@
+---
+title: "Best Practices for Mocking and Stubbing"
+description: "Actionable patterns and principles for writing clear, maintainable, and effective tests with mocks. This guide covers when and how to use mocks, pitfalls to avoid, and integrating mocks into larger test suites."
+---
+
+# Best Practices for Mocking and Stubbing
+
+## Overview
+This guide presents actionable patterns and principles to help you write clear, maintainable, and effective tests using mocks in GoogleMock (gMock). It covers when and how to use mocks properly, common pitfalls to avoid, and strategies for integrating mocks smoothly into larger test suites. Following these best practices will improve test readability, reduce brittleness, and maximize the value of interaction-based testing.
+
+---
+
+## 1. Understanding User Intent with Mocks
+
+Before diving into the specific mechanics of mocking, it's essential to align your approach with the goals of your tests and the roles mocks play:
+
+- **Mocks model interactions**: Use mocks to verify the interaction between components, such as verifying method calls, arguments, order, and frequency.
+- **Stubs provide behavior**: Use stubbing (`ON_CALL`) to specify default behavior to allow code to proceed without failing due to unimplemented dependencies.
+- **Avoid over-specification**: Set expectations only on interactions you truly want to verify; overly strict expectations lead to fragile tests that break on harmless changes.
+
+## 2. Best Practices Workflow
+
+### Step 1: Prefer `ON_CALL` for Default Behavior
+
+- Use `ON_CALL` to define how mock methods should behave when called but without requiring that they must be called.
+- Set `ON_CALL` defaults commonly in test fixtures or mock constructors to share behavior across multiple tests.
+
+```cpp
+ON_CALL(mock_obj, Foo(_)).WillByDefault(Return(42));
+```
+
+- Avoid unnecessarily turning all uninteresting calls into expectations; instead, let them fallback to default actions.
+
+### Step 2: Use `EXPECT_CALL` Only When Verification Is Needed
+
+- Add `EXPECT_CALL` *only* for calls whose occurrence, argument values, or call frequency/order you want to verify explicitly.
+- Use precise matchers to specify arguments, but prefer looseness wherever possible to avoid brittle tests.
+
+```cpp
+EXPECT_CALL(mock_obj, Foo(5)).Times(1);
+EXPECT_CALL(mock_obj, Bar(_)).Times(AnyNumber());
+```
+
+<Tip>
+Avoid blind use of `EXPECT_CALL` without clear intent; it should document the specification your code under test must fulfill.
+</Tip>
+
+### Step 3: Suppress Uninteresting Call Warnings with `NiceMock`
+
+- By default, gMock mocks are “naggy” and warn about uninteresting calls (methods called without any expectations).
+- Wrap your mock with `NiceMock<>` to suppress unnecessary warnings on such calls when they are benign.
+
+```cpp
+NiceMock<MockFoo> mock_foo;
+```
+
+- Use `StrictMock<>` only when you want uninteresting calls to fail tests; otherwise, err on the side of `NiceMock`.
+
+### Step 4: Group Related Calls into Sequences or Use Ordering Scopes
+
+- Use `InSequence` or explicit `Sequence` objects to enforce expected call order and prevent surprises from out-of-order calls.
+
+```cpp
+{
+  InSequence seq;
+  EXPECT_CALL(mock, Init());
+  EXPECT_CALL(mock, Process());
+}
+```
+
+- For partial ordering, use `.After()` or `.InSequence()` specifying multiple sequences to model dependencies precisely.
+
+### Step 5: Use `RetiresOnSaturation` to Handle Repeated Calls
+
+- For expectations expected to be called a fixed number of times, consider `.RetiresOnSaturation()` to deactivate the expectation after it’s satisfied to allow other expectations to apply.
+
+```cpp
+EXPECT_CALL(mock, Foo(42))
+    .Times(2)
+    .RetiresOnSaturation();
+```
+
+### Step 6: Avoid Defining Expectations After Mock Is Exercised
+
+- Always set up expectations before passing mocks to the code under test.
+- Setting or modifying expectations after the fact leads to undefined behavior.
+
+<Tip>
+If you need to verify mock state at a specific point, use `Mock::VerifyAndClearExpectations()` instead of resetting and setting new expectations mid-test.
+</Tip>
+
+### Step 7: Delegate to Real Objects or Fakes for Complex Behavior
+
+- When business logic inside mocks becomes complicated, consider delegating default behavior to a real or fake object.
+
+```cpp
+ON_CALL(mock, Method(_)).WillByDefault(Invoke(&real_obj, &RealClass::Method));
+```
+
+This ensures your mocks behave consistently with real implementations.
+
+### Step 8: Use Clear Naming and Structure
+
+- Name your mocks and test methods clearly to express intent.
+- Organize related mocks and expectations logically within test files and test suites.
+- Document complex interaction expectations with comments or helper functions.
+
+## 3. Practical Tips and Pitfalls
+
+- **Never mock non-virtual methods** unless using advanced patterns; instead, refactor or adapt the design.
+- **Mock methods must be public in mocks**, even if base methods are protected/private, to allow gMock to hook into them properly.
+- **Use matchers to avoid over-specification:** `_` for any argument, `Ge()`, `Eq()`, and custom matchers to keep intentions clear but flexible.
+- **Beware of sticky expectations:** expectations remain active after saturation unless retired explicitly or sequenced.
+- **Don’t suppress warnings by adding `EXPECT_CALL` without `.Times(AnyNumber())` or proper intent**, it only masks issues.
+- **If you see uninteresting call warnings unexpectedly, verify if mocks are set up correctly and consider wrapping with `NiceMock`.**
+
+## 4. Example: Using NiceMock with Best Practices
+
+```cpp
+#include <gmock/gmock.h>
+using ::testing::NiceMock;
+using ::testing::Return;
+using ::testing::_;
+
+class MockDatabase {
+public:
+  MOCK_METHOD(bool, Connect, (), ());
+  MOCK_METHOD(int, GetValue, (const std::string& key), ());
+};
+
+TEST(MyServiceTest, UsesDatabaseCorrectly) {
+  NiceMock<MockDatabase> mock_db;
+
+  // Set default behavior
+  ON_CALL(mock_db, Connect())
+      .WillByDefault(Return(true));
+  ON_CALL(mock_db, GetValue(_))
+      .WillByDefault(Return(0));
+
+  // Verify Connect is called once
+  EXPECT_CALL(mock_db, Connect()).Times(1);
+
+  // We don't care how many times GetValue is called with other keys
+  EXPECT_CALL(mock_db, GetValue("special_key")).WillOnce(Return(42));
+
+  // Code under test here that uses mock_db...
+}
+```
+
+## 5. Troubleshooting Common Issues
+
+### Warning: "Uninteresting mock function call"
+
+- This indicates a mock method was called without any matching `EXPECT_CALL`.
+- Verify if you meant to allow this call unconstrained, or explicitly add an expectation with `.Times(AnyNumber())`.
+- To suppress globally, use `NiceMock`.
+
+### Unexpected Call Failures
+
+- A call was made that did not match any active expectation.
+- Check argument matchers and call order.
+- Use `--gmock_verbose=info` to get detailed trace of matching and call attempts.
+
+### Calls Made Too Many Times (Excessive Calls)
+
+- An expectation was saturated but the method continued to be called.
+- Add more `WillOnce` actions, `.WillRepeatedly()`, or `.RetiresOnSaturation()` as appropriate.
+
+### Sticky Expectations Causing Confusion
+
+- Expectations by default remain active after fulfillment.
+- Use `.RetiresOnSaturation()` or explicitly sequence expectations.
+
+### Mock Methods with Non-Default Constructible Return Types
+
+- If mock methods return types that cannot be default constructed, you must specify a default action.
+- Otherwise, expect runtime failure or exceptions.
+
+---
+
+## 6. Additional Resources
+
+For deeper understanding and examples, consult:
+
+- [GoogleTest Mocking Reference](https://google.github.io/googletest/reference/mocking.html)
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html)
+- [Getting Started with Mock Objects](../mocking-and-test-doubles/getting-started-with-mocks)
+- [Best Practices for Writing Your First Test](../first-test-experience/write-first-test)
+- [Matchers Reference](../matchers-and-utilities/builtin-matchers)
+
+---
+
+## Summary
+This guide equips you to write maintainable and resilient tests using GoogleMock by focusing on effective use of `ON_CALL` and `EXPECT_CALL`, leveraging `NiceMock` for uninteresting call management, structuring expectations with sequences and cardinalities, and delegating complex behaviors. Avoid common pitfalls such as over-specification and sticky expectations to keep your tests stable and insightful.
+
+
+---
+
+<AccordionGroup title="Best Practices at a Glance">
+<Accordion title="When to Use ON_CALL vs EXPECT_CALL">
+Use `ON_CALL` for defining default method behaviors without requiring calls. Use `EXPECT_CALL` only to specify calls you want to verify explicitly.
+</Accordion>
+<Accordion title="Using NiceMock and StrictMock">
+Wrap mocks with `NiceMock` to suppress warnings on uninteresting calls; use `StrictMock` to treat such calls as errors.
+</Accordion>
+<Accordion title="Structuring Expected Call Order">
+Group expectations using `InSequence` or explicit `Sequence` objects to enforce call ordering and partial ordering.
+</Accordion>
+<Accordion title="Handling Repeated Calls">
+Use `.RetiresOnSaturation()` to make expectations deactivate after use, avoiding over-saturation errors.
+</Accordion>
+<Accordion title="Avoid Over-Specification">
+Avoid excessive or overly precise expectations that can cause test brittleness; prefer flexible matchers and minimal expectations.
+</Accordion>
+</AccordionGroup>
+
+---
+
+## Illustrative Code Snippet: Using Mocks with NiceMock, ON_CALL, EXPECT_CALL, and Ordering
+
+```cpp
+#include <gmock/gmock.h>
+using ::testing::NiceMock;
+using ::testing::Return;
+using ::testing::InSequence;
+using ::testing::_;
+
+class Database {
+public:
+  virtual ~Database() = default;
+  virtual bool Connect() = 0;
+  virtual int Query(const std::string& query) = 0;
+};
+
+class MockDatabase : public Database {
+public:
+  MOCK_METHOD(bool, Connect, (), (override));
+  MOCK_METHOD(int, Query, (const std::string& query), (override));
+};
+
+TEST(ServiceTest, QueriesSpecialData) {
+  NiceMock<MockDatabase> mock_db;
+
+  // Define common default behavior
+  ON_CALL(mock_db, Connect()).WillByDefault(Return(true));
+  ON_CALL(mock_db, Query(_)).WillByDefault(Return(0));
+
+  // Verify that Connect is called exactly once
+  EXPECT_CALL(mock_db, Connect()).Times(1);
+
+  {
+    // Enforce sequence of two Query calls
+    InSequence seq;
+    EXPECT_CALL(mock_db, Query("select * from special_table")).WillOnce(Return(42));
+    EXPECT_CALL(mock_db, Query(_)).Times(AnyNumber());
+  }
+
+  // Use mock_db in code under test...
+}
+```
+
+---
