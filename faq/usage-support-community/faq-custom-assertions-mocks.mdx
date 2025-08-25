@@ -1,0 +1,331 @@
+---
+title: "Custom Assertions and Mocking Techniques"
+description: "FAQs focused on creating user-defined assertions and mocks, troubleshooting assertion failures, and making effective use of GoogleTest and GoogleMock’s advanced features for complex testing scenarios."
+---
+
+# Custom Assertions and Mocking Techniques FAQ
+
+This FAQ page focuses on guiding users through creating user-defined assertions and mocks, troubleshooting assertion failures, and effectively leveraging GoogleTest and GoogleMock’s advanced features for complex testing scenarios. It addresses typical user questions, common pitfalls, and practical tips to master custom assertions and mocking techniques in your C++ test suites.
+
+---
+
+## 1. What are custom assertions and why should I create them?
+
+Custom assertions enable you to express specific conditions relevant to your domain directly in your tests. They provide clearer, more precise failure messages and improve test readability by encapsulating complex validation logic into a single, meaningful predicate.
+
+**Example:** Instead of writing multiple `EXPECT_EQ` statements to verify an object's state, create a matcher:
+
+```cpp
+MATCHER_P(IsDivisibleBy, divisor, "checks divisibility") {
+  return (arg % divisor) == 0;
+}
+
+EXPECT_THAT(my_value, IsDivisibleBy(7));
+```
+
+This improves intention clarity and failure diagnostics.
+
+---
+
+## 2. How do I write a custom matcher quickly?
+
+GoogleMock provides the `MATCHER` and `MATCHER_P` macros for quickly creating custom matchers:
+
+- `MATCHER(Name, Description)`: Defines a matcher without parameters.
+- `MATCHER_P(Name, Param, Description)`: Defines a matcher with one parameter.
+
+**Example:**
+
+```cpp
+MATCHER(IsEven, "checks whether a number is even") {
+  return arg % 2 == 0;
+}
+
+MATCHER_P(IsWithinRange, threshold, "checks if value within range") {
+  return std::abs(arg) <= threshold;
+}
+```
+
+Use these in `EXPECT_THAT` to create expressive assertions.
+
+For deeply reusable or complex matchers, consider implementing matcher classes directly.
+
+---
+
+## 3. How do I create mock classes and mock methods?
+
+- Derive your mock class from the interface or class you want to mock.
+- Use `MOCK_METHOD` in the `public:` section of your mock class to define mock methods.
+
+```cpp
+class Foo {
+ public:
+  virtual ~Foo() = default;
+  virtual int GetValue() const = 0;
+  virtual void SetValue(int val) = 0;
+};
+
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, GetValue, (), (const, override));
+  MOCK_METHOD(void, SetValue, (int val), (override));
+};
+```
+
+Avoid mocking methods outside `public:`; always place `MOCK_METHOD` there for accessibility.
+
+---
+
+## 4. How can I mock overloaded methods?
+
+Mock all overloads individually and avoid unexpected hiding by adding `using` for base overloads you don't mock:
+
+```cpp
+class Foo {
+ public:
+  virtual int Func(int); 
+  virtual int Func(double) const;
+};
+
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, Func, (int), (override));
+  MOCK_METHOD(int, Func, (double), (const, override));
+  using Foo::Func;  // bring unmocked overloads into scope
+};
+```
+
+---
+
+## 5. What is the difference between `EXPECT_CALL` and `ON_CALL`?
+
+- **`EXPECT_CALL`** sets an expectation that a method *will be* called with specified arguments and establishes the behavior when called.
+- **`ON_CALL`** sets a default behavior for calls matching the arguments but does *not* assert that the method is called.
+
+Use `ON_CALL` to define default mock behavior shared across multiple tests. Use `EXPECT_CALL` when you want to verify a method call occurs and specify call count and order.
+
+```cpp
+ON_CALL(mock_foo, GetName()).WillByDefault(Return("default"));
+EXPECT_CALL(mock_foo, GetName()).Times(1).WillOnce(Return("test"));
+```
+
+---
+
+## 6. How do I set expectations with argument matching?
+
+`EXPECT_CALL` requires argument matchers, which can be:
+
+- **Exact values:** `EXPECT_CALL(mock, Method(5));`
+- **Wildcards:** `_` matches any argument, e.g., `EXPECT_CALL(mock, Method(_));`
+- **Matchers:** Use built-in matchers like `Ge(5)`, `NotNull()`, or custom ones.
+
+For complex validation, you can use `.With()` to match all arguments as a tuple:
+
+```cpp
+EXPECT_CALL(mock, Process(_, _))
+  .With(Lt());  // First argument less than second
+```
+
+---
+
+## 7. What are cardinalities and how to specify call counts?
+
+Use `.Times()` to specify how many times a mock method is expected to be called:
+
+| Cardinality       | Meaning                                 |
+|-------------------|-----------------------------------------|
+| `Exactly(n)` or `n` | Called exactly n times                  |
+| `AtLeast(n)`      | Called at least n times                  |
+| `AtMost(n)`       | Called at most n times                   |
+| `Between(m, n)`   | Called between m and n times inclusive  |
+| `AnyNumber()`     | Called any number of times               |
+
+If omitted, cardinality is inferred from `.WillOnce()` and `.WillRepeatedly()` clauses.
+
+---
+
+## 8. How to define mock method behaviors?
+
+Use `.WillOnce()` and `.WillRepeatedly()` to specify actions when a mock is called:
+
+- `.WillOnce(action)`: Defines behavior for a single call.
+- `.WillRepeatedly(action)`: Defines behavior for all subsequent calls.
+
+Example actions include `Return(value)`, `ReturnRef(variable)`, `Invoke(function)`, and custom lambdas.
+
+```cpp
+EXPECT_CALL(mock, GetValue())
+  .WillOnce(Return(42))
+  .WillRepeatedly(Return(7));
+```
+
+---
+
+## 9. Why use `.RetiresOnSaturation()`? How does it affect expectation stickiness?
+
+By default, expectations in gMock are *sticky*; they remain active even after their upper call limit is reached, leading to test errors on further calls.
+
+Apply `.RetiresOnSaturation()` to an expectation to deactivate it once the expected calls are saturated, allowing subsequent calls to match other expectations.
+
+**Example:**
+
+```cpp
+EXPECT_CALL(mock, GetX())
+    .WillOnce(Return(10))
+    .RetiresOnSaturation();
+EXPECT_CALL(mock, GetX())
+    .WillRepeatedly(Return(20));
+```
+
+Here, after the first call, the first expectation retires and subsequent calls use the second.
+
+---
+
+## 10. How do `NiceMock`, `NaggyMock`, and `StrictMock` affect unexpected or uninteresting calls?
+
+- **`NiceMock<T>`:** Suppresses warnings on uninteresting calls (methods without expectations). Ideal for reducing noise.
+- **`NaggyMock<T>` (default):** Prints warnings on uninteresting calls but allows them.
+- **`StrictMock<T>`:** Treats uninteresting calls as test failures.
+
+Use these wrappers by instantiating your mock as:
+
+```cpp
+NiceMock<MockFoo> nice_mock;
+StrictMock<MockFoo> strict_mock;
+```
+
+Be cautious using `StrictMock` as it can make tests brittle and increase maintenance.
+
+---
+
+## 11. How can I delegate calls to a real or fake implementation within a mock?
+
+To combine mocks with real or fake implementations and retain verification of calls, delegate default behavior:
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, Compute, (int x), (override));
+
+  void DelegateToReal() {
+    ON_CALL(*this, Compute)
+        .WillByDefault([this](int x) { return real_.Compute(x); });
+  }
+
+ private:
+  Foo real_;
+};
+```
+
+Calls without explicit expectations will forward to `real_`. Similar approach applies for fakes.
+
+---
+
+## 12. Why do I get 'Uninteresting mock function call' warnings? How to suppress them properly?
+
+Warnings occur when a mock method is called without a corresponding `EXPECT_CALL`. This shows where the test does not explicitly specify behavior.
+
+To address this:
+
+- Use `ON_CALL` to define default behavior without enforcing call frequency.
+- Use `EXPECT_CALL(...).Times(AnyNumber())` to allow calls without warnings.
+- Wrap your mock in `NiceMock` to suppress all warnings for uninteresting calls.
+
+Avoid adding unnecessary `EXPECT_CALL`s just to silence warnings, as it may inadvertently enforce undesired constraints.
+
+---
+
+## 13. How to troubleshoot assertion failures in mocks?
+
+- Check that `EXPECT_CALL` is set **before** the mock method is invoked.
+- Verify argument matchers; mismatched arguments often cause failures or unexpected matches.
+- Use `--gmock_verbose=info` to trace mock call matches and expectation invocations.
+- Inspect call counts and cardinalities for over or under-invocation errors.
+- Confirm order constraints (using `InSequence` or `After`) are satisfied.
+
+Example failure message might show:
+
+```
+Actual function call count doesn't match EXPECT_CALL(...):
+Expected: to be called exactly 2 times
+Actual: called 1 time - unsatisfied and active
+```
+
+---
+
+## 14. Can I customize the failure messages of assertions and matchers?
+
+Yes. In custom `MATCHER` definitions, you can override the description string used in failure messages for better clarity.
+
+You can stream detailed contextual info to the `result_listener` to enhance diagnostics.
+
+**Example:**
+
+```cpp
+MATCHER_P(IsDivisibleBy7, "", "checks divisibility by 7") {
+  if ((arg % 7) == 0) return true;
+  *result_listener << "remainder is " << (arg % 7);
+  return false;
+}
+```
+
+Failures will include the remainder in the output.
+
+---
+
+## 15. How do I verify and reset mock expectations manually?
+
+If your mock object is heap-allocated and owned outside your test, you may want to verify expectations before destruction:
+
+```cpp
+using ::testing::Mock;
+
+Mock::VerifyAndClearExpectations(&mock_obj);
+```
+
+Use `VerifyAndClear` to also clear default actions.
+
+Do not set new expectations after verification without reinitializing your mock.
+
+---
+
+## 16. How to mock methods with move-only types?
+
+GoogleMock fully supports mocking methods taking or returning move-only types like `std::unique_ptr`:
+
+```cpp
+MOCK_METHOD(std::unique_ptr<Foo>, MakeFoo, (), (override));
+MOCK_METHOD(bool, TakeFoo, (std::unique_ptr<Foo> foo), (override));
+```
+
+Return values can be set using lambdas:
+
+```cpp
+EXPECT_CALL(mock, MakeFoo()).WillRepeatedly([] { return std::make_unique<Foo>(); });
+```
+
+---
+
+## 17. Are there best practices for using `EXPECT_CALL` and `ON_CALL`?
+
+- Prefer using `ON_CALL` to set default behaviors shared across tests.
+- Use `EXPECT_CALL` only when you want to verify a call happens.
+- Avoid setting expectations after mocks have been used.
+- Keep expectations focused on verifying one behavior at a time to reduce brittleness.
+- Use sequences and `RetiresOnSaturation()` to control ordering and lifetime of expectations.
+
+---
+
+## Additional Resources
+
+- [Mocking Reference](https://google.github.io/googletest/reference/mocking.html) — Detailed API and behavior
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) — Practical recipes
+- [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html) — Quick reference
+- [Matchers Reference](https://google.github.io/googletest/reference/matchers.html) — Built-in matchers list
+- [Writing Your First Test](https://google.github.io/googletest/getting-started/writing-first-test.html) — For foundational understanding
+
+---
+
+<Tip>
+Mastering custom assertions and mocking techniques empowers you to write expressive, maintainable, and reliable C++ tests with GoogleTest and GoogleMock. Experiment with defining your own matchers and actions, leverage strictness modes judiciously, and use the rich toolset provided by GoogleMock to simulate and verify complex behaviors efficiently.
+</Tip>
