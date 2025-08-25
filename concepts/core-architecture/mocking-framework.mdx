@@ -1,0 +1,227 @@
+---
+title: "Mocking: Concepts and Mechanisms"
+description: "Dive into the core philosophies and mechanisms behind mocking in C++, including how GoogleMock enables method interception, expectation setting, and behavioral programming for test doubles."
+---
+
+# Mocking: Concepts and Mechanisms
+
+GoogleMock (gMock) is a powerful C++ framework enabling you to create mock objects — test doubles that let you specify, verify, and control interactions of your code with dependencies during testing. This page dives deep into the core philosophies and mechanisms behind mocking in C++, focusing on how GoogleMock facilitates method interception, expectation setting, and behavioral programming for test doubles.
+
+---
+
+## Why Mocking Matters
+
+Imagine you’re testing a graphics subsystem that moves a turtle across the screen. Instead of drawing on the real display—which would be slow, hard to verify, and brittle—you replace the turtle with a mock object. This mock pretends to be the real turtle but records what methods were called and with what arguments. By inspecting these calls, you can assert that your code instructed the turtle correctly, independently from the actual graphics.
+
+Mocking thus isolates the unit under test by capturing its *interactions* with collaborators, verifies the *contract* of communication, and enables simulating diverse scenarios including edge cases and failures.
+
+---
+
+## Core Mocking Mechanisms in GoogleMock
+
+### Defining Mock Classes and Methods
+
+The foundation is to declare a mock class that inherits from the interface or base class you want to mock. For each virtual method you want to mock, use the `MOCK_METHOD` macro to declare a mock method. It captures the return type, method name, arguments, and qualifiers.
+
+```cpp
+class MockTurtle : public Turtle {
+ public:
+  MOCK_METHOD(void, PenUp, (), (override));
+  MOCK_METHOD(void, PenDown, (), (override));
+  MOCK_METHOD(void, Forward, (int distance), (override));
+  MOCK_METHOD(int, GetX, (), (const, override));
+};
+```
+
+- Always place `MOCK_METHOD` declarations in the `public:` section, regardless of original visibility.
+- When mocking `const`, `noexcept`, or reference-qualified functions, specify those qualifiers precisely in the macro.
+- For overloaded methods, mock each overload distinctly, or use `using` declarations to avoid hiding base-class overloads.
+
+This setup ensures GoogleMock can intercept calls to these methods transparently.
+
+### Method Interception and Call Routing
+
+GoogleMock intercepts mocked method calls and directs them through internal mock object machinery. Every time a mock method is invoked, GoogleMock:
+
+1. Collects the call arguments into a tuple.
+2. Searches expectations to find the most recent expectation matching these arguments.
+3. Checks if the matched expectation is active and not saturated.
+4. Executes the action specified for the expectation (e.g., returning a value, invoking a callback).
+5. Records call counts and validates ordering constraints if any.
+
+If no expectation matches, the call is an *uninteresting call* and handled according to the mock object's strictness setting (see below).
+
+### Setting Expectations with `EXPECT_CALL`
+
+The `EXPECT_CALL(mock, Method(matchers))` macro allows you to specify:
+
+- **Argument matchers:** Define what arguments you expect calls to have.
+- **Call cardinality:** How many times the call is expected (exactly n, at least n, any number, etc).
+- **Ordering constraints:** Use sequences and `.After()` to specify call order.
+- **Actions:** Specify what the mock method will do when called via `WillOnce()`/`WillRepeatedly()`.
+
+Example:
+
+```cpp
+EXPECT_CALL(turtle, Forward(Ge(10)))        // Expect forward movement of at least 10 units
+    .Times(AtLeast(1))                      // Called at least once
+    .WillOnce(Return())                     // Return void
+    .WillRepeatedly(Invoke([](int dist) {  
+        // Custom behavior
+    }));
+```
+
+Expectations are always set *before* exercising the code that performs calls. GoogleMock applies the newest matching expectation first, allowing you to override defaults.
+
+### Default Actions with `ON_CALL`
+
+Not every method call may be important to your test. `ON_CALL(mock, Method(matchers))` lets you specify default behavior without setting an explicit expectation that the method must be called.
+
+```cpp
+ON_CALL(turtle, GetX())
+    .WillByDefault(Return(42));  // Whenever GetX() is called, return 42 unless overridden
+```
+
+This helps keep tests simple by specifying expected behaviors for uninteresting calls rather than exhaustive expectations.
+
+---
+
+## Mock Object Strictness
+
+GoogleMock defines three levels of strictness, controlling how it handles *uninteresting calls* — calls without any matching `EXPECT_CALL`:
+
+| Strictness           | Called When Missing Expectation? | Result
+|---------------------|---------------------------------|-----------------------------|
+| **NaggyMock** (default) | Yes                             | Warning message emitted, test continues.
+| **NiceMock**         | Yes                             | No warning emitted, test continues.
+| **StrictMock**       | Yes                             | Test failure immediately.
+
+Use cases:
+
+- Use **NiceMock** to suppress warnings when you do not care about many mock methods.
+- Use **NaggyMock** (default) for verbosity while developing tests.
+- Use **StrictMock** to catch all unexpected calls strictly.
+
+Example:
+
+```cpp
+NiceMock<MockTurtle> nice_turtle;
+EXPECT_CALL(nice_turtle, PenDown());
+// Calls to other methods won't trigger warnings.
+```
+
+---
+
+## Ordered and Partial-Ordered Expectations
+
+Managing the order of expected calls is essential when interactions must occur sequentially.
+
+### Using Sequences
+
+Use the `Sequence` class combined with `.InSequence()` on expectations to enforce call order:
+
+```cpp
+Sequence s;
+EXPECT_CALL(mock, Foo()).InSequence(s);
+EXPECT_CALL(mock, Bar()).InSequence(s);
+```
+
+Here, `Foo()` must be called before `Bar()`.
+
+You can put multiple expectations in one scope using an `InSequence` object:
+
+```cpp
+{
+  InSequence seq;
+  EXPECT_CALL(mock, Foo());
+  EXPECT_CALL(mock, Bar());
+}
+```
+
+### Partial Order with `.After()`
+
+For more complex constraints, `.After()` lets you specify that some calls occur after others, creating a DAG of call dependency.
+
+```cpp
+Expectation e1 = EXPECT_CALL(mock, Init());
+EXPECT_CALL(mock, Process()).After(e1);
+```
+
+Multiple expectations or sets can be used as prerequisites.
+
+---
+
+## Retiring Expectations
+
+Expectations are *sticky*, meaning by default they remain active even after their call count limit is reached. You can explicitly mark expectations to retire on saturation using `.RetiresOnSaturation()`:
+
+```cpp
+EXPECT_CALL(mock, Foo())
+    .Times(2)
+    .RetiresOnSaturation();
+```
+
+This makes the expectation inactive after it has been called twice, allowing other expectations to match subsequent calls.
+
+---
+
+## Actions: Controlling Mock Behavior
+
+GoogleMock provides powerful means to control what a mock method does when called.
+
+- `WillOnce(action)`: Defines the behavior for one call.
+- `WillRepeatedly(action)`: Defines behavior for all subsequent calls after `WillOnce`s are exhausted.
+- `Return(value)`, `ReturnRef(variable)`: Return values from a mock.
+- `Invoke(callable)`: Invoke a function, method or lambda when called.
+- `DoAll()`: Combine multiple actions (e.g., setting output arguments and returning a value).
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, GetValue())
+    .WillOnce(Return(42))
+    .WillRepeatedly(Return(0));
+```
+
+For side effects that modify output arguments, use actions such as `SetArgPointee<N>(value)`.
+
+---
+
+## Best Practices and Common Pitfalls
+
+- **Set expectations before exercising code**. Setting them after calling mock methods leads to undefined behavior.
+- **Only specify expectations that matter**. Use `ON_CALL` for default behaviors and avoid over-specification.
+- **Use matchers wisely**. For arguments where you don’t care, use underscores `_` or wildcards to keep tests stable.
+- **Retire expectations when needed** to avoid brittle tests by using `.RetiresOnSaturation()`.
+- **Be mindful of mock strictness**; using `StrictMock` can make tests more fragile but catch unexpected calls early.
+- **Mock virtual methods only**. Non-virtual methods require special techniques and may complicate usage.
+- **Mock interfaces you own** to prevent brittle tests and tight coupling.
+
+---
+
+## Summary
+
+GoogleMock’s mocking mechanism is centered on creating mock classes with intercepted virtual methods, setting detailed expectations, and controlling call behavior, all while providing flexible control over how strict the mock interactions are checked. By mastering `MOCK_METHOD`, `EXPECT_CALL`, `ON_CALL`, sequences, and actions, you can write precise and maintainable interaction-oriented tests in C++ that help you validate design contracts effectively.
+
+---
+
+## Additional Resources
+
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) — Practical recipes and patterns.
+- [Mocking Reference](https://google.github.io/googletest/reference/mocking.html) — Detailed API references for macros and classes.
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html) — Beginner-friendly introduction and tutorials.
+- [Core Testing APIs: Assertions, Matchers, and Actions](https://google.github.io/googletest/api/) — Complementary building blocks for tests.
+- [Advanced Mocking Patterns](https://google.github.io/googletest/guides/advanced_patterns/mocking_advanced.html) — Dealing with complex scenarios.
+
+---
+
+## How This Page Fits In
+
+This concepts guide links to other documentation pages such as:
+
+- Setting up mocks in [Creating Mock Objects](https://google.github.io/googletest/reference/mocking_and_expectations/creating_mock_objects.html)
+- Specifying expectations in [Defining Expectations](https://google.github.io/googletest/reference/mocking_and_expectations/defining_expectations.html)
+- Core mocking APIs in [Mocking Reference](https://google.github.io/googletest/reference/mocking.html)
+- Practical guides and tutorials under the [gMock Getting Started](https://google.github.io/googletest/gmock_for_dummies.html) and [Guides](https://google.github.io/googletest/guides/index.html) sections.
+
+In your testing journey, start here to grasp the mocking mental model, then move on to practical examples and API use to fully harness the power of GoogleMock.
