@@ -1,0 +1,292 @@
+---
+title: "Mocking Complex Scenarios"
+description: "Step-by-step guides for modeling sophisticated behaviors and testing difficult scenarios with GoogleMock, such as sequence verification, call expectations, and custom actions."
+---
+
+# Mocking Complex Scenarios
+
+Step-by-step guides for modeling sophisticated behaviors and testing difficult scenarios with GoogleMock, such as sequence verification, call expectations, and custom actions.
+
+---
+
+## 1. Overview of Advanced Mocking Scenarios
+
+When testing complex C++ systems, simple mocks and expectations are often insufficient. This guide teaches you how to model sophisticated interactions with GoogleMock, including ordering constraints, partial orders, dealing with overloaded or move-only methods, expectation lifetimes, and customizing mock behaviors with actions.
+
+### Prerequisites
+- Basic familiarity with defining mock classes using `MOCK_METHOD`.
+- Comfort setting expectations with `EXPECT_CALL` and default behaviors with `ON_CALL`.
+- Basic use of matchers like `_` and `Eq()` for specifying arguments.
+
+### What You'll Achieve
+- Define ordered and partial-ordered expectations.
+- Model sequences and dependencies between mock calls.
+- Handle uncommon scenarios like uninteresting calls and strictness modes.
+- Use `RetiresOnSaturation()` for lifetime management of expectations.
+- Customize mock behavior with custom actions, delegation, and invocation.
+
+---
+
+## 2. Ordering Expectations with Sequences and After Clauses
+
+Controlling the order of mock method calls is crucial for verifying complex interactions.
+
+### Using `InSequence`
+All expectations declared within the scope of an `InSequence` object are expected in the given order.
+
+```cpp
+using ::testing::InSequence;
+using ::testing::_;
+using ::testing::Return;
+
+TEST(FileWriterTest, WritesCorrectSequence) {
+  MockFile file;
+  {
+    InSequence s;  // Scoped sequencing of expectations
+
+    EXPECT_CALL(file, Open("log.txt"));
+    EXPECT_CALL(file, Write(_)).Times(3);
+    EXPECT_CALL(file, Close());
+  }
+
+  Logger logger(&file);
+  logger.Log("first");
+  logger.Log("second");
+  logger.Log("third");
+  logger.Close();
+}
+```
+
+This enforces that `Open()` is called first, exactly three calls to `Write()` follow, then `Close()` happens last.
+
+### Composing Partial Order with Multiple Sequences
+
+`InSequence` is convenient for linear ordering but limited in expressing partial orders.
+GoogleMock supports expressing partial orders using multiple sequences and the `InSequence` clause:
+
+```cpp
+using ::testing::Sequence;
+
+Sequence s1, s2;
+
+EXPECT_CALL(foo, A()).InSequence(s1, s2);
+EXPECT_CALL(bar, B()).InSequence(s1);
+EXPECT_CALL(bar, C()).InSequence(s2);
+EXPECT_CALL(foo, D()).InSequence(s2);
+```
+
+This defines a partial order where A precedes both B and C, C precedes D, and B and D's relative order is unconstrained.
+
+### Using the `After` Clause to Specify Dependencies
+
+You can specify that an expectation should occur after other expectations using `.After()`:
+
+```cpp
+using ::testing::Expectation;
+
+Expectation e1 = EXPECT_CALL(foo, Init());
+Expectation e2 = EXPECT_CALL(bar, Configure()).After(e1);
+EXPECT_CALL(foo, Run()).After(e2);
+```
+
+This enforces `foo.Init()` first, then `bar.Configure()`, then `foo.Run()`.
+
+You can pass multiple expectations or expectation sets to `.After()` up to five.
+
+---
+
+## 3. Managing Lifetime and Saturation of Expectations
+
+By default, expectations are "sticky"—they remain active until the test completes, even after reaching their call count. You can override this behavior.
+
+### Using `.RetiresOnSaturation()`
+
+The `.RetiresOnSaturation()` clause tells GoogleMock to retire the expectation automatically once it hits its saturation point (e.g., max call count), making it inactive for subsequent matching calls.
+
+```cpp
+EXPECT_CALL(foo, Bar(5))
+    .Times(2)
+    .RetiresOnSaturation();
+
+// After two calls to foo.Bar(5), this expectation retires and other
+// expectations may match further calls.
+```
+
+This is particularly helpful when you have multiple expectations with overlapping matchers.
+
+---
+
+## 4. Handling Overloaded and Template Methods
+
+For overloaded methods, GoogleMock requires explicit mocking of each signature:
+
+```cpp
+class MockPrinter : public Printer {
+ public:
+  MOCK_METHOD(void, Print, (int n), (override));
+  MOCK_METHOD(void, Print, (char c), (override));
+};
+```
+
+For expectations on overloaded functions, use the `Const()` wrapper or explicit matchers for disambiguation.
+
+When mocking template methods, instantiate mocks for each type specialization you need.
+
+---
+
+## 5. Mocking Methods with Move-only Arguments and Return Types
+
+GoogleMock supports mocking methods that take or return move-only types (e.g., `std::unique_ptr`). The syntax is same as regular methods.
+
+```cpp
+class MockBuzzer : public Buzzer {
+ public:
+  MOCK_METHOD(std::unique_ptr<Buzz>, MakeBuzz, (StringPiece text), (override));
+  MOCK_METHOD(bool, ShareBuzz, (std::unique_ptr<Buzz> buzz, int64_t timestamp), (override));
+};
+```
+
+### Setting Actions for Move-only Returns
+
+To return move-only types, use lambdas or callable objects to generate new instances each call, instead of `Return()` which copies the value at expectation time.
+
+```cpp
+EXPECT_CALL(mock_buzzer, MakeBuzz("hello"))
+    .WillRepeatedly([](StringPiece) {
+      return std::make_unique<Buzz>(AccessLevel::kInternal);
+    });
+```
+
+---
+
+## 6. Customizing Mock Behavior with Actions
+
+GoogleMock provides flexibility to specify the behavior of mocked methods beyond just returning values.
+
+### Using Built-in Actions
+- **Return(value)**: Returns a copy of the value.
+- **ReturnRef(variable)**: Returns a reference.
+- **ReturnPointee(pointer)**: Returns the value pointed to (uses live value).
+- **DoAll(action1, action2, ...)**: Performs several actions in order.
+- **SetArgPointee<N>(value)**: Sets the value pointed by the Nth argument.
+- **Invoke(function, ...)**: Invokes a callable with the original arguments.
+- **InvokeWithoutArgs(function)**: Invokes a callable with no arguments.
+
+### Defining Lambda or Functor Actions
+
+Example of a lambda action:
+
+```cpp
+EXPECT_CALL(mock, Process(_))
+    .WillOnce([](int n) { return n * 2; });
+```
+
+You can also use functors or classes with operator() overloaded.
+
+### Invoking Callbacks Passed as Arguments
+
+To mock methods receiving callback arguments, you can invoke these callbacks in the action:
+
+```cpp
+using ::testing::InvokeArgument;
+
+EXPECT_CALL(mock, DoThis(_, _))
+    .WillOnce(InvokeArgument<1>(42));
+```
+
+This calls the second argument (index 1) as a callable with `42`.
+
+---
+
+## 7. Controlling Strictness: NiceMock, NaggyMock, and StrictMock
+
+By default, uninteresting calls (calls with no matching `EXPECT_CALL`) cause warnings. GoogleMock provides modifiers:
+
+| Modifier      | Behavior on Uninteresting Calls           |
+|---------------|--------------------------------------------|
+| `NiceMock<T>` | Suppresses warnings (ignores uninteresting calls)
+| `NaggyMock<T>` (default) | Warns on uninteresting calls
+| `StrictMock<T>` | Treats uninteresting calls as errors (test fails)
+
+### Usage
+
+```cpp
+using ::testing::NiceMock;
+using ::testing::StrictMock;
+
+NiceMock<MockFoo> nice_mock;
+StrictMock<MockFoo> strict_mock;
+```
+
+They inherit from your mock class, forwarding all constructors.
+
+### Notes
+- These modifiers only affect mock methods defined with `MOCK_METHOD` in the *mock class itself*, not base classes.
+- `StrictMock` may cause tests to fail unexpectedly if uninteresting calls occur.
+
+---
+
+## 8. Verifying and Clearing Expectations Explicitly
+
+You can verify and clear expectations on mocks before their destruction:
+
+```cpp
+bool ok = ::testing::Mock::VerifyAndClearExpectations(&mock_obj);
+```
+
+Or verify and clear expectations and default actions:
+
+```cpp
+bool ok = ::testing::Mock::VerifyAndClear(&mock_obj);
+```
+
+Invoke these when you want to check mock state explicitly without waiting for destruction.
+
+Similarly, you can allow leaks to suppress checks for leaked mocks:
+
+```cpp
+::testing::Mock::AllowLeak(&mock_obj);
+```
+
+---
+
+## 9. Troubleshooting Common Issues in Complex Mock Scenarios
+
+- **Uninteresting call warnings:** Use `NiceMock` to suppress or add `EXPECT_CALL(...).Times(AnyNumber())` on such methods.
+- **Unexpected calls fail tests:** Ensure all expected calls are registered with `EXPECT_CALL` and that matchers correctly cover invocation patterns.
+- **Too many WillOnce actions:** Adjust `Times()` or use `WillRepeatedly()` to avoid exhausting action lists.
+- **Overlapping expectations:** Use `.RetiresOnSaturation()` to retire saturated expectations and avoid conflicts.
+- **Order failures:** Check the sequence constructions or `.After()` usage for correctness.
+
+---
+
+## 10. Next Steps & Additional Resources
+
+- Explore [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) for recipes on mocking strategies.
+- Visit the [Mocking Reference](docs/reference/mocking.md) for full API details.
+- Review the [Nice, Naggy, and Strict Mock](docs/gmock_cook_book.md#NiceStrictNaggy) section for strictness options.
+- Practice writing tests using sequences and `After` clauses for order-sensitive behaviors.
+- Investigate [Custom Actions](docs/gmock_cook_book.md#QuickNewActions) to tailor mock behaviors further.
+
+---
+
+<CardGroup cols={2}>
+<Card title="gMock Cookbook">
+A collection of recipes including partial orders, EXPECT_CALL syntax, and advanced mocking scenarios.
+</Card>
+<Card title="Mocking Reference">
+Complete reference guide for `MOCK_METHOD`, `EXPECT_CALL`, `ON_CALL`, and related classes.
+</Card>
+</CardGroup>
+
+<Card title="Strictness Modes">
+Usage and effects of `NiceMock`, `NaggyMock`, and `StrictMock` wrappers.
+</Card>
+<Card title="Sequence and Order Control">
+Details on ordering expectations with `InSequence` and `.After()`.
+</Card>
+
+---
+
+### Source
+<Source url="https://github.com/google/googletest" paths={[{"path": "docs/gmock_cook_book.md", "range": "1-961"}, {"path": "docs/gmock_cheat_sheet.md", "range": "1-120"}, {"path": "docs/reference/mocking.md", "range": "1-434"}, {"path": "googlemock/include/gmock/gmock-nice-strict.h", "range": "1-210"}, {"path": "googlemock/test/gmock-spec-builders_test.cc", "range": "1-1043"}, {"path": "googlemock/test/gmock-nice-strict_test.cc", "range": "1-345"}]} />
