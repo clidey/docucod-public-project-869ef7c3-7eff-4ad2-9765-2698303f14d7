@@ -1,0 +1,183 @@
+---
+title: "Troubleshooting Common Errors"
+description: "Lists recurring issues and their solutions, such as linker errors, unexpected test results, failing mocks, and assertion failures. Aims to reduce friction and downtime during the test development cycle."
+---
+
+# Troubleshooting Common Errors
+
+This page addresses the recurring issues and errors developers frequently encounter when using GoogleTest and GoogleMock. From linker failures to unexpected test behaviors and assertion failures, this guide provides focused explanations and practical solutions to help you swiftly diagnose and resolve common problems, minimizing friction in your test development cycle.
+
+---
+
+## 1. Linker Errors and Setup Issues
+
+### Why am I getting linker errors referencing GoogleTest or GoogleMock symbols?
+
+Linker errors often indicate missing or incorrectly linked testing libraries. Ensure:
+
+- Your build links against the correct libraries, commonly `gtest`, `gtest_main`, `gmock`, and `gmock_main`.
+- Include paths for header files (`gtest/gtest.h`, `gmock/gmock.h`) are set correctly.
+- For Bazel or CMake, confirm dependencies are declared properly to avoid missing targets.
+
+**Tip:** Review the [Project Configuration]("/getting-started/configuration-and-first-test/project-configuration") guide for platform-specific setup and linking instructions.
+
+### Why do I see errors about missing virtual destructors in mocks?
+
+Mock classes must inherit from base classes that have virtual destructors to avoid undefined behavior and runtime errors. If your mocked interface lacks a virtual destructor, add one:
+
+```cpp
+class Base {
+ public:
+  virtual ~Base() {}
+  virtual void Foo() = 0;
+};
+```
+
+Failing to do so can cause memory leaks or crashes when deleting mocks through base pointers.
+
+
+## 2. Unexpected Test Results and Mock Failures
+
+### My mock method calls the real method instead of the mock implementation. What went wrong?
+
+Only *virtual* methods can be mocked with gMock. Confirm the method you intend to mock is declared `virtual` in the base class. Non-virtual methods are not intercepted by mock objects.
+
+For non-virtual methods or static functions, consider:
+
+- Refactoring to introduce interfaces with virtual functions.
+- Employing the [High-Performance Dependency Injection technique]("guides/mocking-with-googlemock/writing-mock-expectations.md#mocking-non-virtual-methods").
+
+### Why does gMock warn about "Uninteresting mock function call?"
+
+This warning means a mock method was called but no corresponding `EXPECT_CALL` was set.
+
+- It can be safely ignored if you are not interested in all calls to that method.
+- Suppress these warnings by:
+  - Using `NiceMock<>` to suppress notifications for uninteresting calls.
+  - Setting an `EXPECT_CALL(mock, Method(_)).Times(AnyNumber())` to accept all calls.
+
+**Do not** suppress these warnings by adding extraneous `EXPECT_CALL`s unless you mean to verify the calls.
+
+### My test reports an unexpected call but the arguments look correct.
+
+Errors may occur if:
+
+- The expectations were not set before the method was called.
+- The specific matcher used does not match the arguments exactly.
+- The call count violated the `Times()` cardinality.
+
+Run your test with `--gmock_verbose=info` to obtain a detailed call trace and stack that can pinpoint mismatches.
+
+
+## 3. Assertion Failures and Verification Problems
+
+### Why does my test fail with "Actual function call count doesn't match expectation"?
+
+This means the mock method was called fewer or more times than specified by `Times()`.
+
+- If you omitted `Times()`, gMock infers it:
+  - Without `WillOnce` or `WillRepeatedly`, the default is `Times(1)`.
+  - With n `WillOnce()` calls and no `WillRepeatedly()`, it's `Times(n)`.
+  - With n `WillOnce()` calls and a `WillRepeatedly()`, it's `Times(AtLeast(n))`.
+
+- To fix cardinality misalignments:
+  - Adjust `Times()` to reflect realistic call counts.
+  - Use `WillRepeatedly()` if you expect indefinite calls.
+  - For calls that should never occur, use `.Times(0)` explicitly.
+
+### My expectation fails after the specified number of calls. How do I retire an expectation?
+
+By default, expectations are *sticky*: they remain active even after saturation, causing failures if called beyond their limit.
+
+To retire expectations after saturation automatically:
+
+```cpp
+EXPECT_CALL(mock, Method(args))
+    .WillOnce(Return(value))
+    .RetiresOnSaturation();
+```
+
+Using `RetiresOnSaturation()` prevents upper-bound violations on subsequent calls.
+
+### Why do I see multiple failure messages for the same expectation?
+
+GoogleMock reports failures at the moment they occur. If your code violates the same expectation multiple times, or calls matchers with incorrect arguments repeatedly, you will get multiple logs reflecting their states at different times. They are not redundant but represent distinct failures.
+
+
+## 4. Common Pitfalls When Writing Tests
+
+### Mixing `EXPECT_CALL()` and mock invocations leads to undefined behavior. How to avoid?
+
+Set **all** expectations on a mock object before exercising code that invokes mock methods. Do not interleave calls to `EXPECT_CALL()` and mock method invocations in the same test logic. This ensures accurate expectation verification and error reporting.
+
+### Why am I getting fatal errors related to COPY or assignment of mock objects?
+
+Mock objects are typically noncopyable to prevent unexpected behaviors. Avoid copying or assigning mock objects. Use references, pointers, or smart pointers instead.
+
+### How can I mock methods that accept or return move-only types?
+
+Use the new `MOCK_METHOD()` macro syntax as usual with move-only types like `std::unique_ptr`:
+
+```cpp
+MOCK_METHOD(std::unique_ptr<Buzz>, MakeBuzz, (StringPiece text), (override));
+```
+
+Ensure lambdas or functors are used with `WillOnce` or `WillRepeatedly` for return actions involving move-only values.
+
+Check the [Mocking Methods That Use Move-Only Types]("docs/gmock_cook_book.md#MockingMoveOnly") recipe.
+
+
+## 5. Managing Verbosity and Debugging Output
+
+### How to get detailed traces of mock method calls and breaks?
+
+Use the `--gmock_verbose=info` flag to get comprehensive call traces, including stack traces, argument values, and internal gMock messages.
+
+Adjust the stack trace depth with `--gtest_stack_trace_depth=N` to control verbosity.
+
+### How to suppress warnings about uninteresting calls?
+
+Wrap your mocks in `NiceMock<>` to silence warnings, or write catch-all expectations with `.Times(AnyNumber())`.
+
+### Why do I see warnings about "Too many actions specified" or "Too few actions specified"?
+
+This happens when the number of `WillOnce()` calls does not align with the `Times()` cardinality or when the combination of `WillOnce()` and `WillRepeatedly()` is inconsistent.
+
+Review your `EXPECT_CALL` chains to ensure `WillOnce()` and `WillRepeatedly()` calls align with the declared `Times()`.
+
+
+## 6. Fatal and Nonfatal Failure Catching in Tests
+
+You can use the following to check that certain statements generate failures, useful for testing your test utilities:
+
+- `EXPECT_FATAL_FAILURE(statement, substring)` to expect a fatal failure.
+- `EXPECT_NONFATAL_FAILURE(statement, substring)` to expect a nonfatal failure.
+
+Only failures in the current thread are checked.
+
+
+## 7. Tips for Smooth Mock Usage
+
+- Always mock **virtual** methods.
+- Declare mock methods in the **public** section, regardless of the original method's access.
+- Use `ON_CALL()` for default behaviors without strict expectations.
+- Use `EXPECT_CALL()` to set expectations about *when* and *how* mocks should be called.
+- Use `InSequence` or `After` clauses to specify call order when necessary.
+- Leverage `RetiresOnSaturation()` to avoid saturation errors.
+- Use `NiceMock<>` and `StrictMock<>` to modify behavior on uninteresting calls.
+- Run tests with `--gmock_verbose=info` for intricate debugging.
+
+
+## 8. Related Documentation
+
+- [GoogleMock for Dummies](docs/gmock_for_dummies.md) – Beginner-friendly introduction
+- [Mocking Reference](docs/reference/mocking.md) – API details on mocking macros and classes
+- [gMock Cookbook](docs/gmock_cook_book.md) – Practical recipes and best practices
+- [Assertions Reference](docs/reference/assertions.md) – Using assertions, including predicate assertions
+- [Advanced Assertions](guides/testing-techniques/advanced-assertions.md) – Further assertion techniques
+- [Writing Mock Expectations and Actions](guides/mocking-with-googlemock/writing-mock-expectations.md) – Deep dive into expectations
+
+
+---
+
+By understanding these common issues and resolutions, you will minimize failures in your GoogleTest and GoogleMock testing journeys. Should problems persist, consult the community resources or file an issue on the project's official [GitHub](https://github.com/google/googletest).
