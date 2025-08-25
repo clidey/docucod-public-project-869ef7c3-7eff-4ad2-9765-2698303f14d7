@@ -1,0 +1,194 @@
+---
+title: "Thread-Safety & Limitations in Mocking"
+description: "Outline the threading and safety considerations in using mocks within concurrent test scenarios. Discusses what is and isn't thread safe, and highlights best practices for reliable tests in multi-threaded environments."
+---
+
+# Thread-Safety & Limitations in Mocking
+
+GoogleMock enables powerful mocking capabilities in C++ tests, but working with mocks in multi-threaded scenarios requires careful attention to thread safety and limitations inherent in mocking frameworks. This guide clarifies what aspects of GoogleMock are thread safe, what patterns should be avoided, and best practices for reliable, maintainable tests involving concurrency.
+
+---
+
+## Why Thread Safety Matters in Mocking
+
+When tests or code under test run concurrently on multiple threads, it becomes crucial that mocks behave correctly without causing race conditions, deadlocks, or inconsistent results. Since GoogleMock's internal state reflects expectations and call counts, unsynchronized access can corrupt this state or cause flaky tests.
+
+GoogleMock uses internal synchronization to protect mock state, but this protection applies primarily to mock *method calls* themselves, ensuring that concurrent invocations are serialized in a way that preserves mock correctness. However, users must still take care when constructing, configuring, and destructing mocks around multiple threads.
+
+---
+
+## What Is Thread Safe
+
+### Concurrent Calls to Different Mock Objects
+
+GoogleMock fully supports invoking mock methods of separate mock objects concurrently in different threads. Each mock object maintains its own state protected by a global mutex (`g_gmock_mutex`), and concurrent calls to different mocks serialize internally without user intervention.
+
+### Concurrent Calls to Different Methods of the Same Mock Object
+
+It's safe to access different mocked methods on the same mock object from multiple threads concurrently. GoogleMock synchronizes access internally on the global mutex to ensure consistent state updates, so tests using multiple threads calling different mock functions will not cause race conditions.
+
+### Concurrent Calls to the Same Mock Method
+
+GoogleMock allows concurrent calls to the same mock method from multiple threads. The internal sequence of expectation matching, call counting, and action dispatching is serialized under the global mutex `g_gmock_mutex`. This design prevents data races and maintains correct call counts and failures.
+
+### Actions Execution Thread Context
+
+Actions (`WillOnce`, `WillRepeatedly`, or default actions) run on the thread that invoked the mock method. Thus, you can rely on action side effects occurring in the calling thread, but you must ensure these actions themselves are thread safe if invoked concurrently.
+
+---
+
+## What Is Not Thread Safe
+
+### Mock Construction and Configuration
+
+You must **not** create or configure a mock object (i.e., calling `EXPECT_CALL` or `ON_CALL`) concurrently with mock method invocations from other threads. The mock’s internal state and expectation lists are not thread safe during construction or setup.
+
+Typically, you configure all expectations on a mock in a single thread (usually the test thread) before spawning any threads that exercise the code under test.
+
+### Mock Destruction Concurrent with Calls
+
+Destroying a mock object while other threads may be concurrently calling its methods results in undefined behavior. You must ensure no active thread can call a mock after it has begun being destroyed.
+
+### Setting Expectations Concurrently
+
+Setting or modifying expectations (using `EXPECT_CALL`) on mocks concurrently from multiple threads is unsupported and unsafe.
+
+### Manipulating Default Values Concurrently
+
+Global default values set via `DefaultValue<T>::Set()` affect all mocks and must be changed only when no mocks are active, or with caution in single-threaded test initialization/teardown phases.
+
+---
+
+## Best Practices for Mocking in Concurrent Tests
+
+### Design Your Tests to Configure Mocks Before Starting Threads
+
+Set all your mocks’ expectations and default behaviors before beginning any multi-threaded activity. This avoids race conditions in mock setup.
+
+### Limit Mock Method Calls to Run-Time
+
+Run code exercising mock methods concurrently, but ensure that all calls happen after full setup completes and no calls occur after mocks start being destroyed.
+
+### Use Separate Mocks in Separate Threads When Possible
+
+If you can partition test logic so that each thread uses its own mock objects, it simplifies reasoning about isolation and thread safety.
+
+### Synchronize Complex Shared Actions
+
+If your mock action involves complex shared data or side effects across threads, use your own synchronization mechanisms (such as mutexes or atomic variables) inside the action lambda or functor.
+
+### Avoid Expectations on Mock Destruction
+
+Avoid expecting calls or actions triggered during mock destruction concurrently with other threads calling mock methods; instead, control the test flow to destroy mocks safely after all interactions finish.
+
+---
+
+## Illustrative Example: Concurrent Calls on Different Mocks
+
+```cpp
+class MockFoo {
+ public:
+  MOCK_METHOD(int, Bar, (int n));
+  MOCK_METHOD(char, Baz, (const char* s1, const std::string& s2));
+};
+
+// Called concurrently from multiple threads.
+void ConcurrentTest() {
+  MockFoo foo;
+  ON_CALL(foo, Bar).WillByDefault(testing::Return(1));
+  EXPECT_CALL(foo, Baz(testing::_, testing::_)).Times(testing::AnyNumber());
+
+  std::thread t1([&foo] {
+    EXPECT_EQ(1, foo.Bar(0));
+  });
+
+  std::thread t2([&foo] {
+    EXPECT_EQ('a', foo.Baz("hello", "world"));
+  });
+
+  t1.join();
+  t2.join();
+}
+```
+
+This pattern is safe and reliable, as each mock call is protected by GoogleMock.
+
+---
+
+## Limitations Demonstrated by Stress Tests
+
+The file `gmock_stress_test.cc` exercises concurrent usage scenarios reflecting GoogleMock's internal synchronization. Key takeaways:
+
+- Using multiple distinct mock objects in different threads incurs no failures.
+- Using the same mock object concurrently across threads generates failures related to excessive or unexpected calls.
+- Partial ordering (`InSequence`, `After`) supports multi-threaded calls when expectations match the ordering constraints.
+
+These tests emphasize that mocks can be concurrently used, but the user must manage expectations and call ordering explicitly.
+
+---
+
+## Troubleshooting Common Concurrency Issues
+
+### Symptoms
+
+- Test failures with messages indicating "Mock function called more times than expected" when multiple threads call the same mock method.
+- Unexpected mock function call failures due to unmatched arguments.
+- Deadlocks or hangs when mock actions attempt to synchronize across threads improperly.
+
+### Solutions
+
+- Verify that all mock method configurations (`EXPECT_CALL`/`ON_CALL`) are complete and done prior to multi-threaded invocations.
+- Use `.RetiresOnSaturation()` to avoid "sticky" expectations that remain active after expected calls.
+- Employ sequences (`InSequence`) or partial orderings (`After`) to encode expected call orders when testing interactions across threads.
+- Ensure that mock actions do not call other mocks in a way that causes recursive locking or deadlocks.
+
+<Info>
+If you encounter deadlocks due to calling mock functions inside mock actions, consider moving synchronization outside or redesigning the test pattern.
+</Info>
+
+---
+
+## Summary
+
+GoogleMock provides strong internal thread safety guarantees for mock method calls across threads but requires user discipline:
+
+- Setup and teardown of mock expectations must be serialized.
+- Mock objects must not be destroyed while accessible by other threads.
+- Expected call sequencing needs explicit ordering if call order matters across threads.
+
+Adhering to these guidelines helps build robust concurrent tests leveraging mocks effectively.
+
+---
+
+## Additional Resources
+
+- [GoogleMock Primer](https://google.github.io/googletest/gmock_for_dummies.html) — for general mocking concepts
+- [Mocking Reference](../api_reference/mocking_api/mock_object_basics.md) — detailed API documentation
+- [gMock Cookbook](../docs/gmock_cook_book.md) — recipes including concurrency patterns
+- [Stress Test Source](https://github.com/google/googletest/blob/main/googlemock/test/gmock_stress_test.cc) — tests illustrating thread safety considerations
+
+---
+
+## Diagram: Mock Method Calls in Concurrent Test Scenarios
+
+```mermaid
+flowchart TD
+  subgraph Thread_1
+    A1["MockFoo::Bar(0) call"]
+    A2["Process expectation"]
+    A3["Execute action Return(1)"]
+  end
+  subgraph Thread_2
+    B1["MockFoo::Baz('hi','you') call"]
+    B2["Process expectation"]
+    B3["Execute action Return('a')"]
+  end
+
+  A1 -->|Lock g_gmock_mutex| A2 --> A3 -->|Unlock mutex| End1((End))
+  B1 -->|Lock g_gmock_mutex| B2 --> B3 -->|Unlock mutex| End2((End))
+
+  %% Mutual exclusion on global mock state
+  A2 -. mutex prevents -. B2
+```
+
+This flow represents how concurrent mock calls are serialized internally to maintain thread safety while executing their respective expectations and actions.
