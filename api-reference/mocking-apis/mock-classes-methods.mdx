@@ -1,0 +1,331 @@
+---
+title: "Mock Classes & Method Macros"
+description: "Explains how to define mock classes using the MOCK_METHOD macros, covering supported signatures, const-ness, and special method qualifiers. The section provides guidance on forward declarations and the extension of existing interfaces for mocking purposes."
+---
+
+# Mock Classes & Method Macros
+
+This section explains how to define and use mock classes and the `MOCK_METHOD` macros in GoogleMock, focusing on supported method signatures, method qualifiers like `const` and `override`, and key considerations such as forward declarations and extending interfaces for mocking.
+
+---
+
+## Defining Mock Classes Using `MOCK_METHOD`
+
+GoogleMock enables you to create mock classes by inheriting from the interface you want to mock and declaring mock methods using the `MOCK_METHOD` macro. This macro simplifies the manual effort of writing mocked implementations.
+
+The typical usage pattern is:
+
+```cpp
+class MyMockClass : public MyInterface {
+ public:
+  MOCK_METHOD(ReturnType, MethodName, (Args...), (Qualifiers));
+};
+```
+
+### Parameters Explanation
+
+- **ReturnType**: The return type of the method, e.g., `int`, `void`, or even complex types.
+- **MethodName**: The exact name of the method to mock.
+- **(Args...)**: A parenthesized list of argument types for the method.
+- **(Qualifiers)** (optional): A comma-separated list of method qualifiers, wrapped in parentheses. Supported qualifiers include:
+  - `const`: Marks the method as a `const` member function. Required to override `const` methods.
+  - `override`: Marks the method as overriding a virtual method.
+  - `noexcept`: Adds the `noexcept` specifier, necessary when overriding such methods.
+  - `Calltype(...)`: Specifies a calling convention, e.g., `Calltype(STDMETHODCALLTYPE)` for Windows.
+  - `ref(&)`, `ref(&&)`: Marks the method with reference qualifiers if overridden method has them.
+
+### Example
+
+```cpp
+class MockTurtle : public Turtle {
+ public:
+  MOCK_METHOD(void, PenUp, (), (override));
+  MOCK_METHOD(void, PenDown, (), (override));
+  MOCK_METHOD(int, GetX, (), (const, override));
+};
+```
+
+This mock class implements the methods of `Turtle` with mocked ones that you can set expectations on in your tests.
+
+---
+
+## Handling Complex Return or Argument Types with Commas
+
+Unprotected commas inside return types or argument types (like template types) break the parsing of `MOCK_METHOD`. For example, the following code will fail to compile:
+
+```cpp
+class MockFoo {
+ public:
+  MOCK_METHOD(std::pair<bool, int>, GetPair, ());           // Error!
+  MOCK_METHOD(bool, CheckMap, (std::map<int, double>, bool)); // Error!
+};
+```
+
+**Solutions:**
+
+- **Wrap the type with extra parentheses:**
+
+  ```cpp
+  class MockFoo {
+   public:
+    MOCK_METHOD((std::pair<bool, int>), GetPair, ());
+    MOCK_METHOD(bool, CheckMap, ((std::map<int, double>), bool));
+  };
+  ```
+
+  _Note: The parentheses here are removed by the macro, so this is valid._
+
+- **Use type aliases:**
+
+  ```cpp
+  class MockFoo {
+   public:
+    using BoolAndInt = std::pair<bool, int>;
+    MOCK_METHOD(BoolAndInt, GetPair, ());
+    using MapIntDouble = std::map<int, double>;
+    MOCK_METHOD(bool, CheckMap, (MapIntDouble, bool));
+  };
+  ```
+
+Using aliases improves readability and is often preferred.
+
+---
+
+## Visibility: Always Declare Mock Methods Public
+
+Regardless of whether the original method in the base class is `public`, `protected`, or `private`, all mock methods declared using `MOCK_METHOD` **must be placed in the `public` section** of the mock class. This is necessary because GoogleMock's `ON_CALL` and `EXPECT_CALL` macros operate from outside the mock class and require access to these methods.
+
+Example:
+
+```cpp
+class Foo {
+ public:
+  virtual bool Transform(Gadget* g) = 0;
+ protected:
+  virtual void Resume();
+ private:
+  virtual int GetTimeout();
+};
+
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(bool, Transform, (Gadget* g), (override));
+  MOCK_METHOD(void, Resume, (), (override));   // Note: public even though base is protected
+  MOCK_METHOD(int, GetTimeout, (), (override)); // public even though base is private
+};
+```
+
+---
+
+## Mocking Overloaded Methods
+
+GoogleMock allows mocking overloaded virtual functions easily. You mock each overload separately with the proper signature and qualifiers.
+
+Example:
+
+```cpp
+class Foo {
+ public:
+  virtual ~Foo();
+
+  virtual int Add(Element x);
+  virtual int Add(int times, Element x);
+
+  virtual Bar& GetBar();
+  virtual const Bar& GetBar() const;
+};
+
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, Add, (Element x), (override));
+  MOCK_METHOD(int, Add, (int times, Element x), (override));
+
+  MOCK_METHOD(Bar&, GetBar, (), (override));
+  MOCK_METHOD(const Bar&, GetBar, (), (const, override));
+};
+```
+
+**Important:**
+
+If you don't mock all overloads, the compiler may warn about base class methods being hidden. To bring hidden overloads into scope, use `using` declarations:
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  using Foo::Add;
+  MOCK_METHOD(int, Add, (Element x), (override));
+  // Not mocking Add(int, Element) - keep base version visible
+};
+```
+
+---
+
+## Mocking Class Templates
+
+Class templates are mocked similarly to normal classes. Define your mock template class inheriting from the interface template and use `MOCK_METHOD` with appropriate argument and qualifier syntax.
+
+Example:
+
+```cpp
+template <typename Elem>
+class StackInterface {
+ public:
+  virtual ~StackInterface();
+  virtual int GetSize() const = 0;
+  virtual void Push(const Elem& x) = 0;
+};
+
+template <typename Elem>
+class MockStack : public StackInterface<Elem> {
+ public:
+  MOCK_METHOD(int, GetSize, (), (const, override));
+  MOCK_METHOD(void, Push, (const Elem& x), (override));
+};
+```
+
+---
+
+## Mocking Non-Virtual Methods
+
+GoogleMock supports mocking non-virtual methods by creating mock classes unrelated to the real classes but with matching method signatures. This enables high-performance dependency injection without virtual dispatch.
+
+Example:
+
+```cpp
+class ConcretePacketStream {
+ public:
+  void AppendPacket(Packet* new_packet);
+  const Packet* GetPacket(size_t packet_number) const;
+  size_t NumberOfPackets() const;
+};
+
+class MockPacketStream {
+ public:
+  MOCK_METHOD(const Packet*, GetPacket, (size_t packet_number), (const));
+  MOCK_METHOD(size_t, NumberOfPackets, (), (const));
+};
+```
+
+Your code can use templates to select between real and mock classes at compile time.
+
+---
+
+## Handling Old-Style Mock Method Macros
+
+Before the introduction of the unified `MOCK_METHOD` macro, several macros like `MOCK_METHODn`, `MOCK_CONST_METHODn`, etc., were used. Though still supported, migrating to `MOCK_METHOD` is strongly recommended for consistency and future compatibility.
+
+| Old Macro                                  | New Macro Equivalent                                  |
+|--------------------------------------------|-------------------------------------------------------|
+| `MOCK_METHOD1(Foo, bool(int))`              | `MOCK_METHOD(bool, Foo, (int))`                       |
+| `MOCK_CONST_METHOD1(Foo, bool(int))`        | `MOCK_METHOD(bool, Foo, (int), (const))`              |
+| `MOCK_METHOD1_T(Foo, bool(int))`             | `MOCK_METHOD(bool, Foo, (int))`                       |
+| `MOCK_CONST_METHOD1_T(Foo, bool(int))`       | `MOCK_METHOD(bool, Foo, (int), (const))`              |
+| `MOCK_METHOD1_WITH_CALLTYPE(STDMETHODCALLTYPE, Foo, bool(int))` | `MOCK_METHOD(bool, Foo, (int), (Calltype(STDMETHODCALLTYPE)))` |
+| `MOCK_CONST_METHOD1_WITH_CALLTYPE(STDMETHODCALLTYPE, Foo, bool(int))` | `MOCK_METHOD(bool, Foo, (int), (const, Calltype(STDMETHODCALLTYPE)))` |
+
+---
+
+## Forward Declarations and Interface Extensions
+
+When mocking interfaces, forward declarations of classes are often sufficient for defining mocks, provided GoogleMock can print argument types. If printing is necessary for incomplete types, provide printer functions (i.e., `PrintTo`) to assist.
+
+Moreover, to mock methods not originally designed for mocking (non-virtual or concrete methods), consider coding to an interface and creating an adapter. This leads to better testability and maintainability.
+
+---
+
+## Summary of `MOCK_METHOD` Macro Usage
+
+- Always declare mock methods *public* regardless of original method access level.
+- Wrap types containing commas in extra parentheses or use type aliases.
+- Always include the parenthesis around argument lists.
+- Add method qualifiers such as `(const, override)`, `(noexcept)`, or other necessary qualifiers.
+- Use `Calltype(...)` if your method requires a non-default calling convention.
+- For methods with reference qualifiers, use `ref(&)` or `ref(&&)` as needed.
+
+```cpp
+MOCK_METHOD(ReturnType, MethodName, (Args...), (Qualifiers));
+```
+
+---
+
+## Example Combining Multiple Concepts
+
+```cpp
+class Foo {
+ public:
+  virtual ~Foo() {};
+  virtual int DoWork(const std::map<int, double>& data) const noexcept = 0;
+  virtual Bar& GetBar() & = 0;
+  virtual const Bar& GetBar() const & = 0;
+  virtual Bar&& GetBar() && = 0;
+};
+
+using MapIntDouble = std::map<int, double>;
+
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, DoWork, (MapIntDouble), (const, noexcept, override));
+
+  MOCK_METHOD(Bar&, GetBar, (), (ref(&), override));
+  MOCK_METHOD(const Bar&, GetBar, (), (const, ref(&), override));
+  MOCK_METHOD(Bar&&, GetBar, (), (ref(&&), override));
+};
+```
+
+---
+
+## Using `NiceMock`, `NaggyMock`, and `StrictMock`
+
+GoogleMock provides template wrappers that modify the behavior of mocks on uninteresting calls (calls without explicit expectations):
+
+- `NiceMock<T>`: Suppresses warnings for uninteresting calls.
+- `NaggyMock<T>`: Prints warnings for uninteresting calls (default behavior).
+- `StrictMock<T>`: Treats uninteresting calls as errors.
+
+These wrappers inherit all constructors of `T` and can be used wherever a `T` is expected.
+
+Example:
+
+```cpp
+using ::testing::NiceMock;
+NiceMock<MockFoo> nice_mock;  // Does not warn on uninteresting calls
+EXPECT_CALL(nice_mock, DoThis());
+...
+```
+
+**Note:** These wrappers only affect methods declared via `MOCK_METHOD` directly in the mock class.
+
+---
+
+## Practical Tips and Best Practices
+
+- When mocking overloaded methods, mock each overload and consider using `using` declarations for unmocked overloads.
+- To avoid compilation errors with types having commas, wrap types or use aliases.
+- Place `MOCK_METHOD` declarations in public scope always.
+- Use qualifiers consistently to properly override base class methods.
+- Prefer coding to interfaces instead of mocking concrete classes, especially those you don't own.
+
+---
+
+## Further Reading
+
+For detailed guidance on setting expectations, actions, matchers, and mock strictness modes, see the following documentation:
+
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html)
+- [Mocking Reference](https://google.github.io/googletest/reference/mocking.html)
+- [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html)
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html)
+
+---
+
+<Callout type="tip">
+To improve compile times for large mock classes, define constructors and destructors out-of-line in `.cc` files rather than inline.
+</Callout>
+
+<Callout type="note">
+Always verify that the destructor of the base class you mock is virtual to avoid undefined behavior.
+</Callout>
+
+---
+
+This guide equips you with the knowledge to confidently define mock classes and mock methods using GoogleMock macros, enabling robust and maintainable unit tests.
