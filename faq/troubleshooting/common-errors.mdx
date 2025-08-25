@@ -1,188 +1,243 @@
 ---
-title: "Troubleshooting Common Build and Test Issues"
-description: "Targets recurring user problems including compilation errors, linking failures, missing dependencies, and runtime misbehavior. Provides actionable solutions and checklists to resolve problems quickly and independently."
+title: "Common Errors & Their Solutions"
+description: "Covers frequent build errors, link problems, runtime failures, and test misconfigurations. Provides clear recommendations and checklists to get tests running smoothly."
 ---
 
-# Troubleshooting Common Build and Test Issues
+# Common Errors & Their Solutions
 
-This page addresses recurring challenges faced by users when building projects that use GoogleTest and GoogleMock, and when running tests. It focuses on actionable solutions and checklists to help you resolve issues such as compilation errors, linking failures, missing dependencies, and unexpected runtime behavior quickly and independently.
+This page addresses frequent errors and issues users may encounter when working with GoogleTest and GoogleMock. It helps identify root causes, outlines practical solutions, and provides clear guidance to get tests running smoothly.
 
 ---
 
-## 1. Compilation Errors
+## 1. Build and Linking Issues
 
-### Why Am I Getting Compilation Errors?
+### Problem: Missing gMock symbols during linking
 
-Compilation failures often occur due to misconfiguration or missing components:
+If your build fails with errors about unresolved symbols related to gMock, it means the mock libraries are not properly linked.
 
-- Missing include paths for GoogleTest or GoogleMock headers.
-- Typo or incorrect syntax in test or mock definitions.
-- Incorrect use of macros such as `TEST()`, `TEST_F()`, and `MOCK_METHOD`.
-- Using unsupported C++ language features or compiler versions.
+**Cause:**
+- The gMock library is not added to the linker inputs.
+- Mixing static and dynamic linking inconsistently.
 
-### How to Resolve Compilation Errors
+**Solution:**
+- Make sure your build system links against both GoogleTest and GoogleMock binaries or static libraries.
+- For CMake, link your test target with `gmock` or `gmock_main` appropriately.
+- Using Bazel, add `@com_google_googletest//:gmock` as a dependency.
 
-Follow these checks:
+### Problem: Compilation errors when using `MOCK_METHOD`
 
-1. **Include Paths:** Ensure your build system includes the directory containing `gtest/gtest.h` and `gmock/gmock.h`.
+**Cause:**
+- Missing `#include <gmock/gmock.h>` before using mocking macros.
+- Incorrect macro usage, especially with function signatures containing commas.
 
-2. **Linking GoogleTest/GoogleMock:** If you build GoogleTest and GoogleMock as libraries, link them properly.
+**Solution:**
+- Include `<gmock/gmock.h>` in your mock class header.
+- For functions with templated or complex types containing commas, wrap the type in parentheses or use a `using` alias. For example:
 
-3. **Correct Macro Usage:** Use the `TEST()` macro for simple tests and `TEST_F()` for tests requiring fixtures. Always define test fixtures correctly as classes derived from `testing::Test`.
-
-4. **Use `MOCK_METHOD` Correctly:**
-   - Make sure to place `MOCK_METHOD` declarations in the `public:` section of your mock class.
-   - Surround return or argument types containing commas with parentheses or use `using` type aliases to avoid parsing errors.
-
-5. **Compiler Compatibility:** GoogleTest requires C++17 or later; ensure your compiler satisfies this requirement.
-
-### Example Fix: Mock Method With Comma in Argument Type
-
-Incorrect:
 ```cpp
-MOCK_METHOD(std::pair<bool, int>, GetPair, ());  // Won't compile
+MOCK_METHOD((std::pair<int, int>), GetPair, ());
 ```
 
-Correct options:
-```cpp
-MOCK_METHOD((std::pair<bool, int>), GetPair, ());
-```
 or
+
 ```cpp
-using BoolIntPair = std::pair<bool, int>;
-MOCK_METHOD(BoolIntPair, GetPair, ());
+using PairInt = std::pair<int, int>;
+MOCK_METHOD(PairInt, GetPair, ());
 ```
 
-### Tips
+### Problem: Warnings or errors about overriding virtual functions with const-qualified parameters on MSVC
 
+**Cause:**
+- A known Microsoft Visual C++ compiler bug regarding ignoring top-level const in parameters.
+
+**Solution:**
+- Remove `const` qualifiers on top-level function parameters in both the base class declarations and mock implementations.
+- Continue to apply `const` on methods as needed.
+
+---
+
+## 2. Runtime Test Failures
+
+### Failure: "Actual function call count doesn't match this expectation"
+
+This error means that a mock method was called more or fewer times than specified by an `EXPECT_CALL`.
+
+**How to fix:**
+
+- Double-check the `.Times()` specification for your expectations. If omitted, GoogleMock assumes the method should be called exactly once.
+- Add `.Times(AnyNumber())` if a method may be called any number of times.
+- Use cardinalities like `AtLeast(N)` or `Between(M, N)` for flexible call counts.
+- Ensure you set expectations **before** exercising the code that triggers mock calls.
+
+### Failure: "Uninteresting mock function call encountered"
+
+This warning occurs when a mock method without any `EXPECT_CALL` specification is invoked.
+
+**Context:**
+- By default, GoogleMock treats such calls as "uninteresting" and allows them but warns.
+
+**How to resolve:**
+- Explicitly specify expectations for these calls if they are expected, e.g.,
+
+```cpp
+EXPECT_CALL(mock_object, MethodName).Times(AnyNumber());
+```
+- Alternatively, wrap your mock in `NiceMock<>` to suppress uninteresting call warnings.
+
+### Failure: "Unexpected mock function call"
+
+This indicates that a call was made on a mock method but did not match any existing expectations.
+
+**How to address:**
+- Add an appropriate `EXPECT_CALL` with matchers that cover the observed call.
+- If the method is overloaded, ensure you specify the matchers carefully to disambiguate the call.
+- For calls that should never happen, use `.Times(0)` to specify and catch such issues.
+
+### Failure: "called more times than expected"
+
+This error surfaces if a method is called more times than the upper bound specified in `Times()`.
+
+**Check:**
+- If your test flow can invoke the method more than expected, use a looser cardinality (e.g., `AtLeast`, `AnyNumber`).
+- Make sure expectations are not conflicting or overlapping in a way that causes ambiguous matching.
+
+---
+
+## 3. Expectation Ordering Issues
+
+### Problem: Expectation is not met in the correct order
+
+**Cause:**
+- By default, GoogleMock does not require calls to occur in the order expectations are declared.
+
+**Solution:**
+- Use `InSequence` to enforce strict order in a scope:
+
+```cpp
+{
+  ::testing::InSequence seq;
+  EXPECT_CALL(mock, CallA());
+  EXPECT_CALL(mock, CallB());
+}
+```
+- For partial orderings or dependencies, use the `.After()` clause or multiple sequences.
+
+### Problem: "Sticky" expectations causing upper-bound violations
+
+Expectations remain active even after their call limit is reached, unless specified.
+
+**Fix:**
+- Apply `.RetiresOnSaturation()` on expectations that should become inactive after exhausting their call count.
+
+---
+
+## 4. Mock Object Behavior Controls
+
+### Issue: Too many warnings for uninteresting calls clutter test output
+
+**How to reduce noise:**
+- Use `NiceMock<YourMock>` to suppress warnings for uninteresting calls.
+- Use `NaggyMock<YourMock>` to keep warnings.
+- Use `StrictMock<YourMock>` if you want uninteresting calls to cause test failures.
+- Control verbosity with `--gmock_verbose=LEVEL` flag; levels include `info`, `warning`, `error`.
+
+### Issue: Mock object returns default constructed values unexpectedly
+
+If your mock method returns a complex type and you did not specify a return action, the default return might be a default constructed value or null.
+
+**Solution:**
+- Explicitly specify return values using `.WillOnce(Return(...))` or `.WillRepeatedly(Return(...))`.
+- Use `ON_CALL(mock, Method()).WillByDefault(Return(...))` to configure default actions.
+
+---
+
+## 5. Memory and Lifetime Issues
+
+### Problem: Tests report heapcheck failures when deleting mock objects
+
+**Cause:**
+- The base class of a mock interface lacks a virtual destructor.
+
+**Resolution:**
+- Ensure the interface/base class has a **virtual destructor**.
+
+### Problem: Final verification doesn't occur because mocks are never deleted
+
+**Tips:**
+- Always manage mock object lifetimes thoroughly; if allocating on the heap, ensure proper deletion.
+- Use `Mock::AllowLeak(&mock_obj)` if the mock should be intentionally leaked.
+- Turn on heap checker and sanitizer tools to detect leaks.
+
+---
+
+## 6. Debugging and Diagnostics
+
+### How to debug expectation failures
+
+- Run tests with flag `--gmock_verbose=info` to see detailed mock call traces.
+- Combine with `--gtest_stack_trace_depth=0` for cleaner mock call trace without stack frames.
+- Use the warnings in failure messages to identify which expectation wasn't met or was violated.
+
+### How to verify and clear mock expectations prematurely
+
+Use:
+
+```cpp
+::testing::Mock::VerifyAndClearExpectations(&mock_obj);
+```
+
+to verify whether all previous expectations are satisfied and clear them before reuse.
+
+---
+
+## 7. Common Pitfalls and Best Practices
+
+- Always set `EXPECT_CALL` **before** exercising the code that triggers mock calls.
+- Avoid over-specifying expectations that make tests fragile; prefer matchers like `_` when argument value is not essential.
+- Use sequences and `.RetiresOnSaturation()` wisely to structure call order and lifetime of expectations.
+- Wrap mocks with `NiceMock` unless you specifically want warnings or errors on uninteresting calls.
+- Mock only classes/interfaces you own or have proper control over.
+- For testing asynchronous code, consider synchronization mechanisms along with mock action callbacks.
+
+---
+
+## 8. Useful Commands and Flags
+
+| Flag                        | Description                                                |
+|----------------------------|------------------------------------------------------------|
+| `--gmock_verbose=info`     | Prints detailed traces of mock calls and expectations      |
+| `--gmock_verbose=warning`  | Prints warnings and errors only (default)                   |
+| `--gmock_verbose=error`    | Prints error messages only                                  |
+| `Mock::VerifyAndClearExpectations(&mock)` | Verify and clear expectations on a mock object   |
+| `Mock::AllowLeak(&mock)`   | Prevents gMock from reporting leaked mock errors            |
+
+---
+
+## 9. Getting More Help
+
+- Refer to the [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html) for beginner-friendly introductions.
+- Consult the [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) for practical recipes.
+- Use the [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html) for quick syntax references.
+- Visit the [Mocking Reference](https://google.github.io/googletest/reference/mocking.html) for API details.
+- Join community forums or GitHub discussions of GoogleTest for community support.
+
+---
+
+### Callout
 <Tip>
-If you are new, begin with small, simple tests using the `TEST()` macro and progressively add complexity.
+For immediate resolution of test failures, always start by running your tests with `--gmock_verbose=info` to get trace logs that reveal mismatched calls and expectations.
 </Tip>
 
 ---
 
-## 2. Linking Failures
-
-### Common Causes
-
-- Forgetting to link with the `gtest` or `gmock` libraries.
-- Incorrect order of libraries in link flags.
-- Mixing debug and release versions of libraries and tests.
-- Missing `gtest_main` when relying on the default `main()` function.
-
-### How to Fix Linking Issues
-
-1. Link with `gtest` and/or `gmock` libraries explicitly in your build system.
-2. If you want your tests to have a default `main()`, link with `gtest_main` (or `gmock_main`).
-3. Ensure libraries and your tests are built with compatible compiler flags and runtimes.
-4. Verify the order of linking places GoogleTest libraries after your test object files.
-
-### Example Link Setup with CMake
-
-```cmake
-find_package(GTest REQUIRED)
-
-add_executable(my_tests test1.cc test2.cc)
-target_link_libraries(my_tests PRIVATE GTest::gtest_main GTest::gmock)
-```
+### Related Documentation
+- [Writing Your First Test](https://google.github.io/googletest/getting-started/configuration-validation/writing-first-test.html)
+- [Configuring Your Project](https://google.github.io/googletest/getting-started/configuration-validation/project-integration.html)
+- [Mocking Basic Usage](https://google.github.io/googletest/gmock_for_dummies.html#using-mocks-in-tests)
+- [Mock Strictness Levels](https://google.github.io/googletest/reference/mocking.html#mock-strictness)
+- [EXPECT_CALL Clause Reference](https://google.github.io/googletest/reference/mocking.html#EXPECT_CALL)
+- [Troubleshooting Setup](https://google.github.io/googletest/getting-started/configuration-validation/validation-troubleshooting.html)
 
 ---
 
-## 3. Missing Dependencies
-
-GoogleTest depends only on standard C++ and system libraries, but some components require additional dependencies:
-
-- On Windows, linking against specific system libraries may be required.
-- On Linux and macOS, you may need pthread (`-lpthread`) explicitly.
-
-### Fix
-
-Make sure to adjust your build to link necessary system libraries. For example, add `-lpthread` when building.
-
----
-
-## 4. Runtime Failures and Misbehavior
-
-### Common Runtime Issues
-
-- Tests crashing unexpectedly.
-- Tests hanging or running indefinitely.
-- Unexpected test results, such as all tests failing or passing.
-
-### Diagnosing Runtime Issues
-
-1. **Initialization:** Confirm that your `main()` is properly calling `testing::InitGoogleTest(&argc, argv);` before `RUN_ALL_TESTS()`.
-2. **Thread Safety:** GoogleTest is thread-safe on pthread-based systems; avoid running assertions concurrently from multiple threads on unsupported platforms.
-3. **Test Fixtures:** Ensure you do not share mutable state across tests unless intended, to preserve test independence.
-4. **Exception Handling:** GoogleTest catches exceptions by default (controlled by `--gtest_catch_exceptions`). Check if exceptions might cause unexpected behavior.
-
-### Solutions
-
-- Use provided default `main()` by linking with `gtest_main` unless custom setup is needed.
-- Handle fatal failures correctly. Use `ASSERT_*` to abort problematic tests.
-- Use tools like `SCOPED_TRACE` to add context to your tests to aid debugging.
-- Use the `--gtest_break_on_failure` flag to cause debugger breakpoints at failed assertions.
-
----
-
-## 5. Common Pitfalls Checklist
-
-- ✔️ **Don’t call `RUN_ALL_TESTS()` multiple times.**
-- ✔️ **Return the result of `RUN_ALL_TESTS()` from `main()`.**
-- ✔️ **Avoid mixing `TEST()` and `TEST_F()` in the same test suite.**
-- ✔️ **Use `TEST_F()` only with defined fixture classes derived from `testing::Test`.**
-- ✔️ **Name test suites and tests without underscores to prevent internal issues.**
-- ✔️ **Avoid ignoring compiler warnings and errors; fix them instead.**
-
----
-
-## 6. Troubleshooting Steps Summary
-
-<Steps>
-<Step title="Fix Compilation Errors">
-  Check include paths, macro usage, and compiler version.
-</Step>
-<Step title="Resolve Linking Failures">
-  Confirm all required libraries are linked correctly.
-</Step>
-<Step title="Verify Dependencies">
-  Ensure system libraries like pthread are linked.
-</Step>
-<Step title="Validate Test Program Setup">
-  Confirm `InitGoogleTest` and `RUN_ALL_TESTS` usage.
-</Step>
-<Step title="Isolate Runtime Failures">
-  Use debugger flags, `SCOPED_TRACE`, and proper fixtures.
-</Step>
-</Steps>
-
----
-
-## 7. Getting Further Help
-
-- Review the [GoogleTest Primer](overview/introduction-product-value/what-is-googletest).
-- Consult the [GoogleMock Cookbook](docs/gmock_cook_book.md) for detailed mocking troubleshooting.
-- Check the [Assertions Reference](docs/reference/assertions.md) for assertion-related issues.
-- Visit the [Community Support & Resources](faq/community-support/help-channels) page.
-
-<Note>
-Do not hesitate to open issues or ask questions on the official [GoogleTest GitHub repository](https://github.com/google/googletest), providing detailed error messages, environment details, and minimal reproducible examples.
-</Note>
-
----
-
-## Related Documentation
-
-- [GoogleTest Primer](/overview/introduction-product-value/what-is-googletest)
-- [GoogleMock Cookbook](docs/gmock_cook_book.md)
-- [Test Registration and Structure](api-reference/core-testing-apis/test-registration-and-structure)
-- [Core Matchers Reference](api-reference/matcher-and-mocking-apis/core-matchers-reference)
-- [Assertions Reference](docs/reference/assertions.md)
-- [Basic Setup & First Test](getting-started/basic-setup-first-test/configure-project)
-- [Troubleshooting Common Issues](getting-started/troubleshooting-validation/common-issues)
-
----
-
-<Info>
-This page focuses specifically on common build and test issues encountered when working with GoogleTest and GoogleMock. For broader understanding, including architecture, mocking patterns, and advanced usage, consult the guides and references linked above.
-</Info>
+This comprehensive guide empowers you to quickly diagnose and solve common errors in GoogleTest and GoogleMock, speeding your path to reliable test suites.
