@@ -1,0 +1,263 @@
+---
+title: "Troubleshooting Death Tests"
+description: "Advice for resolving problems unique to death tests, including test instability, environment prerequisites, and platform-specific behaviors."
+---
+
+# Troubleshooting Death Tests
+
+This guide provides targeted advice for resolving common issues specific to **death tests** in GoogleTest. It addresses test flakiness, environment prerequisites, platform-specific behaviors, and best practices to ensure reliable and predictable death test execution.
+
+---
+
+## 1. Understanding Death Test Failures
+
+Death tests verify that your code terminates as expected under certain conditions. Because they involve running test code in child processes, death tests have unique failure modes compared to normal tests, including:
+
+- Flaky or intermittent failures
+- Mismatch between expected and actual termination behavior
+- Environment and platform idiosyncrasies
+
+
+### 1.1 Common Failure Symptoms
+- The death test reports failure because the tested code did not terminate.
+- The error message printed on failure does not match the expected regex.
+- Unexpected exit codes or signals cause the test to fail.
+- Tests pass sometimes and fail other times (non-deterministic).
+
+---
+
+## 2. Preparing a Stable Death Test Environment
+
+Death tests rely on process forking or re-executing the test binary in a child process. Your environment must meet these criteria:
+
+- **Single-threaded policy:** Death tests involve forking; ideal conditions have only one active thread, as forking multithreaded processes can cause instabilities.
+- **Re-execution path:** When using the "threadsafe" death test style, the test binary must be invoked with a path including a directory separator (e.g., `./test_binary`) to allow re-execution.
+- **No interfering signal handlers:** Custom or profiling signal handlers (e.g., `SIGPROF`) can interfere with death test execution.
+- **Valid working directory:** Avoid changing to directories lacking proper permissions or special filesystem characteristics.
+
+<Tip>
+Ensure your test binary is run using a relative or absolute path, not just the bare name, to support "threadsafe" death test style.
+</Tip>
+
+### 2.1 Configuring Death Test Style
+
+- The flag `--gtest_death_test_style` controls how death tests run:
+  - `fast`: Fork and run the test logic immediately.
+  - `threadsafe`: Re-executes the test binary for the child.
+
+While `fast` mode runs faster, `threadsafe` mode is safer in multi-threaded environments.
+
+<Steps>
+<Step title="Set Death Test Style Globally">
+In `main()`, set:
+```cpp
+GTEST_FLAG_SET(death_test_style, "threadsafe");
+```
+</Step>
+<Step title="Set Death Test Style Per-Test">
+In your test body:
+```cpp
+GTEST_FLAG_SET(death_test_style, "threadsafe");
+ASSERT_DEATH(...);
+```
+</Step>
+</Steps>
+
+---
+
+## 3. Common Pitfalls and Solutions
+
+### 3.1 Death Test Does Not Die
+
+If the tested statement does not cause termination, the death test will fail.
+
+**Check:**
+- Confirm the code path under test causes process termination (e.g., `abort()`, `_Exit()`, signal raise).
+- Avoid using `return` inside death test statement bodies as it causes failures.
+
+Example:
+```cpp
+EXPECT_DEATH({ _Exit(1); }, "");  // Valid
+EXPECT_DEATH({ return; }, "");    // Fails - returns instead of dying
+```
+
+### 3.2 Debug vs. Release Mode Differences
+
+`EXPECT_DEBUG_DEATH` and `ASSERT_DEBUG_DEATH` only assert in debug builds. In release builds, they run without asserting.
+
+---
+
+### 3.3 Environment Interference
+
+- Running death tests as part of a multi-threaded test harness may cause forks to hang or fail.
+- Disable or properly handle profiling timers/signals that may interfere with death test forking.
+
+Example on Linux:
+```cpp
+// Avoids SIGPROF interference
+struct sigaction old_action;
+sigaction(SIGPROF, nullptr, &old_action);
+sigaction(SIGPROF, &old_action, nullptr);
+```
+
+### 3.4 Exit Code Mismatches
+
+- Use predicates like `ExitedWithCode(expected_code)` or `KilledBySignal(signal_number)` in `EXPECT_EXIT` to validate the termination status precisely.
+
+Example:
+```cpp
+EXPECT_EXIT(my_func(), testing::ExitedWithCode(0), "Success");
+```
+
+### 3.5 Regex Matching Issues
+
+- Death test error output regex matching uses a limited regex flavor:
+  - No unions `|`
+  - No grouping `()`
+  - Supports `\d`, `\w`, `*`, `+`, `.`, `^`, `$`
+
+<Note>
+Avoid advanced regex features beyond the supported set; otherwise, your regex may never match.
+</Note>
+
+### 3.6 Using Compound Statements
+
+You can supply a block of code as the death test statement to execute multiple lines:
+
+```cpp
+ASSERT_DEATH({ int x = 5; RunCode(x); }, "error message");
+```
+
+---
+
+## 4. Best Practices for Writing Death Tests
+
+- Name death test suites with `*DeathTest` suffix to prioritize them and improve threading safety.
+- Avoid side effects in death test statements since child processes do not propagate memory changes to the parent.
+- Use `GTEST_FLAG_SET(death_test_style, "threadsafe")` when your tests run in environments with multiple threads.
+- Use `SCOPED_TRACE` or custom failure messages to clarify assertion failures inside helper functions.
+
+---
+
+## 5. Troubleshooting Common Issues
+
+<AccordionGroup title="Death Test Failure Scenarios">
+<Accordion title="Test Fails Because It Does Not Die">
+Ensure the code under test terminates the process (calls abort(), kills itself, or exits). Avoid returning from the death test statement.
+</Accordion>
+<Accordion title="Failure Message Does Not Match">
+Check your regex or matcher against your process's stderr output. Remember restricted regex syntax. Test with simple regex first.
+</Accordion>
+<Accordion title="Test Is Flaky or Hang Occurs">
+Confirm your process environment is compatible. Avoid forking with running child threads. Disable interfering timer signals.
+</Accordion>
+<Accordion title="Unexpected Exit Code or Signal">
+Use correct exit tests like `ExitedWithCode()` or `KilledBySignal()` in `EXPECT_EXIT` to capture process termination codes accurately.
+</Accordion>
+<Accordion title="Death Test Runs But Does Not Match Regex">
+Ensure your death message is flushed to stderr before termination. Avoid buffering issues or premature exits.
+</Accordion>
+</AccordionGroup>
+
+---
+
+## 6. Platform-Specific Notes
+
+### Windows
+- Death test children re-execute the binary with flags to isolate tests.
+- CRT debug assertions may cause pop-up dialogs; workaround with test flags and use `EXPECT_DEATH` accordingly.
+
+### POSIX (Linux/macOS)
+- Death test uses `fork()` or `clone()`; threading before test affects stability.
+- Signal handling and profiling timers may cause interference; carefully review any installed handlers.
+
+---
+
+## 7. Useful Debugging Tips
+
+- Run tests with verbose flags: `--gtest_death_test_style=threadsafe --gtest_repeat=10` to observe intermittent failures.
+- Use `EXPECT_DEATH_IF_SUPPORTED` to conditionally run death tests on supported platforms.
+- Add logging or `SCOPED_TRACE` to get helpful contextual messages.
+
+---
+
+## 8. Reference Examples
+
+```cpp
+// Basic death test
+TEST(MyDeathTest, ExitsOnBadInput) {
+  ASSERT_DEATH(ProcessInput(-1), "Invalid input");
+}
+
+// Using 'threadsafe' death test style
+TEST(MyDeathTest, ThreadsafeStyle) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_DEATH(RunCriticalFunction(), "Crash!");
+}
+
+// Using EXPECT_EXIT with exit code check
+TEST(MyDeathTest, ExitsWithCodeZero) {
+  EXPECT_EXIT(CleanExit(), testing::ExitedWithCode(0), "Done");
+}
+
+// Using a compound statement for more complex logic
+TEST(MyDeathTest, CompoundDeath) {
+  EXPECT_DEATH({
+      Setup();
+      TriggerFailure();
+  }, "Error caught");
+}
+```
+
+---
+
+## 9. Related Documentation
+
+- [Death Assertions](../reference/assertions.md#death) — Macros and behavior for death testing.
+- [Advanced GoogleTest Topics](../docs/advanced.md#death-tests) — Guidance and deeper concepts on death tests.
+- [Death Test Sample](https://github.com/google/googletest/blob/main/googletest/test/googletest-death-test-test.cc) — Real-world death test examples.
+
+---
+
+## Summary
+
+Death tests require careful setup due to their forked execution model and platform nuances. Ensuring proper environment, careful regex matching, and understanding of the death test styles (`fast` vs. `threadsafe`) is crucial for stable and informative death tests. Use gated flags, avoid returns inside death test code, and validate through predicates for robust test coverage.
+
+---
+
+## 10. Troubleshooting Checklist
+
+- [ ] Verify code under test definitely aborts/exits.
+- [ ] Avoid `return` statements in death test blocks.
+- [ ] Confirm `--gtest_death_test_style` matches your threading environment.
+- [ ] Run test binary via path with directory separators.
+- [ ] Simplify regex and test manually against output.
+- [ ] Disable conflicting signal handlers/timers.
+- [ ] Use `ExitedWithCode()` or `KilledBySignal()` for exit code checks.
+- [ ] Avoid multiple death test assertions on the same line.
+
+---
+
+### Callouts
+
+<Warning>
+Avoid returning from inside death test statements. Always ensure the statement terminates the process.
+</Warning>
+
+<Tip>
+Use `EXPECT_DEATH_IF_SUPPORTED` for cross-platform compatibility.
+</Tip>
+
+<Note>
+Death test output regex supports a limited subset of regular expressions.
+</Note>
+
+<Check>
+Name death test fixtures/test suites with `*DeathTest` suffix.
+</Check>
+
+---
+
+This completes the guidance for troubleshooting death tests within GoogleTest.
+
+<Source url="https://github.com/google/googletest" branch="main" paths={[{"path": "googletest/test/googletest-death-test-test.cc", "range": "all"},{"path": "googletest/include/gtest/gtest-death-test.h", "range": "all"},{"path": "docs/advanced.md", "range": "# Death Tests"}]} />
