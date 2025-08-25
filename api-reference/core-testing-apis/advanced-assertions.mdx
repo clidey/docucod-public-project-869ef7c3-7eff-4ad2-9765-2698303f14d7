@@ -1,293 +1,233 @@
 ---
-title: "Advanced Assertions and Matchers"
-description: "Details advanced assertion features including user-defined assertions, custom printers, and matcher-based assertions to enable expressive, readable, and reusable test code. Includes examples of complex predicate assertions and integration with GoogleTest's extensibility points."
+title: "Advanced Assertions: Death and Parameterized Tests"
+description: "Explains advanced testing features, including death tests for crash/error code and parameterized tests for repeated execution with varying values or types. Includes setup, usage, and limitations."
 ---
 
-# Advanced Assertions and Matchers
+# Advanced Assertions: Death and Parameterized Tests
 
-This reference page dives deep into advanced assertion features that let you write expressive, readable, and reusable test code with GoogleTest. You'll learn how to craft user-defined assertions, leverage custom printers for improved failure diagnostics, and harness matcher-based assertions to verify complex conditions. By mastering these capabilities, you can transform your tests into powerful tools that clarify intent and accelerate debugging.
+This section dives into advanced testing features of GoogleTest that enable verification of program behaviors involving process termination and efficient test reuse through parameterization. It covers the setup, usage, and limitations of death tests—which confirm that code aborts or crashes as expected—and parameterized tests—which allow repeated execution of the same test logic across varied input values or types.
 
 ---
 
-## User-Defined Assertions
+## Death Tests
 
-Sometimes built-in assertions are not enough to capture complex validation logic or to generate clear failure messages tailored for your domain. User-defined assertions in GoogleTest enable you to encapsulate such logic, improving both readability and maintainability.
+Death tests ensure your code properly terminates—via abnormal process termination or explicit exits—under error conditions or violated invariants. This capability is vital for testing code that enforces assertions or triggers fatal failure handlers to avoid undefined or corrupted states.
 
-### Creating Simple User-Defined Assertions
+### How Death Tests Work
 
-Define a function that returns `testing::AssertionResult` to express success or failure:
+GoogleTest executes death tests by spawning child processes to run the code snippet that is expected to terminate the process. This isolation protects the main test runner and allows verification of exit status and error output.
 
-```cpp
-#include <gtest/gtest.h>
+- On POSIX platforms, the child process is created using `fork()` or `clone()` (Linux).
+- On Windows, the child process is started via `CreateProcess()`.
 
-// Returns AssertionSuccess() if n is even, else AssertionFailure() with message.
-testing::AssertionResult IsEven(int n) {
-  if (n % 2 == 0)
-    return testing::AssertionSuccess();
-  else
-    return testing::AssertionFailure() << n << " is odd";
-}
+The style of death tests depends on the flag `::testing::GTEST_FLAG(death_test_style)`, defaulted to "fast":
 
-TEST(NumberTest, CheckEven) {
-  EXPECT_TRUE(IsEven(4));  // Passes silently
-  EXPECT_TRUE(IsEven(3));  // Fails with message "3 is odd"
-}
-```
+- "fast": Executes the test code immediately after `fork()`. Minimal overhead but less thread-safe.
+- "threadsafe": Re-executes the test binary in the child with extra flags to run only the target death test, improving thread safety but with performance cost.
 
-This approach allows your failure messages to contain rich explanations about why the check failed.
+Invalid values for this flag will cause death tests to fail.
 
-### Benefits of User-Defined Assertions
+### Death Test Macros
 
-- **Clear failure messages:** Provide detailed context helping debug failed checks.
-- **Declarative test code:** Hide complex logic behind clean, readable calls.
-- **Reusable predicates:** Write once, use across many tests.
+GoogleTest provides the following main macros:
 
-## Custom Printers
+#### `EXPECT_DEATH(statement, matcher)` / `ASSERT_DEATH(statement, matcher)`
 
-GoogleTest uses streaming (`operator<<`) to print values in failure messages. When you have types that don't print well by default, define custom printers to improve output quality.
-
-### How to Define Custom Printers
-
-- **Implement `PrintTo(const T&, std::ostream*)` function** in the same namespace as your type `T`.
+Validates that `statement` causes the process to terminate with a non-zero exit status and produces stderr output matching `matcher`, which can be a regex or a matcher for strings.
 
 Example:
 
 ```cpp
-#include <ostream>
+TEST(MyDeathTest, CrashOnInvalidInput) {
+  EXPECT_DEATH(MyFunction(-1), "Invalid input: -1");
+}
+```
 
-namespace my_namespace {
+#### `EXPECT_DEATH_IF_SUPPORTED(statement, matcher)`
 
-class Point {
- public:
-  int x, y;
+Runs like `EXPECT_DEATH` if death tests are supported on the current platform, otherwise passes without effect.
+
+#### `EXPECT_DEBUG_DEATH(statement, matcher)`
+
+Runs like `EXPECT_DEATH` only in debug builds (`NDEBUG` not defined), otherwise executes `statement` normally without checking termination.
+
+#### `EXPECT_EXIT(statement, predicate, matcher)` / `ASSERT_EXIT(statement, predicate, matcher)`
+
+Validates the process terminates with an exit code satisfying `predicate` (a callable or special predicates), and produced stderr output matching `matcher`.
+
+GoogleTest provides two common predicates:
+
+```cpp
+::testing::ExitedWithCode(exit_code);             // Checks normal exit with exit_code.
+::testing::KilledBySignal(signal_number);          // Checks signal termination. Not on Windows.
+```
+
+Example:
+
+```cpp
+EXPECT_EXIT(CleanExitFunction(), ::testing::ExitedWithCode(0), "Success");
+```
+
+### Death Test Usage Notes
+
+- `statement` can be a compound statement (a block of code in `{ ... }`).
+- The stderr matching supports GoogleTest matchers or regular expressions.
+- If the `statement` does not terminate as expected, the assertion fails.
+- Avoid using fatal assertion macros like `ASSERT_*` inside death tests unless you intend to cause termination.
+- Since the death test executes in a child process, any in-memory side effects are not observable in the parent process.
+
+### Best Practices
+
+- Name test suites containing death tests with the suffix `DeathTest` to avoid conflicts and help GoogleTest execute them first.
+- Use `GTEST_FLAG_SET(death_test_style, "threadsafe")` for better safety in multi-threaded environments, especially important if any threads exist before the death test runs.
+- Avoid freeing resources in death tests that would cause memory leaks detected by the parent process.
+- Ensure mock objects used in death tests are allowed to leak or are handled correctly since process termination bypasses usual cleanup.
+
+### Common Pitfalls
+
+<Warning>
+Death tests rely on re-executing the binary or forking, so tests involving threads, or with side effects that are expected to persist beyond test execution, can be problematic.
+</Warning>
+
+<Warning>
+Placing multiple death assertions on the same line is illegal and will cause compilation errors.
+</Warning>
+
+---
+
+## Parameterized and Typed Tests
+
+Parameterized and typed tests promote test reuse by running the same test code repeatedly with varying input parameters or types, improving coverage and reducing boilerplate.
+
+### Value-Parameterized Tests
+
+These tests take a parameter value that varies across test runs. They are suitable when you want to run the same test logic on different inputs.
+
+#### Defining Value-Parameterized Tests
+
+1. Derive your fixture class from `testing::TestWithParam<T>`, where `T` is the parameter type.
+
+```cpp
+class MyTest : public testing::TestWithParam<int> {
+  // Fixture setup and members
 };
-
-void PrintTo(const Point& p, std::ostream* os) {
-  *os << "Point(" << p.x << ", " << p.y << ")";
-}
-
-}  // namespace my_namespace
 ```
 
-This enables GoogleTest to print `Point` objects informatively in assertion messages.
-
-### Interaction with `AbslStringify` Overloads
-
-GoogleTest supports a generic sink-based printer `AbslStringify`. If both `PrintTo` and `AbslStringify` are defined, `PrintTo` takes precedence.
-
-### Tips
-
-- Ensure your printer is in the same namespace for proper lookup.
-- For complex types, consider streaming minimal yet helpful details.
-
-## Matcher-Based Assertions
-
-Matchers are the heart of expressive verification in GoogleTest and GoogleMock. Matchers allow you to write assertions that read like English and produce actionable failure messages.
-
-### Key Concepts
-
-- A matcher encapsulates the criteria to test a value.
-- GoogleTest provides built-in matchers (e.g., `Eq`, `Ge`, `StartsWith`, `ContainsRegex`).
-- Use `EXPECT_THAT(value, matcher)` and `ASSERT_THAT(value, matcher)` to assert with matchers.
-
-### Using Built-in Matchers
-
-Basic usage:
+2. Use `TEST_P` to define tests using the parameter. Access the parameter with `GetParam()`:
 
 ```cpp
-#include <gmock/gmock.h>
-
-using ::testing::StartsWith;
-using ::testing::MatchesRegex;
-using ::testing::AllOf;
-using ::testing::Gt;
-using ::testing::Lt;
-
-TEST(StringTest, MatcherExamples) {
-  std::string s = "Hello, world!";
-  EXPECT_THAT(s, StartsWith("Hello"));
-  EXPECT_THAT(s, MatchesRegex("Hello, \w+!"));
-  int value = 7;
-  EXPECT_THAT(value, AllOf(Gt(5), Lt(10)));
+TEST_P(MyTest, IsEvenTest) {
+  int n = GetParam();
+  EXPECT_EQ(n % 2, 0);
 }
 ```
 
-If an assertion fails, GoogleTest produces a detailed message explaining the mismatch:
-
-```
-Value of: value
-  Actual: 3
-Expected: is > 5 and < 10
-```
-
-### Combining Matchers
-
-Matchers can be combined with `AllOf()`, `AnyOf()`, and `Not()` to form powerful expressions:
+3. Instantiate the parameter values with `INSTANTIATE_TEST_SUITE_P`:
 
 ```cpp
-EXPECT_THAT(value, AllOf(Gt(5), Lt(10)));   // value > 5 && value < 10
-EXPECT_THAT(value, AnyOf(Eq(0), Eq(1)));    // value == 0 || value == 1
-EXPECT_THAT(str, Not(Contains("bad")));   // str does not contain "bad"
+INSTANTIATE_TEST_SUITE_P(EvenNumbers, MyTest, testing::Values(2, 4, 6, 8));
 ```
 
-### Custom Matchers
+#### Notes
 
-If built-in matchers don’t suffice, you can write custom matchers to describe sophisticated checks.
+- Parameter type `T` must be copyable.
+- You can instantiate a test suite multiple times with different parameter sets.
 
-#### Using `MATCHER` Macros
+#### Naming
 
-GoogleTest provides macros to write concise matchers.
+The full test name includes the instantiation prefix, test suite name, test name, and parameter index.
+
+#### Limitations
+
+- If no instances are defined via `INSTANTIATE_TEST_SUITE_P`, the test suite will register as uninstantiated and not run unless suppressed.
+
+---
+
+### Typed Tests
+
+Typed tests let you specify tests that run for multiple types instead of values, ideal for testing template classes or interfaces against various implementations.
+
+#### Defining Typed Tests
+
+1. Define a test fixture template:
 
 ```cpp
-MATCHER(IsDivisibleBy7, "") {
-  return (arg % 7) == 0;
+template <typename T>
+class MyTypedTest : public testing::Test {
+  // Fixture code
+};
+```
+
+2. Register the types to test with `TYPED_TEST_SUITE`:
+
+```cpp
+using MyTypes = ::testing::Types<int, float, double>;
+TYPED_TEST_SUITE(MyTypedTest, MyTypes);
+```
+
+3. Define test cases with `TYPED_TEST`, using the special `TypeParam` to represent the current type:
+
+```cpp
+TYPED_TEST(MyTypedTest, TestBehavior) {
+  TypeParam val = TypeParam();
+  // Test logic using val
+}
+```
+
+---
+
+## Example: Death Test
+
+```cpp
+TEST(FooDeathTest, CrashOnNullPointer) {
+  EXPECT_DEATH({
+    Foo(nullptr);  // Should cause process termination
+  }, "Null pointer passed to Foo");
+}
+```
+
+## Example: Parameterized Test
+
+```cpp
+class IsEvenTest : public testing::TestWithParam<int> {};
+
+TEST_P(IsEvenTest, ReturnsTrueForEvenNumbers) {
+  int n = GetParam();
+  EXPECT_EQ(n % 2, 0);
 }
 
-TEST(NumberTest, DivisibleBy7) {
-  EXPECT_THAT(14, IsDivisibleBy7());
-  EXPECT_THAT(15, Not(IsDivisibleBy7()));
-}
+INSTANTIATE_TEST_SUITE_P(EvenNumbers, IsEvenTest, testing::Values(2, 4, 6, 8));
 ```
 
-Include custom failure explanations:
+## Troubleshooting
 
-```cpp
-MATCHER(IsDivisibleBy7, "") {
-  if ((arg % 7) == 0) return true;
-  *result_listener << "the remainder is " << (arg % 7);
-  return false;
-}
-```
-
-Now failure messages indicate why it failed.
-
-#### Parameterized Matchers
-
-For matchers with parameters, use `MATCHER_P`, `MATCHER_P2`, etc.:
-
-```cpp
-MATCHER_P(InRange, range, "") {
-  return arg >= range.first && arg <= range.second;
-}
-
-EXPECT_THAT(value, InRange(std::make_pair(1, 5)));
-```
-
-#### Writing Matcher Classes
-
-For fine control, implement matcher interfaces directly. Implement `MatchAndExplain()`, `DescribeTo()`, and `DescribeNegationTo()`. Then wrap with `Matcher<T>` factory function.
-
-### Ensuring Matchers Are Functional
-
-Matchers must be pure functions without side effects to guarantee reliable tests and accurate failure messages.
-
-## Complex Predicate Assertions
-
-GoogleTest provides predicate-style assertions that enable checking complex conditions with clear failure diagnostics.
-
-### `EXPECT_PREDn` and `ASSERT_PREDn`
-
-Used for predicates taking n arguments returning `bool`.
-
-Example:
-
-```cpp
-bool AreRelativelyPrime(int a, int b) {
-  // Implement logic...
-  return true_or_false;
-}
-
-EXPECT_PRED2(AreRelativelyPrime, 3, 4);
-```
-
-If the predicate fails, GoogleTest prints values of arguments involved.
-
-### Predicate-Formatter Assertions: `EXPECT_PRED_FORMATn` and `ASSERT_PRED_FORMATn`
-
-For richer messages, write a predicate function returning `testing::AssertionResult` and accepting argument expressions as strings and values.
-
-```cpp
-testing::AssertionResult AssertRelativelyPrime(
-   const char* expr1, const char* expr2, int a, int b) {
-  if (AreRelativelyPrime(a, b)) return testing::AssertionSuccess();
-  return testing::AssertionFailure() << expr1 << " and " << expr2 <<
-      " (" << a << " and " << b << ") are not relatively prime.";
-}
-
-EXPECT_PRED_FORMAT2(AssertRelativelyPrime, 3, 4);
-```
-
-### Use Cases
-
-Use predicate assertions when complex logic is needed that cannot be easily expressed as a simple matcher or standard assertion, and when detailed error explanations improve test clarity.
-
-## Integration with Matchers
-
-`EXPECT_THAT(value, matcher)` and `ASSERT_THAT(value, matcher)` bring full power of GoogleMock matchers to assertions, allowing expressive and natural test statements.
-
-Example:
-
-```cpp
-using ::testing::HasSubstr;
-EXPECT_THAT(str, HasSubstr("needle"));
-```
-
-Check [Matchers Reference](/api-reference/mocking-framework-apis/using-matchers) for a full list of built-in matchers.
-
-## Practical Tips and Best Practices
-
-- Prefer *matchers* over verbose booleans or user-defined assertions where possible.
-- Use `SCOPED_TRACE()` to add context when calling assertion subroutines.
-- Invoke `EXPECT_PRED_FORMATn` for complex predicates that require detailed diagnostics.
-- Write clear and meaningful descriptions in custom matchers to improve failure readability.
-- User-defined predicates and matchers should be free of side effects.
-- When mocking, combine `EXPECT_CALL` with matchers to precisely control method argument expectations.
-- Consider using matchers within parameterized and typed tests to enhance test coverage effectively.
-
-## Troubleshooting Common Issues
-
-<AccordionGroup title="Troubleshooting Custom Assertions and Matchers">
-<Accordion title="Custom Assertion Always Fails or Always Succeeds">
-Ensure your predicate function correctly returns `AssertionSuccess()` or `AssertionFailure()` and doesn't have unintended side effects.
+<AccordionGroup title="Common Issues with Death and Parameterized Tests">
+<Accordion title="Death Test Does Not Detect Process Termination">
+Ensure the death test code triggers a fatal termination (e.g., via `abort()` or failed assertion). Code that throws exceptions or handles errors without terminating will not cause death test to pass.
 </Accordion>
-<Accordion title="Matcher Does Not Print Expected Failure Message">
-Make sure your matcher implements `DescribeTo()` and optionally `MatchAndExplain()` to provide informative messages. Streaming to `result_listener` improves clarity.
+<Accordion title="Regular Expressions Not Matching">
+Remember GoogleTest supports POSIX extended regex syntax. On Windows, support is limited. Be sure your regex matches stderr output format in child process.
 </Accordion>
-<Accordion title="Overloaded Methods Confuse Matchers">
-Disambiguate overloaded methods using `Const()` wrapper or explicitly casting matchers as shown in the [SelectOverload](https://google.github.io/googletest/gmock_cook_book.html#select_overload) technique.
+<Accordion title="Parameterized Test Fails to Run">
+Verify that you have instantiated your test suite with `INSTANTIATE_TEST_SUITE_P`. Test suites without instantiations register as uninstantiated.
 </Accordion>
 </AccordionGroup>
 
-## References and Further Reading
+---
 
-- [Assertions Reference](reference/assertions.md) — Complete list of GoogleTest assertions.
-- [Matchers Reference](reference/matchers.md) — Built-in matchers for expressive verification.
-- [gMock Cookbook](docs/gmock_cook_book.md) — Recipes for creating mocks, matchers, and actions.
-- [GoogleTest Primer](docs/primer.md) — Foundational concepts and simple test writing.
-- [Advanced GoogleTest Topics](docs/advanced.md) — Deep dive into assertions and test fixtures.
+## References
+
+- [Assertions Reference](reference/assertions.md#death)
+- [GoogleTest Advanced Guide: Death Tests](docs/advanced.md#death-tests)
+- [Value-Parameterized Tests](docs/advanced.md#value-parameterized-tests)
+- [Typed Tests](docs/advanced.md#typed-tests)
+
+For detailed examples and best practices, consult related guides:
+
+- [Writing and Organizing Tests](api-reference/core-testing-apis/writing-tests)
+- [Matchers Reference](reference/matchers.md)
+- [GoogleMock Cookbook](docs/gmock_cook_book.md)
 
 ---
 
-## Mermaid Diagram: User Flow of an Assertion with Custom Matcher
-
-```mermaid
-sequenceDiagram
-    participant Test as Test Code
-    participant Assertion as Assertion Macro
-    participant Matcher as Matcher Object
-    participant Printer as Value Printer
-    participant TestFramework as GoogleTest
-
-    Test->>Assertion: Calls EXPECT_THAT(value, matcher)
-    Assertion->>Matcher: Calls MatchAndExplain(value)
-    alt match succeeds
-        Matcher-->>Assertion: true
-        Assertion-->>TestFramework: Pass assertion
-    else match fails
-        Matcher-->>Printer: Generate explanation
-        Printer-->>Assertion: Description + Details
-        Assertion-->>TestFramework: Report failure with message
-    end
-
-    TestFramework-->>Test: Continue or abort based on assertion type
-```
+This page fits into the API reference as a specialized section on advanced assertion patterns, complementing guides and references on basic assertions and test writing.
