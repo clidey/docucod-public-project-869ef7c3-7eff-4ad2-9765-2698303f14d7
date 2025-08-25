@@ -1,0 +1,325 @@
+---
+title: "Advanced Mocking Techniques"
+description: "Best practices for leveraging GoogleMock in complex scenarios: composite matchers, sequenced expectations, customizing mock behavior, and controlling call cardinality. Practical demonstrations with realistic code examples."
+---
+
+# Advanced Mocking Techniques
+
+This guide presents best practices and advanced techniques for leveraging GoogleMock in complex testing scenarios. It focuses on mastering composite matchers, sequencing expectations, customizing mock behaviors with rich actions, and controlling call cardinalities effectively. Practical coding examples illustrate how to apply these concepts in real-world test cases to ensure reliable, maintainable, and expressive mocks.
+
+---
+
+## 1. Overview of Advanced Mocking Workflows
+
+### Objective
+— Help users create sophisticated mock behaviors addressing challenging testing needs such as validating interdependent arguments, orchestrating complex call orders, customizing responses dynamically, and enforcing precise call counts.
+
+### Prerequisites
+- Familiarity with GoogleMock basics as covered in the [Basic Mocking Guide](../guides/getting-started/mocking-basics.md).
+- Understanding of core macros: `MOCK_METHOD`, `EXPECT_CALL`, and `ON_CALL`.
+- Some experience with writing simple expectations and using standard matchers.
+
+### Outcomes
+Upon completing this guide, users will:
+- Confidently define composite matchers that evaluate multiple arguments as a whole.
+- Use sequences and partial order constructs to enforce call ordering.
+- Customize mock responses via rich action constructs, including lambdas and function objects.
+- Manage call expectations with precise cardinalities and retirement behaviors.
+
+### Time Commitment and Difficulty
+- Estimated Time: 30-45 minutes
+- Skill Level: Intermediate to Advanced
+
+---
+
+## 2. Composite Matchers: Validating Complex Argument Relationships
+
+### Why Composite Matchers?
+In scenarios where method arguments have logical dependencies (e.g., one parameter should be less than another, or multiple arguments collectively satisfy a condition), individual argument matching is insufficient.
+
+### How to Implement
+GoogleMock provides `.With()` clause and multi-argument matchers to match arguments as a group:
+
+```cpp
+using ::testing::_;
+using ::testing::Lt;
+
+EXPECT_CALL(my_mock, SetPosition(_, _))
+    .With(Lt());  // Expects first argument < second argument
+```
+
+You can compose multi-argument matchers using `AllOf()`, `AnyOf()`, or write custom matchers:
+
+```cpp
+EXPECT_CALL(foo, Configure(size, index))
+    .With(AllOf(Lt(), testing::Args<0, 1>(Gt())));
+```
+
+### Practical Example
+
+```cpp
+class MockCalculator {
+ public:
+  MOCK_METHOD(bool, SetRange, (int start, int end), (override));
+};
+
+TEST(CalculatorTest, RangeMustBeValid) {
+  MockCalculator calc;
+
+  EXPECT_CALL(calc, SetRange(_, _))
+      .With(Lt())                        // start < end
+      .WillOnce(Return(true));
+
+  EXPECT_TRUE(calc.SetRange(5, 10));
+  // Following call fails as 10 is not < 5
+  EXPECT_FALSE(calc.SetRange(10, 5));
+}
+```
+
+<Note>
+Using composite matchers ensures the logic enforced in your business rules is consistently tested beyond simple equality.
+</Note>
+
+---
+
+## 3. Sequencing Expectations: Controlling Call Order
+
+### Motivation
+To verify that mock methods are invoked in a specific order or partial order (e.g., init calls happen before processing, cleanup occurs last).
+
+### Using `InSequence`
+Wrap expectations inside an `InSequence` block to enforce strict call order:
+
+```cpp
+using ::testing::InSequence;
+
+{
+  InSequence s;
+
+  EXPECT_CALL(mock, Init()).Times(1);
+  EXPECT_CALL(mock, Process(_)).Times(3);
+  EXPECT_CALL(mock, Cleanup()).Times(1);
+}
+```
+
+This requires `Init()` to precede the three `Process()` calls, which must occur before `Cleanup()`.
+
+### Using `Sequence` Objects for Partial Ordering
+
+Define sequences and assign expectations to them for complex DAG ordering:
+
+```cpp
+using ::testing::Sequence;
+Sequence s1, s2;
+
+EXPECT_CALL(mock, Step1()).InSequence(s1);
+EXPECT_CALL(mock, Step2()).InSequence(s1, s2);
+EXPECT_CALL(mock, Step3()).InSequence(s2);
+```
+
+This enforces that `Step1()` must be before `Step2()`, and `Step3()` after `Step2()`, but `Step1()` and `Step3()` are independent.
+
+### Using `.After()` Clause
+
+Create named expectations and specify order dependencies:
+
+```cpp
+Expectation e1 = EXPECT_CALL(mock, Initialize());
+Expectation e2 = EXPECT_CALL(mock, Start()).After(e1);
+EXPECT_CALL(mock, Finish()).After(e2);
+```
+
+### Tips
+- Avoid overly strict ordering if order is irrelevant to functionality.
+- Combine `InSequence` with `RetiresOnSaturation()` for multi-call expectations that should retire once saturated.
+
+<Warning>
+Improper order specification can lead to brittle tests that fail under harmless refactorings.
+</Warning>
+
+---
+
+## 4. Customizing Mock Behavior: Actions and Dynamic Responses
+
+### Using Built-in Actions
+- `Return(value)`, `ReturnRef(var)`, `ReturnPointee(ptr)` to specify return values.
+- `SetArgPointee<N>(value)` to change output parameters.
+- `DoAll()` to chain multiple sub-actions:
+
+```cpp
+EXPECT_CALL(mock, Mutate(_, _))
+    .WillOnce(DoAll(SetArgPointee<1>(5), Return(true)));
+```
+
+This sets the pointed-to value of the second argument to 5 and returns `true`.
+
+### Using Lambdas/Functors
+You can specify complex behavior with lambdas that can capture state:
+
+```cpp
+EXPECT_CALL(mock, Compute(_))
+    .WillRepeatedly([](int x) {
+      return x * 2;
+    });
+```
+
+### Delegating to Fakes or Real Objects
+Delegation allows using a real or fake implementation as fallback:
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, Calculate, (int), (override));
+  void DelegateToReal() {
+    ON_CALL(*this, Calculate).WillByDefault(
+        [this](int x) { return real_.Calculate(x); });
+  }
+ private:
+  Foo real_;
+};
+```
+
+### Tips & Pitfalls
+- Use `WillOnce()` for actions that should happen exactly once; use `WillRepeatedly()` for default behavior thereafter.
+- Avoid side effects in actions unless intended; remember `EXPECT_CALL` evaluates actions once at setup.
+
+<Note>
+Actions can be chained and combined for sophisticated mock method responses.
+</Note>
+
+---
+
+## 5. Controlling Call Cardinality and Retirement
+
+### Specifying Cardinality
+Use `.Times()` to control the expected call count:
+
+- `Times(Exactly(n))` or `Times(n)` - expect exactly n calls.
+- `Times(AtLeast(n))` - expect at least n calls.
+- `Times(AtMost(n))` - expect at most n calls.
+- `Times(AnyNumber())` - allow any number of calls, including zero.
+
+### Retiring Expectations
+By default, expectations are "sticky" — they remain active after being satisfied. Use `.RetiresOnSaturation()` to automatically retire an expectation once saturated:
+
+```cpp
+EXPECT_CALL(mock, Foo(42))
+    .Times(2)
+    .RetiresOnSaturation();
+```
+
+Once two calls with argument 42 occur, this expectation is retired and no longer matches calls.
+
+### Combining with Sequences
+Expectations in a sequence auto-retire as later ones become active. Use `.RetiresOnSaturation()` to control retirement for overlapping expectations.
+
+### Tips
+- Avoid unnecessary `.Times(AnyNumber())` if no verification is needed.
+- Use precise `Times()` to catch over- or under-calls promptly.
+
+<Warning>
+Overly broad cardinalities may mask unintended calls, reducing test effectiveness.
+</Warning>
+
+---
+
+## 6. Example: Bringing It All Together
+
+```cpp
+class MockProcessor {
+ public:
+  MOCK_METHOD(bool, Initialize, (), (override));
+  MOCK_METHOD(bool, Process, (int item_id, int priority), (override));
+  MOCK_METHOD(void, Cleanup, (), (override));
+};
+
+TEST(ProcessorFlow, ComplexInteractions) {
+  MockProcessor proc;
+  InSequence seq;
+
+  // Init must be called once
+  EXPECT_CALL(proc, Initialize())
+      .Times(1)
+      .WillOnce(::testing::Return(true));
+
+  // Process calls must occur in order, with item_id < priority
+  EXPECT_CALL(proc, Process(::testing::_, ::testing::_))
+      .With(::testing::Lt())  // item_id < priority
+      .Times(3)
+      .WillOnce(::testing::Return(true))
+      .WillOnce(::testing::Return(true))
+      .WillRepeatedly(::testing::Return(false));
+
+  // Cleanup after processing
+  EXPECT_CALL(proc, Cleanup())
+      .Times(1)
+      .RetiresOnSaturation();
+
+  EXPECT_TRUE(proc.Initialize());
+  EXPECT_TRUE(proc.Process(1, 2));
+  EXPECT_TRUE(proc.Process(2, 3));
+  EXPECT_FALSE(proc.Process(3, 2)); // item_id < priority violated
+  proc.Cleanup();
+}
+```
+
+This test ensures the processor flow happens in order, validates argument relations, controls call counts, and retires expectations properly.
+
+---
+
+## 7. Troubleshooting & Best Practices
+
+### Common Issues
+- **Unexpected Call Failures:** Check that your expectations cover all call variants or provide catch-all `EXPECT_CALL`s with `Times(AnyNumber())`.
+- **Uninteresting Call Warnings:** Use `NiceMock` or add explicit default expectations with `EXPECT_CALL(obj, Method).Times(AnyNumber())`.
+- **Ordering Failures:** Verify sequences and `.After()` clauses carefully; consider if strict ordering is necessary.
+- **Action Exhaustion:** Ensure `WillRepeatedly()` complements `WillOnce()`, or add more `WillOnce()` clauses.
+
+### Best Practices
+- Prefer `ON_CALL` for default behavior and `EXPECT_CALL` for validating calls.
+- Use composite matchers for argument dependencies to reduce fragile, over-specified matchers.
+- Employ sequences or partial ordering to express natural call dependencies.
+- Use `.RetiresOnSaturation()` to manage expectation lifecycle and avoid stickiness issues.
+- Combine actions in `DoAll()` when side effects and return values are needed.
+
+<Warning>
+Do not set expectations after the code under test has been exercised; behavior is undefined.
+</Warning>
+
+---
+
+## 8. Additional Resources
+
+- [GoogleMock Cookbook](../docs/gmock_cook_book.md): Recipes for using advanced gMock features.
+- [Mocking Reference](../docs/reference/mocking.md): Comprehensive reference for mocking macros and classes.
+- [Actions Reference](../docs/reference/actions.md): Details on built-in and custom actions.
+- [gMock Cheat Sheet](../docs/gmock_cheat_sheet.md): Quick syntax reference.
+- [Basic Mocking Guide](../guides/getting-started/mocking-basics.md): Starting point for new users.
+
+---
+
+Keep mastering these techniques to build resilient, expressive tests that verify complex behaviors without brittleness or excessive maintenance overhead.
+
+---
+
+### Response Diagram
+
+```mermaid
+flowchart TD
+  A[Start: Define Mock Class with MOCK_METHOD] --> B[Set Default Behavior with ON_CALL]
+  B --> C[Define Expectations with EXPECT_CALL]
+  C --> D{Set Composite Matchers?}
+  D -- Yes --> E[Use .With() for multi-arg or custom matchers]
+  D -- No --> F
+  E --> F[Specify Call Counts with .Times()]
+  F --> G{Control Call Order?}
+  G -- Yes --> H[Use InSequence or .After() to sequence expectations]
+  G -- No --> I
+  H --> I[Define Mock Behavior with Actions (e.g. Return, DoAll, Lambdas)]
+  I --> J[Exercise Code Under Test]
+  J --> K[Verify Expectations Met at Test End]
+  K --> L[End]
+
+  classDef decision fill:#f9f,stroke:#333,stroke-width:2px;
+  class D,G decision;
+```
