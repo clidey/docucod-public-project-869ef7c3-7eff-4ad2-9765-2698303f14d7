@@ -1,0 +1,227 @@
+---
+title: "Defining Custom Actions and Matchers"
+description: "Describes how users can write their own actions and matchers to increase the expressiveness of their tests. Explains the structure, macros, and utility headers used to support customization."
+---
+
+# Defining Custom Actions and Matchers
+
+GoogleTest's mocking framework (gMock) empowers you to extend its expressive power by writing your own **custom actions** and **custom matchers**. This page guides you through creating these custom components, explaining their purpose, structure, and available utilities.
+
+---
+
+## Why Create Custom Actions and Matchers?
+
+The built-in actions and matchers cover most common scenarios in mocking and argument verification. However, application-specific logic or complex argument matching often requires you to extend the library:
+
+- **Custom Actions** define the precise behavior a mock method should execute when invoked, such as complex side effects or calculated return values.
+- **Custom Matchers** enable fine-grained control over which arguments satisfy an expectation, validating intricate conditions on the values passed.
+
+Building your own actions and matchers makes your tests clearer, more maintainable, and tailored to your domain.
+
+---
+
+## Writing Custom Actions
+
+### What Is an Action?
+
+An action defines what happens when a mock method gets called and its associated expectation matches. Actions can return values, induce side effects, invoke callbacks, or even throw exceptions.
+
+### Approaches to Defining Custom Actions
+
+You can create actions in several ways:
+
+- **Lambda or Functor:** The simplest method is using a lambda or any callable compatible with the mocked method's signature.
+
+  ```cpp
+  MockFunction<int(int)> mock;
+  EXPECT_CALL(mock, Call).WillOnce([](int arg) { return arg * 7; });
+  EXPECT_EQ(mock.AsStdFunction()(2), 14);
+  ```
+
+- **Function Object with Operator():** Define a struct or class with a templated or regular `operator()` matching the method signature.
+
+  ```cpp
+  struct Multiplier {
+    template <typename T>
+    T operator()(T value) { return value * factor; }
+    int factor;
+  };
+
+  EXPECT_CALL(mock, Call).WillOnce(Multiplier{7});
+  ```
+
+- **`ACTION` Macros (Legacy):** Older macro-based actions that are still supported but discouraged for new code due to less clear errors and limited typing. Example:
+
+  ```cpp
+  ACTION(DoubleArg0) { return arg0 * 2; }
+  // Usage
+  EXPECT_CALL(mock, Call).WillOnce(DoubleArg0());
+  ```
+
+- **Implementing `ActionInterface`:** For full control and advanced custom actions, implement the `::testing::ActionInterface<F>` interface where `F` is the function type. This method suits polymorphic or reusable actions.
+
+- **Polymorphic Actions:** Use `MakePolymorphicAction()` helper to write actions usable with different mock function signatures. 
+
+### Parameterized Actions
+
+You can define parameterized actions using `ACTION_P`, `ACTION_P2`, ..., `ACTION_Pk` macros to accept user input when the action is created:
+
+```cpp
+ACTION_P(Add, n) { return arg0 + n; }
+...
+EXPECT_CALL(mock, Call).WillOnce(Add(5));
+```
+
+### Tips and Best Practices
+
+- Be mindful of the signature of the mock method when designing the action.
+- Actions executed via `WillOnce` can be move-only types with an `&&`-qualified operator().
+- Use `DoAll()` to combine multiple actions where only the last one's return value matters.
+- If your action changes arguments through pointers or references, ensure side effects and return values are handled properly.
+
+### Using Actions in Combinations
+
+- `IgnoreResult()` lets you convert an action returning a value into one returning `void`, helpful in `DoAll()` or void-returning mock methods.
+- `WithArg<N>()`, `WithArgs<N1,...,Nk>()`, and `WithoutArgs()` let you adapt argument lists passed to inner actions.
+- `Invoke`, `InvokeWithoutArgs`, and `InvokeArgument<N>` allow calling functions, methods, lambdas, or callbacks inside actions.
+
+### Composite Actions
+
+Built-in composite actions like `DoAll` allow you to sequence multiple actions in one expectation:
+
+```cpp
+EXPECT_CALL(foo, Bar(_))
+    .WillOnce(DoAll(SetArgPointee<0>(5), Return(true)));
+```
+
+---
+
+## Writing Custom Matchers
+
+### What Is a Matcher?
+
+Matchers determine whether a function argument satisfies an expectation. Custom matchers validate properties beyond simple equality or item presence.
+
+### Ways to Write Custom Matchers
+
+- **MATCHER Macros:** The simplest way to define matchers quickly.
+
+  ```cpp
+  MATCHER(IsDivisibleBy7, "") {
+    return (arg % 7) == 0;
+  }
+
+  EXPECT_CALL(foo, Bar(IsDivisibleBy7()));
+  ```
+
+  The macro provides access to `arg` (the argument), `arg_type`, and `negation`. You can also write custom descriptions and stream additional diagnostic information.
+
+- **Parameterized MATCHER_P Macros:** Create matchers with parameters.
+
+  ```cpp
+  MATCHER_P(HasAbsoluteValue, value, "") { return std::abs(arg) == value; }
+  ```
+
+- **Custom Matcher Classes:** For precise and reusable matchers, define a class with
+
+  - a typedef `using is_gtest_matcher = void;`
+  - `bool MatchAndExplain(const T& value, std::ostream* os) const` — returns match result and optionally adds explanation
+  - `void DescribeTo(std::ostream* os) const` — describe positive match
+  - `void DescribeNegationTo(std::ostream* os) const` — describe negative match
+
+  Then provide a factory function that returns `::testing::Matcher<T>`.
+
+- **Polymorphic Matcher Classes:** Implement template versions of `MatchAndExplain` to allow matching multiple types with the same matcher.
+
+### Example of a Custom Matcher Class
+
+```cpp
+class IsEvenMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  bool MatchAndExplain(int n, std::ostream*) const {
+    return n % 2 == 0;
+  }
+  void DescribeTo(std::ostream* os) const {
+    *os << "is an even number";
+  }
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "is an odd number";
+  }
+};
+
+::testing::Matcher<int> IsEven() {
+  return ::testing::Matcher<int>(new ::testing::internal::MatcherInterfaceImpl<int, IsEvenMatcher>(IsEvenMatcher()));
+}
+```
+
+### Tips for Writing Matchers
+
+- Matchers must be pure functions without side effects.
+- Use the `result_listener` (or an ostream) in `MatchAndExplain` to provide detailed failure messages.
+- For multiple parameters, use `MATCHER_Pk` macros.
+- Always provide meaningful `DescribeTo` and `DescribeNegationTo` messaging.
+
+---
+
+## Utility Headers and Macros
+
+To assist your custom definitions, gMock provides utility macros and header files:
+
+- `<gmock/gmock-actions.h>` contains built-in actions and macros for defining new actions.
+- `<gmock/gmock-matchers.h>` contains built-in matchers and macros like `MATCHER`, `MATCHER_P`, `MATCHER_Pk`.
+- Common utilities for argument handling and composing matchers and actions.
+
+Using these with the `::testing` namespace simplifies your code.
+
+---
+
+## Practical Example: Custom Action
+
+```cpp
+ACTION_P(AddToArg0, n) {
+  return arg0 + n;
+}
+
+// Usage in test:
+EXPECT_CALL(mock, Foo(5))
+    .WillOnce(AddToArg0(10));  // When Foo(5) called, returns 5 + 10 = 15
+```
+
+## Practical Example: Custom Matcher
+
+```cpp
+MATCHER_P(IsSumOfBarAndBaz, expected, "") {
+  return (arg.bar() + arg.baz()) == expected;
+}
+
+// Usage:
+EXPECT_CALL(mock, ProcessFoo(IsSumOfBarAndBaz(10)));
+```
+
+This matcher checks that the argument's `bar()` plus `baz()` equals 10.
+
+---
+
+## Common Pitfalls and Troubleshooting
+
+- **Defining actions inside functions or classes:** The legacy `ACTION` macros must NOT be defined inside functions or classes. Instead, define outside of any scope.
+- **Matcher purity:** Ensure your matchers never invoke mock functions or rely on mutable global state.
+- **Action side effects:** Avoid capturing pointers or references that may become invalid by the time the action executes.
+- **Parameter types in macros:** For complex types with commas (e.g., `std::pair<int, int>`), wrap with extra parentheses.
+- **Sharing state:** If an action or matcher maintains internal state, be aware that sharing instances affects all uses.
+
+---
+
+## Related Documentation
+
+- [Actions Reference](../reference/actions.md): Complete list of built-in actions.
+- [Matchers Reference](../reference/matchers.md): Details on built-in and custom matchers.
+- [gMock Cookbook](../gmock_cook_book.md): Recipes and extended examples on custom actions and matchers.
+- [gMock for Dummies](../gmock_for_dummies.md): Beginner-friendly introduction to mocking.
+- [Mocking Reference](../reference/mocking.md): Overview of mock-related macros and classes.
+
+---
+
+Explore these to deepen your mastery of extending GoogleTest with custom behaviors tailored to your unique testing scenarios.

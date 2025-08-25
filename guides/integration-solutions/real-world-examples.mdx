@@ -1,0 +1,279 @@
+---
+title: "Real-World Testing Scenarios and Solutions"
+description: "Showcases of typical and challenging scenarios—including legacy code testing, working with system dependencies, and multi-module testing—with actionable recipes applicable to most C++ projects."
+---
+
+# Real-World Testing Scenarios and Solutions
+
+This guide showcases typical and challenging testing scenarios encountered in C++ projects using GoogleTest and GoogleMock. It provides practical recipes and best practices to help you effectively test legacy code, manage dependencies, and coordinate multi-module testing.
+
+---
+
+## 1. Workflow Overview
+
+### Purpose
+This page equips you with actionable strategies to tackle common complex testing challenges beyond introductory examples, ensuring robust and maintainable test suites in real projects.
+
+### Prerequisites
+- A working GoogleTest/GoogleMock setup with your C++ project.
+- Basic knowledge of writing and running tests as outlined in [Writing and Running Unit Tests](../core-workflows/writing-tests).
+- Familiarity with mocks from [Using Mocks for Dependency Isolation](../core-workflows/using-mocks).
+
+### What You’ll Achieve
+- Learn how to approach testing legacy, tightly coupled code
+- Manage tests with external or system dependencies safely
+- Orchestrate tests spanning multiple modules or libraries
+
+### Time Commitment
+Approximately 30–45 minutes to read through the examples, try the recipes, and adapt to your codebase.
+
+### Difficulty Level
+Intermediate to Advanced
+
+---
+
+## 2. Step-by-Step: Key Scenarios and Solutions
+
+The following scenarios reflect common complex situations that arise when testing mature or sizeable C++ projects. Each solution is immediately actionable using GoogleTest and GoogleMock.
+
+### Scenario 1: Testing Legacy Code with Minimal Intrusion
+
+Legacy code often:
+- Has classes without interfaces or virtual methods
+- Is tightly coupled
+- Lacks test seams
+
+**Approach:** Use partial mocks and delegation to real objects or introduce thin interface adaptors.
+
+<Steps>
+<Step title="Define a Mock Class with Delegation to Real Code">
+Create a mock subclass overriding virtual methods (or mock non-virtual via templates) but delegate calls to the real implementation.
+
+Example:
+```cpp
+class LegacyFoo {
+public:
+  virtual int Compute(int x) {
+    // Complex legacy logic
+    return x * 42;
+  }
+};
+
+class MockLegacyFoo : public LegacyFoo {
+public:
+  MOCK_METHOD(int, Compute, (int x), (override));
+
+  MockLegacyFoo() {
+    ON_CALL(*this, Compute).WillByDefault([this](int x) {
+      return LegacyFoo::Compute(x); // delegate to real
+    });
+  }
+};
+```
+</Step>
+<Step title="Set Expectations with Delegation">
+Set expectations or default actions as needed, while calls still use the real implementation by default.
+
+```cpp
+MockLegacyFoo mock;
+EXPECT_CALL(mock, Compute(5)).Times(1);
+EXPECT_EQ(mock.Compute(5), 210);
+```
+
+This allows incrementally adding tests without rewriting legacy code.
+</Step>
+</Steps>
+
+### Scenario 2: Handling Tests That Depend on External Systems or Resources
+
+Tests often rely on databases, file systems, or services which are not practical or reliable for unit testing.
+
+**Solution:** Mock system-dependent interfaces.
+
+<Steps>
+<Step title="Extract Abstract Interfaces for Dependencies">
+Define interfaces abstracting system dependencies.
+```cpp
+class FileSystem {
+public:
+  virtual bool Exists(const std::string& path) = 0;
+  virtual std::string ReadFile(const std::string& path) = 0;
+  virtual ~FileSystem() {}
+};
+```
+</Step>
+<Step title="Create Mock Implementations Using GoogleMock">
+```cpp
+class MockFileSystem : public FileSystem {
+public:
+  MOCK_METHOD(bool, Exists, (const std::string& path), (override));
+  MOCK_METHOD(std::string, ReadFile, (const std::string& path), (override));
+};
+```
+</Step>
+<Step title="Use the Mocks in Tests">
+Configure expected calls:
+```cpp
+MockFileSystem mock_fs;
+EXPECT_CALL(mock_fs, Exists("config.txt")).WillOnce(Return(true));
+EXPECT_CALL(mock_fs, ReadFile("config.txt")).WillOnce(Return("data..."));
+
+MyComponent component(&mock_fs);
+auto config = component.LoadConfig("config.txt");
+EXPECT_EQ(config, "data...");
+```
+This isolates your logic from actual file operations.
+</Step>
+</Steps>
+
+### Scenario 3: Multi-Module or Shared Resource Testing
+
+When tests involve multiple modules, coordinating test dependencies and setups is challenging.
+
+**Approach:** Use sequences and explicit ordering of mock expectations.
+
+<Steps>
+<Step title="Define Sequence Objects to Control Call Order">
+```cpp
+using ::testing::Sequence;
+
+Sequence major_seq, minor_seq;
+```
+</Step>
+<Step title="Assign Expectations to Sequences">
+```cpp
+EXPECT_CALL(moduleA_mock, Init())
+  .InSequence(major_seq, minor_seq);
+EXPECT_CALL(moduleB_mock, Start())
+  .InSequence(major_seq);
+EXPECT_CALL(moduleA_mock, Cleanup())
+  .InSequence(minor_seq);
+```
+</Step>
+<Step title="Exercise the Code and Verify Sequence Enforcement">
+Calling these in incorrect order will cause test failures, for example:
+```cpp
+moduleB_mock.Start();  // Error if called before moduleA_mock.Init()
+moduleA_mock.Init();
+moduleA_mock.Cleanup();
+```
+</Step>
+</Steps>
+
+<Note>
+Sequences allow you to specify arbitrary partial orders, avoiding brittle test ordering while enforcing necessary constraints.
+</Note>
+
+---
+
+## 3. Examples & Recipes
+
+### 3.1 Partial Mocking with Delegation to Real Objects
+```cpp
+class Service {
+public:
+  virtual bool DoWork(int val) { return val > 0; }
+};
+
+class MockService : public Service {
+public:
+  MOCK_METHOD(bool, DoWork, (int val), (override));
+
+  MockService() {
+    ON_CALL(*this, DoWork).WillByDefault([this](int val) {
+      return Service::DoWork(val);
+    });
+  }
+};
+
+TEST(ServiceTest, DelegatesCalls) {
+  MockService mock;
+  EXPECT_CALL(mock, DoWork(10));
+  EXPECT_TRUE(mock.DoWork(10));
+  EXPECT_TRUE(mock.DoWork(20));  // Uses default delegate
+}
+```
+
+### 3.2 Using `StrictMock` to Fail on Unexpected Calls
+
+Use `StrictMock` when you want tests to fail if any unplanned mock calls occur.
+
+```cpp
+using ::testing::StrictMock;
+
+StrictMock<MockService> strict_mock;
+EXPECT_CALL(strict_mock, DoWork(5));
+
+strict_mock.DoWork(5);      // Allowed
+strict_mock.DoWork(10);     // Test fails - unexpected call
+```
+
+### 3.3 Coordinating Calls Across Multiple Mocks with `Sequence`
+```cpp
+using ::testing::Sequence;
+
+Sequence seq;
+
+EXPECT_CALL(mockA, Initialize()).InSequence(seq);
+EXPECT_CALL(mockB, Process()).InSequence(seq);
+
+mockA.Initialize();
+mockB.Process();
+```
+
+Calling `mockB.Process()` before `mockA.Initialize()` will cause failure.
+
+---
+
+## 4. Troubleshooting & Tips
+
+### Common Issues
+
+- **Uninteresting Call Warnings:** Occur when mock methods are called without an `EXPECT_CALL`. Use `NiceMock` to suppress these warnings or add appropriate expectations.
+- **Unexpected Calls:** Occur when calls don't match any expectation. Review argument matchers and call sequences.
+- **Sequencing Errors:** Verify `Sequence` and `InSequence` declarations match the actual call order.
+
+### Best Practices
+
+- Prefer `ON_CALL` for default behaviors and `EXPECT_CALL` only when you want to assert calls.
+- Use `RetiresOnSaturation()` to avoid sticky expectations causing unexpected call errors.
+- Structure mocks and expectations to minimize brittleness—avoid over-specification.
+- For legacy code, consider delegation techniques rather than intrusive rewriting.
+
+### Performance Considerations
+
+- Extract mock class definitions into separate source files to reduce compile times.
+- Limit use of strict mocks to critical areas to avoid brittle tests.
+
+### Alternative Approaches
+
+- Consider introducing interfaces if legacy code lacks virtual methods.
+- For external dependencies that are hard to mock, consider using fakes or test doubles instead of mocks.
+
+---
+
+## 5. Next Steps & Related Content
+
+- Proceed to [Best Practices for Large and Scalable Test Suites](../advanced-patterns/scaling-best-practices) to manage complex test suites.
+- Explore [Integrating with Bazel and CMake](../integration-solutions/build-integration) for build system integration strategies.
+- Reference [Strict, Nice, and Naggy Mocks](../advanced-patterns/mock-strictness) to deepen understanding of mock behaviors.
+- Review [Writing and Running Unit Tests](../core-workflows/writing-tests) for foundational concepts.
+
+---
+
+## References
+
+- [GoogleTest Mocking Reference](../../api-reference/mocking-framework-apis/mocking-basics-api)
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html)
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html)
+- [Using Mocks for Dependency Isolation](../core-workflows/using-mocks)
+
+---
+
+<Tip>
+For legacy and complex system dependencies, combining the delegation pattern with simple interface adaptions leads to maintainable and effective tests.
+</Tip>
+
+<Note>
+Remember to always set your expectations before exercising the system under test to prevent undefined behaviors.
+</Note>
