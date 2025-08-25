@@ -1,0 +1,222 @@
+---
+title: "Test Design and Maintenance"
+description: "Recommendations for structuring test code and mocks for maximum clarity, flexibility, and maintainability—including strategies for effective use of parameterized and type-parameterized tests."
+---
+
+# Test Design and Maintenance
+
+This guide offers concrete recommendations to help you structure your GoogleTest and GoogleMock test code and mocks for maximum clarity, flexibility, and maintainability. Whether you are authoring simple unit tests or intricate interaction-based tests, following these guidelines will ensure your tests remain understandable, robust, and easy to evolve.
+
+---
+
+## 1. Organizing Test Code
+
+### Use Test Suites and Fixtures to Group Related Tests
+
+GoogleTest encourages grouping tests into *test suites* that logically represent related functionality. When multiple tests share the same initialization or cleanup logic, define a **test fixture class** derived from `testing::Test`.
+
+This helps avoid duplication and clearly communicates the test context.
+
+```cpp
+class MyComponentTest : public testing::Test {
+ protected:
+  void SetUp() override {
+    // Common setup for all tests in this suite
+  }
+
+  void TearDown() override {
+    // Common cleanup
+  }
+
+  // Shared objects
+  MyComponent component_;
+};
+
+TEST_F(MyComponentTest, HandlesZeroInput) {
+  EXPECT_EQ(component_.Process(0), expected_result);
+}
+
+TEST_F(MyComponentTest, HandlesPositiveInput) {
+  EXPECT_GT(component_.Process(42), 0);
+}
+```
+
+### Name Tests to Clearly Describe Intent
+
+Choose descriptive test names that convey:
+
+- What is being tested
+- Under what condition
+- What the expected outcome is
+
+This makes the test output more readable and aids in diagnosis when failures occur.
+
+```cpp
+TEST_F(MyComponentTest, ReturnsErrorWhenInputIsNegative);
+```
+
+### Keep Tests Focused and Small
+
+Each test should verify a single behavior or scenario. Avoid mixing multiple validations in one test; instead, split complex verifications into separate tests.
+
+This promotes better failure localization and clarity.
+
+---
+
+## 2. Writing and Organizing Mocks
+
+### Define Mock Classes Clearly and Close to the Tested Interface
+
+Mocks are typically defined by inheriting from the interface or abstract class you want to mock, using `MOCK_METHOD` macros to declare mocked methods.
+
+For example:
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, GetSize, (), (const, override));
+  MOCK_METHOD(std::string, Describe, (int type), (override));
+};
+```
+
+Place mocks in dedicated headers alongside the interface or in a common testing folder. This ensures that team members can find mock definitions easily and maintain them separately from production code.
+
+### Use NiceMock or StrictMock Appropriately
+
+Managing uninteresting calls via mock strictness modes helps reduce noise or enforce strict call validation:
+
+- **NiceMock** suppresses warnings on uninteresting calls.
+- **StrictMock** treats them as failures.
+
+Choose a strictness mode that aligns with your test goals:
+
+```cpp
+NiceMock<MockFoo> nice_foo;  // Less noisy
+StrictMock<MockFoo> strict_foo;  // Enforce exact expectations
+```
+
+### Use ON_CALL for Default Behavior
+
+Set default mock method behaviors with `ON_CALL`, which does not enforce call expectations but defines how calls behave when they occur.
+
+Reserve `EXPECT_CALL` for actual verification that calls happen as expected.
+
+```cpp
+ON_CALL(mock_foo, GetSize()).WillByDefault(Return(5));
+EXPECT_CALL(mock_foo, Describe(42)).Times(1);
+```
+
+### Delegate to Fake or Real Objects When Logical
+
+If a complex fake or partial real implementation exists, delegate mock behavior to it to avoid duplicating logic, improving test reliability and reducing maintenance.
+
+```cpp
+class MockFoo : public Foo {
+  MOCK_METHOD(...);
+  void DelegateToFake() {
+    ON_CALL(*this, DoSomething()).WillByDefault([this]() {
+      return fake_.DoSomething();
+    });
+  }
+ private:
+  FakeFoo fake_;
+};
+```
+
+---
+
+## 3. Maximizing Test Coverage via Parameterized Tests
+
+### Use Parameterized Tests to Cover Multiple Input Scenarios Compactly
+
+GoogleTest supports **value-parameterized tests** and **type-parameterized tests** to reduce duplication and improve coverage with minimal boilerplate.
+
+```cpp
+// Value-parameterized test
+class MyTest : public testing::TestWithParam<int> {};
+
+TEST_P(MyTest, HandlesValues) {
+  int param = GetParam();
+  EXPECT_TRUE(component_.Process(param) >= 0);
+}
+
+INSTANTIATE_TEST_SUITE_P(PositiveInts, MyTest, testing::Values(1, 2, 3, 42));
+```
+
+Use these techniques to cover edge cases, boundary inputs, and type variants without writing separate test functions.
+
+### Prefer Parameterized Tests Over Manual Loops
+
+Writing explicit loops inside a test adds complexity and reduces the visibility of individual test failures. Parameterized tests make it easy to isolate failing values.
+
+---
+
+## 4. Managing Test Dependencies and Interactions
+
+### Set Expectations Before Exercising the Code
+
+gMock requires that all `EXPECT_CALL` expectations be specified before the mock object is passed to the code under test or exercised. Setting expectations after the fact leads to undefined behavior.
+
+### Use Sequences or After() for Ordering Expectations
+
+If certain calls must happen in order, use `InSequence` or `After` to specify call order explicitly, avoiding brittle tests that fail for call reordering.
+
+```cpp
+{
+  testing::InSequence s;
+  EXPECT_CALL(mock, Initialize());
+  EXPECT_CALL(mock, DoWork());
+  EXPECT_CALL(mock, Cleanup());
+}
+```
+
+---
+
+## 5. Best Practices and Common Pitfalls
+
+### Avoid Over-Specification
+
+Only set expectations on interactions important for verifying the behavior under test. Avoid excessive or irrelevant `EXPECT_CALL`s as they hinder refactoring and make tests brittle.
+
+### Use `.RetiresOnSaturation()` for Non-Sticky Expectations
+
+By default, expectations remain active even after the expected number of calls. Mark expectations with `.RetiresOnSaturation()` if they should become inactive once satisfied to prevent upper-bound violations in multi-call scenarios.
+
+### Be Careful with Mock Object Lifetimes
+
+Ensure mocks are destroyed properly so GoogleMock verifies expectations on destruction. Use `Mock::AllowLeak()` cautiously if mock lifetime extends beyond test scope.
+
+### Leverage Custom Matchers and Actions
+
+For complex argument validation or mock behavior, define custom matchers and actions for more expressive and maintainable tests.
+
+---
+
+## 6. Troubleshooting Test Design Issues
+
+### Common Errors
+
+- **Expectations set after the call:** Always set `EXPECT_CALL`s before exercising tested code.
+- **Uninteresting calls warnings:** Use `NiceMock` or explicitly allow unexpected calls with `EXPECT_CALL(...).Times(AnyNumber())`.
+- **Upper bound violated failures:** Ensure `.RetiresOnSaturation()` is used when multiple calls occur to an expectation.
+- **Ordering violations:** Use sequences or `.After()` to express call order dependencies.
+
+### Debugging Tips
+
+- Enable verbose logging with `--gmock_verbose=info` to trace expectation matches and mock calls.
+- Use descriptive test names and isolated tests to localize issues.
+
+---
+
+## 7. References and Next Steps
+
+- [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html): Quick reference to define mocks, set expectations, and use matchers/actions.
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html): Practical recipes and advanced mocking techniques.
+- [Writing Your First Unit Test](../guides/getting-started/first-unit-test.md): Learn to write effective tests with GoogleTest.
+- [Mocking Best Practices](../guides/essential-testing-patterns/mocking-best-practices.md): Strategies for writing maintainable mocks and expectations.
+
+For integration tips, see the [Project Setup & Integration Guide](../guides/getting-started/project-setup.md) and ensure your test suites comply with platform support requirements.
+
+---
+
+Following these guidelines will ensure a solid foundation in structuring and maintaining your tests, harnessing GoogleTest and GoogleMock to their full potential for high-quality C++ software development.
