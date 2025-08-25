@@ -1,0 +1,199 @@
+---
+title: "Platform Portability and Configuration Flags"
+description: "Profiles flags, macros, and configuration settings for multi-platform support, including compiler/version detection and conditional builds. Covers best practices for portable test code."
+---
+
+# Platform Portability and Configuration Flags
+
+GoogleTest and GoogleMock are designed to work seamlessly across a variety of platforms, compilers, and environments. This page delves into the mechanisms—primarily through macros, configuration flags, and compiler/version detection—that enable portable test code. By understanding these elements, users can effectively write and maintain tests that reliably run in diverse conditions.
+
+---
+
+## Platform and Compiler Detection
+
+GoogleTest's portability hinges on robust platform identification and compiler feature detection. This is primarily handled in the internal header `gtest-port-arch.h`, which defines macros identifying target operating systems.
+
+### Recognized Platforms and Macros
+
+GoogleTest automatically defines `GTEST_OS_*` macros corresponding to many platforms including but not limited to:
+
+- Windows (with variants for Desktop, Mobile, Phone, RT, etc.)
+- Linux (including Android variants)
+- Mac OS X and iOS
+- Various BSDs (FreeBSD, OpenBSD, NetBSD)
+- Solaris, AIX, HP-UX
+- Fuchsia, NaCl, QNX
+- Embedded platforms such as ESP8266, ESP32, and Xtensa
+
+These macros allow test code and GoogleTest internals to conditionally compile platform-specific logic.
+
+### Compiler Version Checks
+
+Certain compilers require minimal versions or specific features to function correctly:
+
+- Microsoft Visual C++ must be version 2015 (Visual Studio 14.0) or later to support GoogleMock compilation.
+- GoogleTest asserts C++17 compliance (`GTEST_INTERNAL_CPLUSPLUS_LANG >= 201703L`) as a minimum.
+
+Developers who need to override automatic detection—for example, to disable pthreads support or signal that exceptions are unavailable—can define macros like `GTEST_HAS_PTHREAD` or `GTEST_HAS_EXCEPTIONS` explicitly.
+
+---
+
+## Feature-Detecting and Configuring Flags
+
+A key design goal is to enable conditional compilation and runtime configuration tuned to the platform's capabilities.
+
+### Environment Feature Macros
+
+GoogleTest defines several user-tweakable macros (defaulting to 1 or 0) that indicate the presence of features:
+
+- `GTEST_HAS_EXCEPTIONS` — Indicates if exception handling is enabled.
+- `GTEST_HAS_PTHREAD` — Indicates if POSIX threads are available.
+- `GTEST_HAS_POSIX_RE` — Indicates if POSIX regular expressions are supported.
+- `GTEST_HAS_RTTI` — Indicates if runtime type information is enabled.
+- `GTEST_HAS_FILE_SYSTEM` — Indicates if a file system is available.
+- `GTEST_HAS_DEATH_TEST` — Indicates support for death tests (process termination testing).
+- `GTEST_IS_THREADSAFE` — Indicates if GoogleTest supports thread-safe operations.
+
+These macros govern which internal implementations are used and enable users to guard test code with preprocessor checks for portability.
+
+### Synchronization and Threading
+
+Where thread safety is supported (`GTEST_IS_THREADSAFE` is defined), GoogleTest provides portable abstractions:
+
+- Mutexes (`Mutex`) and scoped locks (`MutexLock` / `GTestMutexLock`), implemented with Windows critical sections, pthreads, or dummy no-ops depending on platform.
+- Thread-local storage wrappers (`ThreadLocal<T>`), with specialization for Windows and pthreads.
+
+For environments without threading support, dummy synchronization primitives are defined, allowing compilation but no concurrent safety.
+
+### Stream Redirection and File System Support
+
+To facilitate death test assertions and output capture, GoogleTest determines at compile-time if stream redirection is available (`GTEST_HAS_STREAM_REDIRECTION`). This is generally supported except on embedded or mobile platforms.
+
+File system utilities are wrapped in the `posix` namespace within `gtest-port.h`, normalizing platform-specific differences for functions like `stat()`, `rm_dir()`, or `isatty()`.
+
+---
+
+## GoogleMock-Specific Portability Considerations
+
+GoogleMock augments GoogleTest's infrastructure with its own portability layer defined primarily in `gmock-port.h`.
+
+### Compiler Requirements
+
+- GoogleMock requires at least MSVC 2015 (MSVC version macro `_MSC_VER >= 1900`). Compiling with older versions triggers a preprocessor error.
+
+### Flag Definitions and Usage
+
+GoogleMock defines flags with a macro interface designed to align with the underlying flags library, favoring Abseil flags where integrated;
+
+- Macros such as `GMOCK_DEFINE_bool_()`, `GMOCK_DECLARE_int32_()`, and `GMOCK_FLAG_GET()` allow users and the framework itself to define and query flag values consistently.
+
+- Abseil's flag system is used if available, otherwise falling back to manually defined boolean, int32, and string flags.
+
+- The primary flag syntax for code use is via `GMOCK_FLAG(name)`, enabling users to read or modify flags like `verbose`, `catch_leaked_mocks`, and others.
+
+### Flag Initialization
+
+GoogleMock supports command-line flag parsing through `InitGoogleMock()`, which:
+
+- Processes `argc` and `argv` to extract and remove recognized `--gmock_*` flags.
+- Updates corresponding internal flag values accordingly.
+- Supports both narrow and wide character strings (`char**` and `wchar_t**`), as well as a no-argument initialization mode for embedded platforms.
+
+This mechanism ensures flags are set before test execution, allowing conditional behavior such as verbose logging.
+
+---
+
+## Writing Portable Test Code: Best Practices
+
+To create tests that run reliably on multiple platforms and configurations, adhere to the following guidelines:
+
+1. **Use GoogleTest/GoogleMock Provided Macros and Flags:**
+   
+   Always leverage feature macros like `GTEST_HAS_EXCEPTIONS` or `GTEST_HAS_PTHREAD` to conditionally enable platform-specific code.
+
+2. **Avoid Using Internal Macros Directly Unless Necessary:**
+
+   Macros ending with an underscore or internal namespace symbols are unstable and subject to change. Use only the public API macros and flags.
+
+3. **Embrace Thread-Safe Guards:**
+
+   Guard multi-threaded test code with `#if GTEST_IS_THREADSAFE` checks to maintain compatibility with platforms lacking threading support.
+
+4. **Respect Compiler Version Requirements:**
+
+   If targeting MSVC, ensure minimum version requirements are met; otherwise, test compilation will fail early.
+
+5. **Reference Flags with Provided Macros:**
+
+   Use `GMOCK_FLAG(name)` or `GTEST_FLAG(name)` to interact with configuration flags instead of direct variable access.
+
+6. **Test on Target Platforms if Possible:**
+
+   Given the complexity of OS and compiler behaviors, regularly validate tests on the intended platforms.
+
+7. **Use the Portable POSIX Wrappers for File System Operations:**
+
+   Use functions from the `posix` namespace in `gtest-port.h` for file system interactions to avoid platform-specific pitfalls.
+
+---
+
+## Practical Example: Checking a Flag and Conditional Compilation
+
+```cpp
+#include <gmock/gmock.h>
+
+int main(int argc, char** argv) {
+  testing::InitGoogleMock(&argc, argv);
+
+  if (GMOCK_FLAG_GET(verbose) == "info") {
+    // Enable detailed logging for this run.
+  }
+
+#if GTEST_HAS_PTHREAD
+  // Execute multi-threaded tests or synchronize threads.
+#else
+  // Fall back to single-threaded logic.
+#endif
+
+  return RUN_ALL_TESTS();
+}
+```
+
+This example demonstrates how to initialize GoogleMock, read a flag's value, and compile conditionally based on platform threading support.
+
+---
+
+## Troubleshooting Port Issues
+
+- **Compilation Fails Due to Compiler Version:**
+  Ensure your compiler meets the minimum version requirements. For MSVC, verify it is 2015 or later.
+
+- **Flags Not Recognized at Runtime:**
+  Confirm that `InitGoogleMock()` is called early in `main()` with proper `argc` and `argv`.
+
+- **Threading-Related Test Failures on Unsupported Platforms:**
+  Make sure threading-enabled code is guarded with `#if GTEST_IS_THREADSAFE`.
+
+- **Unexpected Behavior on Embedded or Minimal-Environment Platforms:**
+  Some features like environment variables or stream redirection may be unavailable. Adjust tests or disable features accordingly.
+
+---
+
+## References and Related Documentation
+
+- [GoogleTest Prerequisites & Supported Platforms](../../getting_started/setup_requirements/prerequisites_platforms) — Detailed listing of supported OS, compilers, and C++ standards.
+- [Initialization and Main Entry Point](../configuration-runtime/initialization-main) — Learn how to properly initialize GoogleTest and GoogleMock, and set up your test executable.
+- [Customizing Flags](googlemock/include/gmock/internal/custom/README.md) — How to declare and define custom GoogleMock flags.
+- [GoogleTest Portability Header](googletest/include/gtest/internal/gtest-port.h) — Core of platform detection and utility macros.
+- [GoogleMock Portability Header](googlemock/include/gmock/internal/gmock-port.h) — GoogleMock-specific portability and flag definitions.
+
+---
+
+## Exploring Further
+
+For comprehensive understanding of how this portability layer integrates with test writing and mocking workflows, consider visiting:
+- [Writing and Organizing Tests](../core-testing-apis/writing-tests)
+- [Defining and Using Mocks](../mocking-apis/defining-mocks)
+- [Integrations and Tools](../../overview/integration-and-ecosystem/integrations-and-tools)
+
+By grounding tests in these portability foundations, users ensure that their test suites are robust, maintainable, and effective across diverse environments.
