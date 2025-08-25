@@ -1,0 +1,297 @@
+---
+title: "Advanced Mocking & Test Patterns"
+description: "Answers advanced questions about using GoogleMock, such as defining custom matchers, using strict/nice mocks, handling legacy code, and writing expressive test expectations."
+---
+
+# Advanced Mocking & Test Patterns
+
+This page answers advanced questions about using GoogleMock, including defining custom matchers, controlling mock strictness modes, handling legacy code patterns, and writing expressive test expectations. It targets power-users who want to leverage the full capabilities of GoogleMock for complex and maintainable mocking.
+
+---
+
+## Table of Contents
+1. [Custom Matchers and Actions](#custom-matchers-and-actions)
+2. [Strict, Nice, and Naggy Mocks](#strict-nice-and-naggy-mocks)
+3. [Understanding EXPECT_CALL and ON_CALL Syntax](#understanding-expect_call-and-on_call-syntax)
+4. [Ordering Calls and Partial Ordering](#ordering-calls-and-partial-ordering)
+5. [Handling Move-only and Legacy Code](#handling-move-only-and-legacy-code)
+6. [Verifying and Resetting Mocks](#verifying-and-resetting-mocks)
+7. [Common Pitfalls and Best Practices](#common-pitfalls-and-best-practices)
+
+---
+
+## Custom Matchers and Actions
+
+GoogleMock enables defining finely-grained custom matchers and actions to express domain-specific verification and behaviors with clarity and reuse.
+
+### Defining Custom Matchers
+
+- Use the `MATCHER` and `MATCHER_P` family of macros for quick matcher definitions.
+- For advanced control, implement a matcher class with the required interface (`MatchAndExplain`, `DescribeTo`, and `DescribeNegationTo`).
+
+Example:
+```cpp
+// Matcher checking that argument is divisible by 7.
+MATCHER(IsDivisibleBy7, "") { return (arg % 7) == 0; }
+EXPECT_CALL(mock_object, Method(IsDivisibleBy7()));
+```
+
+### Using Polymorphic Matchers
+
+- Define `MatchAndExplain` as a template method to handle multiple types.
+- Use `MakePolymorphicMatcher()` to create polymorphic matcher factories.
+
+### Writing Custom Actions
+
+- Implement a class with a callable `operator()` matching the mock method signature.
+- Use lambdas or functors with `WillOnce()` or `WillRepeatedly()`.
+- For polymorphic actions usable in multiple contexts, define `Perform<R>(args)` template method and wrap with `MakePolymorphicAction()`.
+
+Example:
+```cpp
+EXPECT_CALL(mock, Foo(_))
+    .WillOnce([](int x) { return x * 7; });
+```
+
+### Practical Tips
+
+- Do not use matchers with side effects; they must be pure functions.
+- Use `SafeMatcherCast<T>()` to safely cast matchers when needed.
+
+---
+
+## Strict, Nice, and Naggy Mocks
+
+GoogleMock offers three modes to control handling of uninteresting calls (calls with no explicit expectations):
+
+| Mode       | Behavior on uninteresting calls                | Use Case                                                                     |
+|------------|------------------------------------------------|------------------------------------------------------------------------------|
+| **NiceMock**  | Suppresses warnings on uninteresting calls     | Use when you want cleaner logs and are not concerned about unexpected calls.  |
+| **NaggyMock** | Prints warnings on uninteresting calls          | Default mock behavior; alerts when calls happen without expectations.         |
+| **StrictMock**| Fails tests on uninteresting calls              | Use to catch stray or unexpected calls strictly as errors.                    |
+
+### Usage
+
+Construct these by wrapping your mock class:
+```cpp
+NiceMock<MockFoo> nice_mock;
+NaggyMock<MockFoo> naggy_mock;
+StrictMock<MockFoo> strict_mock;
+```
+
+They inherit constructors, so you can pass arguments as usual.
+
+### Important Considerations
+
+- Only affects methods defined directly in the mock class (not inherited mocks).
+- The mock class should have a virtual destructor for expected behavior.
+- Strictness levels do **not** affect unexpected calls (calls matching no expectation).
+
+---
+
+## Understanding EXPECT_CALL and ON_CALL Syntax
+
+These macros specify expectations and default behaviors on mock methods.
+
+### EXPECT_CALL
+
+Sets both an expectation and a behavior.
+
+Syntax example:
+```cpp
+EXPECT_CALL(mock, Method(matchers))
+    .With(multi_argument_matcher)  // Optional, at most once
+    .Times(cardinality)            // Optional, at most once
+    .InSequence(sequences...)      // Any number
+    .After(expectations...)        // Any number
+    .WillOnce(action)              // Any number
+    .WillRepeatedly(action)        // At most once
+    .RetiresOnSaturation();        // At most once
+```
+
+Clarifications:
+- `.With()` must be the first clause if used.
+- Cardinality controls how many times the call is expected.
+- Ordering clauses (`.InSequence()`, `.After()`) control call order.
+- Actions specify the behavior on invocation.
+- `.RetiresOnSaturation()` causes the expectation to become inactive after usage.
+
+### ON_CALL
+
+Defines default behavior but sets no expectation.
+
+Syntax example:
+```cpp
+ON_CALL(mock, Method(matchers))
+    .With(multi_argument_matcher) // Optional, at most once
+    .WillByDefault(action);       // Mandatory, exactly once
+```
+
+The action specified here is superseded by any matching EXPECT_CALL.
+
+### Best Practices
+
+- Use `ON_CALL` for common default behaviors.
+- Use `EXPECT_CALL` for specifying precise expectations.
+- Order multiple expectations from general to specific — last matching expectation wins.
+
+---
+
+## Ordering Calls and Partial Ordering
+
+By default, expectations in GoogleMock do not enforce call order unless specified.
+
+### Full Ordering with Sequences
+
+- Use `InSequence` blocks for strict ordering of expectations.
+- Inside `{ InSequence s; ... }` all expectations declared must occur in declared order.
+
+Example:
+```cpp
+{
+  InSequence seq;
+  EXPECT_CALL(mock, FirstCall());
+  EXPECT_CALL(mock, SecondCall());
+}
+```
+
+### Partial Ordering with `.InSequence()` Clause
+
+- You can assign expectation to multiple `Sequence` objects to form a DAG of expected call order.
+- Expectations on the same `Sequence` run in order.
+
+Example:
+```cpp
+Sequence s1, s2;
+EXPECT_CALL(mock, A()).InSequence(s1, s2);
+EXPECT_CALL(mock, B()).InSequence(s1);
+EXPECT_CALL(mock, C()).InSequence(s2);
+```
+Enforces `A` before `B` and `C`; `B` and `C` unordered relative to each other.
+
+### Using `.After()` Clause
+
+- Specifies a partial order such that the current expectation should be matched only after given expectations.
+- Useful for complex test flows not representable as linear sequences.
+
+---
+
+## Handling Move-only and Legacy Code
+
+### Move-only Types in Mock Methods
+
+- GoogleMock supports mocking methods accepting or returning move-only types like `std::unique_ptr`.
+- Use lambdas or callable objects with `WillOnce` and `WillRepeatedly` to produce or consume move-only arguments safely.
+
+Example:
+```cpp
+EXPECT_CALL(mock, MakeBuzz(_))
+    .WillRepeatedly([](StringPiece text) {
+      return std::make_unique<Buzz>(AccessLevel::kInternal);
+    });
+```
+
+- Avoid `Return(std::move(...))` repeatedly, as it moves-from the value only once.
+
+### Legacy Workaround for Move-only Arguments
+
+For older versions lacking support:
+
+- Define a mock method taking raw pointer instead of move-only type (e.g., `DoShareBuzz(Buzz* buzz, Time timestamp)`)
+- Implement actual method forwarding calls to the mock method, extracting raw pointer.
+
+Example:
+```cpp
+MOCK_METHOD(bool, DoShareBuzz, (Buzz* buzz, Time timestamp));
+bool ShareBuzz(std::unique_ptr<Buzz> buzz, Time timestamp) override {
+  return DoShareBuzz(buzz.get(), timestamp);
+}
+```
+
+### Deleting Mock During an Action
+
+- You can safely delete a mock object during an action by defining an action that calls `delete` on the mock pointer.
+- Use `ACTION_P(Delete, ptr)` and `WillOnce(Delete(mock_ptr))` to delete during the mock method call.
+
+---
+
+## Verifying and Resetting Mocks
+
+GoogleMock verifies expectations automatically on mock destruction, but sometimes you want to verify early.
+
+### Forcing Verification
+
+Use:
+```cpp
+Mock::VerifyAndClearExpectations(&mock_obj);
+```
+This:
+- Verifies that all expectations are met.
+- Clears expectations so no further calls will be expected.
+
+Use `Mock::VerifyAndClear(&mock_obj)` to also clear default (ON_CALL) actions.
+
+### Allowing Mock Leaks
+
+If you deliberately leak a mock object (e.g., it is owned outside the test), suppress leak detection:
+```cpp
+Mock::AllowLeak(&mock_obj);
+```
+
+### What Happens After Verification?
+
+- Do not set new expectations after verification; behavior is undefined.
+- You may call `VerifyAndClear` multiple times safely.
+---
+
+## Common Pitfalls and Best Practices
+
+### Expectation Stickiness
+
+- Expectations remain active even after being satisfied (sticky).
+- To retire expectations after use, apply `.RetiresOnSaturation()` or arrange expectations in sequences.
+
+### Order of Expectations and Last-One-Wins
+
+- GoogleMock searches expectations from newest to oldest to match calls.
+- Place more specific expectations later to override general ones.
+
+### Using `_` Matcher vs Omitting Arguments
+
+- If a method is not overloaded, arguments can be omitted to mean wildcard.
+- For overloaded methods, specify argument matchers explicitly to avoid ambiguity.
+
+### Verbosity and Debugging
+
+- Use the `--gmock_verbose=info|warning|error` flag to control messages printed for mock calls.
+- `info` prints detailed logs of matching and unmatching calls; `warning` prints warnings; `error` suppresses most messages.
+
+### Avoid Side Effects in Matchers and Actions
+
+- Matchers must be pure functions without side effects.
+- Actions are only evaluated once when expectations are set; side effects inside actions will not run more than once unless explicitly coded.
+
+### Delegating to Real or Fake Objects
+
+- For complex behavior, delegate mock calls in `ON_CALL` to real or fake implementations using lambdas capturing the object.
+
+Example:
+```cpp
+ON_CALL(mock, Method).WillByDefault([this](Args... args) {
+  return real_.Method(args...);
+});
+```
+
+---
+
+## References & Examples
+
+- [Mocking Reference](reference/mocking.md)
+- [gMock Cookbook - Advanced Mocking Recipes](guides/mocking-advanced/getting-started-mocking)
+- [Custom Matchers Guide](guides/mocking-advanced/matchers-and-actions)
+- [Strict, Nice, and Naggy Mocks](api_reference/mocking_api/strict_nice_mocks)
+- [Controlling Expectation Ordering](api_reference/mocking_api/expectations_and_behaviors)
+
+---
+
+Reach the next level of mocking mastery by combining the power of custom matchers, strictness controls, and ordering to write expressive, maintainable, and robust tests.
