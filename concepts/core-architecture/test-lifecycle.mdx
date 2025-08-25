@@ -1,261 +1,262 @@
 ---
-title: "Test Lifecycle & Execution Model"
-description: "Learn how tests are structured, discovered, and executed by GoogleTest, including suite definition, registration, execution order, and result aggregation. This page covers the journey of a test from definition in code to reporting after execution."
+title: "Test Discovery and Execution Lifecycle"
+description: "Walks through the process from writing a test, to automatic discovery, to execution and result reporting. Explains test registration macros, how tests are identified and ordered, and the lifecycle hooks for setup and teardown. Places test execution in the context of both unit testing and broader integration tests."
 ---
 
-# Test Lifecycle & Execution Model
+# Test Discovery and Execution Lifecycle
 
-GoogleTest guides your tests along a clearly defined lifecycle, starting from their definition in code, moving through their discovery and registration, running the tests in a controlled order, and finally aggregating and reporting their results. This model ensures your tests run independently, reliably, and with rich feedback.
+Understanding how GoogleTest manages the journey from writing a test to executing it and reporting the results is fundamental to mastering the framework. This lifecycle encompasses test registration macros, automated test discovery, the ordering and execution of tests, and the hooks for setup and teardown at various stages. Furthermore, it places this process in the context of both unit testing and broader integration scenarios.
 
 ---
 
-## 1. Defining Tests and Test Suites
+## 1. Writing Tests and Test Registration
 
-The journey begins when you write your tests using the `TEST`, `TEST_F`, or `TEST_P` macros:
+The GoogleTest framework offers versatile macros to define your tests, automatically registering them for discovery, execution, and reporting without requiring manual enumeration.
 
-- **`TEST(TestSuiteName, TestName)`**: Defines an individual test named `TestName` under a test suite `TestSuiteName`. The suite groups logically related tests.
+### 1.1 Basic Test Macros
 
-- **`TEST_F(TestFixtureName, TestName)`**: Defines an individual test that uses a test fixture `TestFixtureName`. The test fixture sets up a shared context for tests in a suite.
+- `TEST(TestSuiteName, TestName)`: Defines a simple test.
+- `TEST_F(TestFixtureName, TestName)`: Defines a test using a test fixture for shared setup/teardown.
+- `TEST_P(TestFixtureName, TestName)`: Defines a value-parameterized test.
 
-- **`TEST_P(TestFixtureName, TestName)`**: Defines a value-parameterized test using the test fixture `TestFixtureName`. This enables running the same test logic with various input parameters.
+Once declared, these macros automatically register the tests with GoogleTest, associating the test code with metadata such as suite name, test name, source file, and line number.
 
-All these macros register your tests automatically with GoogleTest upon program startup, eliminating any need to enumerate them manually.
+### 1.2 How Registration Works
 
-### Important Naming Rules
+When a test macro is used, it creates a `TestInfo` object that encapsulates:
 
-- Test suite and test names must be valid C++ identifiers and **cannot contain underscores (`_`)** due to name mangling rules in GoogleTest.
-- Parameterized tests require separate instantiation via `INSTANTIATE_TEST_SUITE_P` to generate runnable tests.
+- The test suite and test names
+- Fixture class information
+- Source file location
+- Factory method for creating test instances
+
+This `TestInfo` is added to the global registry managed by a singleton `UnitTest` instance, enabling automatic discovery during test runs.
+
+### 1.3 RegisterTest API
+
+For dynamic or advanced use cases where tests need to be registered at runtime, GoogleTest provides:
 
 ```cpp
-TEST(FactorialTest, HandlesZeroInput) {
-  EXPECT_EQ(Factorial(0), 1);
-}
-
-// Using test fixtures:
-class QueueTest : public testing::Test {
- protected:
-  void SetUp() override {
-    // Setup common resources
-  }
-};
-
-TEST_F(QueueTest, EnqueueWorks) {
-  ...
-}
-
-// Parameterized test definition:
-class FooTest : public testing::TestWithParam<int> {};
-
-TEST_P(FooTest, WorksForVariousInputs) {
-  int param = GetParam();
-  ...
-}
-
-// Parameterized test instantiation:
-INSTANTIATE_TEST_SUITE_P(MyParams, FooTest, testing::Values(1, 2, 3));
+template <typename Factory>
+TestInfo* RegisterTest(const char* test_suite_name, const char* test_name,
+                      const char* type_param, const char* value_param,
+                      const char* file, int line, Factory factory);
 ```
 
----
-
-## 2. Test Registration and Discovery
-
-Tests you define are registered with GoogleTest during static initialization, involving the following:
-
-- Each test corresponds to a `TestInfo` object holding metadata (name, source file, parameters).
-- Tests are grouped into `TestSuite` objects representing collections of related tests.
-- Parameterized tests (`TEST_P`) require an explicit instantiation step (`INSTANTIATE_TEST_SUITE_P`) which produces concrete test cases based on parameters.
-
-GoogleTest maintains a global registry of all `TestSuite`s and their `TestInfo`s inside the singleton `UnitTest` instance.
-
-This registry enables GoogleTest to:
-
-- Perform automatic discovery of all tests linked into your binary.
-- Apply user-specified filters to select tests to run.
-- Manage test sharding by grouping tests appropriately.
+The factory creates instances of test classes and ensures consistent fixture use. This function must be called before `RUN_ALL_TESTS()`.
 
 ---
 
-## 3. Execution Order and Lifecycle
+## 2. Test Discovery and Filtering
 
-Once you call `RUN_ALL_TESTS()`, GoogleTest orchestrates the test execution through several phases:
+GoogleTest automatically discovers all registered tests before running. Importantly, it offers powerful filtering and ordering options to select which tests to execute.
 
-### Initialization
+### 2.1 Filtering Tests
 
-1. **Setup Global Test Environments:** Registered global environments (`testing::Environment` subclasses) each have their `SetUp()` called once before any test runs.
-2. **Test Suite Setup:** Before running tests in a suite, GoogleTest calls the static `SetUpTestSuite()` for the suite’s fixture.
+- Tests are identified by the combination of test suite and test name, joined as `TestSuiteName.TestName`.
+- The `--gtest_filter` flag or `GTEST_FILTER` environment variable lets you specify positive and negative glob patterns to include or exclude tests.
 
-### Running Tests
+Example filters:
 
-3. For each test in a suite, GoogleTest runs the following sequence with a fresh fixture object:
-   - Construct test fixture (calls constructor).
-   - Calls test fixture's `SetUp()`.
-   - Calls the test body.
-   - Calls test fixture's `TearDown()`.
-   - Destructs the test fixture.
+- `FooTest.*` runs all tests in `FooTest` suite.
+- `*Null*:*Constructor*` runs tests containing either “Null” or “Constructor”.
+- `FooTest.*-FooTest.Bar` runs all tests in `FooTest` except `Bar`.
 
-4. If a test causes a fatal failure in `SetUp()` or the test body, the remainder of the fixture lifecycle or test set is skipped as appropriate.
+### 2.2 Disabled Tests
 
-5. Upon completion of all tests in a suite, GoogleTest calls `TearDownTestSuite()` static method for fixture cleanup.
+Prefixing test suite or test names with `DISABLED_` excludes them from runs by default.
+Running disabled tests is possible via the `--gtest_also_run_disabled_tests` flag.
 
-6. After all tests across suites run, it calls `TearDown()` for global test environments.
+### 2.3 Test Sharding
 
-### Execution Ordering Guarantees
+GoogleTest supports test sharding to distribute tests across multiple machines or processes using environment variables:
 
-- Test suites are run in the order of registration but death-test suites (names ending with "DeathTest") always run first.
-- Tests within suites run in source code order determined by file and line number, stabilized by sorting. User can override order via `--gtest_shuffle` flag.
-- If `--gtest_fail_fast` is enabled, execution stops immediately on the first test failure.
+- `GTEST_TOTAL_SHARDS`: Total number of shards.
+- `GTEST_SHARD_INDEX`: The index of the current shard.
 
----
-
-## 4. Filtering and Sharding of Tests
-
-### Filtering Tests
-
-GoogleTest supports a powerful filtering mechanism via the `--gtest_filter` flag:
-
-- Filters are `:`-separated lists of positive patterns optionally followed by `-` and negative patterns.
-- Patterns support wildcards `*` and `?`, matching full test names "TestSuite.TestName".
-
-Example:
-
-```bash
-./my_test --gtest_filter=FooTest.*-FooTest.FlakyTest
-```
-
-Will run all tests in `FooTest` except the `FlakyTest`.
-
-### Test Sharding
-
-For large test suites, tests can be distributed across multiple shards (machines or processes) using:
-
-- Environment variables: `GTEST_TOTAL_SHARDS` and `GTEST_SHARD_INDEX`.
-- Each shard runs a subset of tests determined by modulo of a test’s unique id.
-
-GoogleTest guarantees each test runs exactly once across all shards. Sharding is transparent to the user.
+Tests are partitioned deterministically to ensure each shard runs a unique subset.
 
 ---
 
-## 5. Result Aggregation and Reporting
+## 3. Test Ordering and Execution
 
-After test execution, GoogleTest collects and aggregates results:
+GoogleTest guarantees that tests are ordered and executed consistently, with configuration to shuffle test order and stop on first failure.
 
-- Each `TestInfo` object stores results for an individual test.
-- Each `TestSuite` aggregates results across its tests and records its own status.
-- The `UnitTest` singleton aggregates results across all suites.
+### 3.1 Deterministic Ordering
 
-Key statistics and outcomes you can query:
+By default, tests are ordered lexicographically by source file and line number to correspond with the order of definitions in your source code. This predictability aids debugging and reproducibility.
 
-- Count of passed, failed, skipped, disabled, and total tests and suites.
-- Elapsed time for tests, suites, and the entire testing session.
-- Detailed failure messages and stack traces.
+### 3.2 Shuffling Tests
 
-### Recording Additional Test Properties
+To detect inter-test dependencies, use the `--gtest_shuffle` flag which randomizes the test execution order each iteration, employing a seed reported on the console to reproduce failures.
 
-You can record additional key/value properties during tests or fixtures using:
+### 3.3 Fail Fast
 
-```cpp
-RecordProperty("PropertyName", "value");
-```
+Enabled by `--gtest_fail_fast`, this option immediately stops test execution upon the first failure, facilitating quicker debugging cycles.
 
-These are included in XML or JSON reports, useful for custom metadata or diagnostics.
+### 3.4 Test Lifecycle
 
-### Output Formats
+For each test selected to run:
 
-GoogleTest can generate:
+1. A new fixture object is instantiated.
+2. `SetUpTestSuite()` is called once before the first test in a test suite (if defined).
+3. `SetUp()` runs before each test.
+4. The test body executes.
+5. `TearDown()` runs after each test.
+6. `TearDownTestSuite()` is called once after the last test in the test suite (if defined).
+7. The fixture object is destroyed.
 
-- Human-readable colored text reports on console.
-- Detailed XML reports compliant with JUnit format via `--gtest_output=xml`.
-- JSON reports via `--gtest_output=json`.
-
-These reports capture hierarchical test information, failure details, timings, and allow integration with CI systems.
+Tests are isolated: modifications in one test do not impact others.
 
 ---
 
-## 6. Test Events and Listeners
+## 4. Lifecycle Hooks: Setup and Teardown
 
-The entire test lifecycle emits events that you can listen to by implementing
-`TestEventListener`. You get notifications on:
+GoogleTest provides multiple hooks to prepare and clean test state efficiently.
 
-- Test program start/end
-- Test iteration start/end (for repeated runs)
-- Global environment setup/teardown
+### 4.1 Per-Test Setup and Teardown
+
+- Override `void SetUp()` and `void TearDown()` in your fixture class.
+- These run before and after every individual test.
+
+### 4.2 Per-Test-Suite Setup and Teardown
+
+- Define static methods `static void SetUpTestSuite()` and `static void TearDownTestSuite()`.
+- Called once before and after the entire test suite's tests run.
+- Ideal for managing shared resources to avoid expensive setup/teardown per test.
+
+### 4.3 Global Environment Setup and Teardown
+
+- Implement subclasses of `::testing::Environment` and override `SetUp()` and `TearDown()`.
+- Register with `AddGlobalTestEnvironment()` before tests run.
+- These hooks run once for the whole test program.
+
+### 4.4 Skipping Tests
+
+Use `GTEST_SKIP()` in any setup or test phase to skip execution and record the skip status.
+
+---
+
+## 5. Test Reporting and Results
+
+GoogleTest tracks detailed result information for each test and test suite.
+
+### 5.1 Test and Suite Results
+
+- Each `TestInfo` stores a `TestResult`:
+  - List of assertion results (`TestPartResult`)
+  - Test properties for additional user data
+  - Timing
+- The `TestSuite` has an ad hoc `TestResult` for failures in suite-level setup/teardown.
+
+### 5.2 Outcome States
+
+Tests can pass, fail (fatal and nonfatal failures), or be skipped.
+
+### 5.3 Result Reporting
+
+- `RUN_ALL_TESTS()` returns `0` if all tests pass.
+- Detailed console output includes test start/end, pass/fail statuses, and timing.
+- Optionally, XML or JSON reports can be generated with the `--gtest_output` flag.
+
+### 5.4 Event Listeners
+
+GoogleTest fires events throughout the lifecycle:
+
+- Program start/end
+- Test iteration start/end
+- Environment setup/teardown
 - Test suite start/end
 - Test start/end
-- Individual test assertion results (`OnTestPartResult`)
+- Part result (assertions)
 
-GoogleTest supplies default listeners for console printing and XML generation, but you can customize or augment these by adding your own listeners.
-
----
-
-## Key Tips & Best Practices
-
-- **Always name test suites and tests with alphanumeric characters, avoiding underscores**.
-- Use **fresh test fixtures for each test** to ensure isolation.
-- Define and use **`SetUpTestSuite()` and `TearDownTestSuite()` for expensive shared resources**.
-- Leverage **parameterization (`TEST_P`)** for scalable, data-driven testing.
-- Use **`RecordProperty()` to add extra context to your test reports**.
-- **Call `InitGoogleTest()` before `RUN_ALL_TESTS()`** for proper initialization.
-- Use **`SCOPED_TRACE()` to improve failure diagnosis in nested function calls**.
-- On test failure, verify the test runner respects the exit code from `RUN_ALL_TESTS()`.
+Users can implement `TestEventListener` to hook into these and create custom logging, reporting, or integrations.
 
 ---
 
-## Visual Diagram: Test Lifecycle Flow
+## 6. Context in Unit and Integration Testing
+
+While GoogleTest is most known as a unit testing framework, its lifecycle and management infrastructure equally supports larger scale integration testing.
+
+- Tests can be organized from granular unit tests up to complex integration suites.
+- Use fixtures and global environments to manage resource lifetimes appropriately across scales.
+- Test sharding and repeat options help scale test execution in CI environments.
+
+---
+
+## Diagram: Test Discovery and Execution Flow
 
 ```mermaid
 flowchart TD
-  A[Test Definition with TEST / TEST_F / TEST_P] --> B[Test Registration]
-  B --> C[Test Discovery & Filtering]
-  C --> D{Any Selected Tests?}
-  D -- No --> E[Skip Test Run]
-  D -- Yes --> F[SetUp Global Environments]
-  F --> G[SetUpTestSuite() of Test Suite]
-  G --> H[Run Individual Test Start]
-  H --> I[Construct Fixture Instance & SetUp()]
-  I --> J[Run Test Body]
-  J --> K[TearDown() & Fixture Destruction]
-  K --> L{More Tests in Suite?}
-  L -- Yes --> H
-  L -- No --> M[TearDownTestSuite()]
-  M --> N{More Suites?}
-  N -- Yes --> G
-  N -- No --> O[TearDown Global Environments]
-  O --> P[Aggregate & Report Results]
+
+  subgraph Registration
+    A[Macro: TEST/TEST_F/TEST_P] --> B[TestInfo Created]
+    B --> C[UnitTest Registry]
+  end
+
+  subgraph Initialization
+    D[InitGoogleTest()] --> E[Flags & Filters Processed]
+  end
+
+  subgraph TestSelection
+    F[UnitTest with Tests Registered]
+    E --> G[Test Filtering & Sharding]
+    G --> H[Selected Tests]
+  end
+
+  subgraph Execution
+    H --> I[Start TestSuite]
+    I --> J[SetupTestSuite()]
+    J --> K[Test Loop]
+    K --> L[SetUp()]
+    L --> M[TestBody()]
+    M --> N[TearDown()]
+    N --> O{More Tests?}
+    O -->|Yes| K
+    O -->|No| P[TearDownTestSuite()]
+    P --> Q[End TestSuite]
+  end
+
+  subgraph Reporting
+    Q --> R[Collect Results]
+    R --> S[Event Listeners Notify]
+    S --> T[Console Output & Report Generation]
+  end
+
+  D --> F
 ```
 
 ---
 
-For detailed API reference, examples, and patterns, explore the related documentation links below.
+## Tips & Best Practices
+
+- Use `TEST_F` when shared setup/teardown is needed; otherwise, use `TEST`.
+- Prefer `EXPECT_*` to allow tests to continue collecting errors.
+- Use per-test-suite `SetUpTestSuite`/`TearDownTestSuite` for expensive resources.
+- Avoid dependencies on test execution order; use shuffling to detect them.
+- Use `GTEST_SKIP()` to gracefully skip in setup or tests.
+- Take advantage of filtering to run focused subsets during development.
+- Register global environments sparingly and carefully to manage program-wide setup.
+- Leverage event listeners for custom logging, integration with CI, or test metrics.
 
 ---
 
-<Check>
-Remember: Always call `InitGoogleTest(&argc, argv)` before `RUN_ALL_TESTS()` to initialize and configure your test executable.
-</Check>
+## Troubleshooting
 
-<Warning>
-Mixing different test fixtures within the same test suite is illegal — all tests in a suite must use the same fixture type.
-</Warning>
+### Common Issues
 
-<Info>
-Parameterized tests (`TEST_P`) must be paired with instantiations (`INSTANTIATE_TEST_SUITE_P`) or will generate failing tests alerting you to the omission.
-</Info>
-
-<Note>
-When your tests include death tests, name your suites with a `DeathTest` suffix to ensure correct execution order.
-</Note>
-
----
-
-## Additional Resources
-
-- [Testing Reference — Macros and APIs for Defining Tests](../reference/testing.md)
-- [GoogleTest Primer — Basic Concepts and Writing Tests](../primer.md)
-- [Advanced GoogleTest Topics — Detailed Lifecycle and Error Handling](../advanced.md)
-- [Core Testing Workflows — Organizing and Running Tests](../../guides/core-testing-workflows/organizing-and-running-tests.mdx)
+- Tests not running:
+  - Check filtering patterns.
+  - Verify test names and test suites.
+  - Disabled tests won't run unless opted in.
+- Setup/teardown not behaving as expected:
+  - Ensure `SetUp` / `TearDown` spelled correctly.
+  - Confirm `SetUpTestSuite` / `TearDownTestSuite` are `static`.
+- Premature test exits:
+  - Use the premature exit file feature to diagnose unexpected termination.
+- Sharding issues:
+  - Verify shard index and total shards environment variables.
 
 ---
 
-_For a practical illustration of event listening in the test lifecycle, see_ [`sample9_unittest.cc`](https://github.com/google/googletest/blob/main/googletest/samples/sample9_unittest.cc).
-
----
+This guide provides a progressive understanding of how GoogleTest manages test discovery, execution, and reporting, empowering you to write robust tests and leverage framework features effectively.
