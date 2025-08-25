@@ -1,0 +1,282 @@
+---
+title: "Writing Custom Matchers"
+description: "A reference for implementing your own matchers, enabling expressive checks tailored to your domain. Outlines required interfaces, helper APIs, and usage strategies."
+---
+
+# Writing Custom Matchers
+
+Implement your own matchers to express complex validation rules in your tests precisely and clearly. This reference covers the required matcher interfaces, helper APIs, and best practices to craft expressive, reusable, and robust matchers tailored to your domain.
+
+---
+
+## Overview
+
+Matchers are central to GoogleMock's expressive power. They encapsulate logic that checks whether values meet certain criteria, enhancing the clarity and intent of your tests.
+
+While GoogleMock includes many built-in matchers, there are occasions where you need to:
+
+- Implement specific checks not covered by standard matchers.
+- Provide detailed explanations for why a match fails or succeeds.
+- Create polymorphic matchers that work across types.
+
+This page guides you through creating custom matchers effectively.
+
+---
+
+## Matcher Interface
+
+To implement your own matcher, focus on what users want to achieve — validating values with custom logic and producing helpful descriptions.
+
+### Essential Matcher Interface Requirements
+
+For a matcher `Foo` matching values of type `T`, implement a class `FooMatcher` with:
+
+- A `using is_gtest_matcher = void;` type alias to indicate it’s a matcher.
+- A method `bool MatchAndExplain(const T& value, std::ostream* listener) const`, which:
+  - Returns `true` if `value` matches.
+  - Writes an explanation to `listener` (if non-null) adding details why the match succeeded or failed.
+- A method `void DescribeTo(std::ostream* os) const` that describes the expected condition, e.g. "is divisible by 7".
+- Optionally, `void DescribeNegationTo(std::ostream* os) const` to describe the negated condition, e.g. "is not divisible by 7" (recommended for better diagnostics).
+
+These methods form the contract that GoogleMock uses at runtime to perform matching and generate meaningful error messages.
+
+### Example Matcher Skeleton
+
+```cpp
+class BarPlusBazEqMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  explicit BarPlusBazEqMatcher(int expected_sum) : expected_sum_(expected_sum) {}
+
+  bool MatchAndExplain(const Foo& foo, std::ostream* listener) const {
+    bool matched = (foo.bar() + foo.baz()) == expected_sum_;
+    if (!matched && listener != nullptr) {
+      *listener << "bar() + baz() was " << (foo.bar() + foo.baz());
+    }
+    return matched;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "bar() + baz() equals " << expected_sum_;
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "bar() + baz() does not equal " << expected_sum_;
+  }
+
+ private:
+  const int expected_sum_;
+};
+
+::testing::Matcher<const Foo&> BarPlusBazEq(int expected_sum) {
+  return BarPlusBazEqMatcher(expected_sum);
+}
+```
+
+---
+
+## Polymorphic Matchers
+
+When a matcher works with multiple value types (like `Eq(5)` matching `int`, `double`, etc.), it’s polymorphic.
+
+To create a polymorphic matcher:
+
+1. Implement a class with:
+   - `using is_gtest_matcher = void;`
+   - A templated `MatchAndExplain`:
+     ```cpp
+     template <typename T>
+     bool MatchAndExplain(const T& value, std::ostream* listener) const;
+     ```
+   - Non-templated `DescribeTo` and `DescribeNegationTo` methods.
+2. Return it wrapped with `MakePolymorphicMatcher()`.
+
+### Example: NotNull Matcher
+
+```cpp
+class NotNullMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  template <typename T>
+  bool MatchAndExplain(T* ptr, std::ostream* /* listener */) const {
+    return ptr != nullptr;
+  }
+
+  void DescribeTo(std::ostream* os) const { *os << "is not NULL"; }
+  void DescribeNegationTo(std::ostream* os) const { *os << "is NULL"; }
+};
+
+PolymorphicMatcher<NotNullMatcher> NotNull() {
+  return MakePolymorphicMatcher(NotNullMatcher());
+}
+```
+
+This matcher matches any raw or smart pointer that is not null.
+
+---
+
+## Using the `MatchResultListener`
+
+Instead of writing to a raw `std::ostream*`, you can use `MatchResultListener*`, which provides:
+
+- The same streaming operators (`operator<<`) for explanations.
+- A method to check if the listener wants an explanation (`IsInterested()`), so you can avoid costly formatting.
+- Access to the underlying `std::ostream*` via `stream()`.
+
+This facilitates optimized and flexible match explanations.
+
+Example snippet inside `MatchAndExplain`:
+
+```cpp
+bool MatchAndExplain(const T& value, MatchResultListener* listener) const {
+  if (!listener->IsInterested()) {
+    // Fast path: no explanation needed.
+    return check_condition(value);
+  }
+  if (check_condition(value)) {
+    *listener << " (additional info about success)";
+    return true;
+  } else {
+    *listener << " (failure reason)";
+    return false;
+  }
+}
+```
+
+---
+
+## Factory Functions
+
+Always provide a factory function that returns a ready-to-use matcher object:
+
+```cpp
+::testing::Matcher<const T&> FooMatcher(args) {
+  return FooMatcherClass(args);
+}
+```
+
+This abstracts away the implementation details and enables idiomatic usage:
+
+```cpp
+EXPECT_THAT(value, FooMatcher(expected));
+EXPECT_CALL(mock, Method(FooMatcher(expected)));
+```
+
+---
+
+## Leveraging Helper Macros: MATCHER and MATCHER_P
+
+For simple matchers, GoogleMock provides macros that reduce boilerplate while keeping detailed error messages.
+
+- `MATCHER(Name, description) { statements; }` - Defines a parameterless matcher named `Name`.
+- `MATCHER_P(Name, param, description) { statements; }` - Defines a matcher named `Name` that takes one parameter `param`.
+
+Inside the body, refer to the value being matched as `arg`. The description can use the special variable `negation` which is true if the matcher is negated.
+
+Example:
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  return (arg % 7) == 0;
+}
+
+// Usage:
+EXPECT_THAT(number, IsDivisibleBy7());
+```
+
+Example with parameter and custom description:
+
+```cpp
+MATCHER_P(HasAbsoluteValue, value,
+          negation ? "doesn't have absolute value " + ::testing::PrintToString(value)
+                   : "has absolute value " + ::testing::PrintToString(value)) {
+  return abs(arg) == value;
+}
+
+// Usage:
+EXPECT_THAT(x, HasAbsoluteValue(10));
+```
+
+---
+
+## Explaining Match Results
+
+Enhance your matchers by providing explanations in `MatchAndExplain()` that clarify why a value did or did not match, aiding test failure diagnostics.
+
+Example from `MatchAndExplain`:
+
+```cpp
+bool MatchAndExplain(int n, MatchResultListener* listener) const {
+  int remainder = n % 7;
+  if (remainder != 0 && listener->IsInterested()) {
+    *listener << "which has remainder " << remainder;
+  }
+  return remainder == 0;
+}
+```
+
+This produces informative messages such as:
+
+```
+Value of: x
+Expected: is divisible by 7
+  Actual: 23 (which has remainder 2)
+```
+
+---
+
+## Best Practices
+
+- **No side effects:** Matchers should be pure functions without side effects.
+- **Performance-aware:** Use `listener->IsInterested()` to avoid expensive explanations if not needed.
+- **Provide negation descriptions:** Overriding `DescribeNegationTo()` results in clearer error messages when negating matchers.
+- **Use polymorphic matchers when applicable:** To maximize reusability across types.
+- **Prefer macros for simple matchers:** Use `MATCHER` macros for brevity and readability.
+- **Ensure thread-safety:** Matchers may be invoked on multiple threads; avoid mutable state.
+
+---
+
+## Troubleshooting Common Issues
+
+- **No match explanations:** Ensure you use the provided `MatchResultListener*` or stream pointer to provide match explanations.
+- **Overly verbose messages:** Only write explanations when match fails, or when the explanation reveals non-obvious info.
+- **Incorrect match behavior:** Confirm that your `MatchAndExplain()` returns the correct boolean for match state.
+- **Type mismatches:** Use `MakePolymorphicMatcher()` or template-based polymorphism for types other than the one your matcher is compiled against.
+
+---
+
+## Summary
+
+Writing custom matchers empowers you to capture domain-specific validation precisely, making tests more readable, maintainable, and informative. Focus on:
+
+- Implementing the matcher interface (`MatchAndExplain()`, `DescribeTo()`, `DescribeNegationTo()`).
+- Providing meaningful explanations to surface diagnostic information.
+- Offering polymorphic matchers when appropriate.
+- Using helper macros for quick matcher creation if the matcher is simple.
+
+For detailed examples and recipes, see the [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html#writing-new-matchers-quickly) and the [Matchers Reference](https://google.github.io/googletest/reference/matchers.html).
+
+---
+
+### Related Documentation
+
+- [Matchers Reference](https://google.github.io/googletest/reference/matchers.html)
+- [gMock Cookbook - Writing New Matchers Quickly](https://google.github.io/googletest/gmock_cook_book.html#writing-new-matchers-quickly)
+- [Mocking Reference](https://google.github.io/googletest/reference/mocks.html)
+- [Assertions Reference](https://google.github.io/googletest/reference/assertions.html)
+- [GoogleTest Primer](https://google.github.io/googletest/primer.html)
+
+---
+
+### Code Location
+
+The matcher interfaces and implementations can be found in the source file:
+
+- `googletest/include/gtest/gtest-matchers.h`
+- `googlemock/include/gmock/gmock-matchers.h`
+
+This API reference reflects the stable interface from branch `main`.
+
+---
