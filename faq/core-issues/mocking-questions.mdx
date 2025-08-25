@@ -1,0 +1,304 @@
+---
+title: "GoogleMock: Mocking Best Practices & Pitfalls"
+description: "Address the most frequent questions about writing, configuring, and diagnosing mocks using GoogleMock. This includes resolving expectation mismatches, understanding ON_CALL vs EXPECT_CALL, and troubleshooting interaction between nice, strict, and naggy mocks."
+---
+
+# GoogleMock: Mocking Best Practices & Pitfalls
+
+This page addresses frequent questions and challenges encountered when writing, configuring, and diagnosing mocks using GoogleMock (gMock). It helps users understand the relationship and uses of `ON_CALL` vs `EXPECT_CALL`, manages expectation mismatches, and clarifies how different mock strictness modes (`NiceMock`, `NaggyMock`, `StrictMock`) influence test outcomes.
+
+---
+
+## 1. Understanding `ON_CALL` vs `EXPECT_CALL`
+
+GoogleMock provides two fundamental macros to configure mock behaviors:
+
+- **`ON_CALL`**: Defines the default behavior for a mock method when it is called with matching arguments but does *not* set any expectation that the call must occur.
+- **`EXPECT_CALL`**: Defines both an expectation that the mock method will be called with specified arguments, call count, and order constraints, as well as the behavior to perform.
+
+### When to Use Each
+
+- Use **`ON_CALL`** to set up general default behaviors in your test fixture or mock constructor for calls you expect but do *not* need to verify explicitly.
+- Use **`EXPECT_CALL`** to assert that a method *must* be called and to specify how many times, with which arguments, and in what order.
+
+> **Tip:** Prefer relying on `ON_CALL` where you merely need to suppress uninteresting call warnings and use `EXPECT_CALL` sparingly* — overusing expectations can make tests fragile.
+
+### Combining Them
+
+`ON_CALL` behaviors are overridden by `EXPECT_CALL` matching calls. If no `EXPECT_CALL` matches, the default behavior from `ON_CALL` is used.
+
+```cpp
+ON_CALL(my_mock, Foo(_))
+    .WillByDefault(Return(0));
+
+EXPECT_CALL(my_mock, Foo(42))
+    .WillOnce(Return(100));
+
+// Calls to my_mock.Foo(42) will return 100 due to EXPECT_CALL.
+// Other calls will return 0 as per ON_CALL.
+```
+
+### Common Pitfall: Relying only on `ON_CALL`
+
+If you want to verify that a method is actually called, `ON_CALL` isn't enough;
+just adding `ON_CALL` without any corresponding `EXPECT_CALL` means no verification will occur, which might hide bugs.
+
+### Summary
+
+| Aspect                  | `ON_CALL`                           | `EXPECT_CALL`                                  |
+|-------------------------|-----------------------------------|-----------------------------------------------|
+| Sets behavior only      | Yes                               | Yes                                           |
+| Sets call expectations | No                                | Yes                                           |
+| Use for default behavior| Yes                               | No                                            |
+| Use for verification    | No                                | Yes                                           |
+
+
+---
+
+## 2. Managing Expectation Mismatches
+
+### Common Scenario: Actual calls don’t match expectations
+
+If your test fails with messages like:
+
+```
+Actual function call count doesn't match EXPECT_CALL(...)
+Expected: to be called once
+  Actual: never called - unsatisfied and active
+```
+
+or
+
+```
+Unexpected mock function call - returning default value.
+Function call: Bar(2)
+```
+
+this generally means one or more of the following:
+
+- The code under test does not invoke the mock method as expected.
+- The argument(s) do not match the matchers configured in the expectation.
+- The call order or count constraints are violated.
+
+### How to Diagnose
+
+- Run the test with `--gmock_verbose=info` flag to get detailed logs of:
+  - Which expectations are installed and their locations.
+  - Each call made on mocks and which expectation it matches.
+
+- Check your matchers carefully to ensure they match the actual argument values or use wildcards (`_`) if you don't care about some parameters.
+
+- Use sequences (`InSequence` or explicit `Sequence` objects) and `.After()` clauses if order matters.
+
+- Verify the `.Times()` clause aligns with how many times the method will realistically be called.
+
+- For overloaded methods, help disambiguate the overload selected for expectations (see section 6).
+
+### Handling Excessive Calls
+
+To specify that a mock method *should not* be called, use:
+
+```cpp
+EXPECT_CALL(mock, SomeMethod(_)).Times(0);
+```
+
+To allow any number of calls without verification (and suppress warnings), add a catch-all:
+
+```cpp
+EXPECT_CALL(mock, SomeMethod(_)).Times(testing::AnyNumber());
+```
+
+### Best Practice: Expect only what matters
+
+Avoid over-specifying expectations—focus only on the interactions your test needs to verify to keep tests resilient to implementation changes.
+
+---
+
+## 3. Mock Strictness Modes: NiceMock, NaggyMock, StrictMock
+
+GoogleMock offers three wrappers to control how uninteresting calls (calls for which no `EXPECT_CALL` is defined) are treated.
+
+| Wrapper Type  | Behavior on Uninteresting Calls                                | Recommended Usage                          |
+|---------------|----------------------------------------------------------------|-------------------------------------------|
+| **NiceMock**  | Suppresses warnings; uninteresting calls are ignored quietly   | Use for cleaner tests when irrelevant calls exist
+| **NaggyMock** | Prints warnings for uninteresting calls, but test continues    | Default mode; useful during test development to catch forgotten setups
+| **StrictMock**| Fails the test on uninteresting calls                          | Use when you want to catch any unexpected calls, e.g., in highly controlled tests
+
+### How to Use
+
+```cpp
+using ::testing::NiceMock;
+using ::testing::NaggyMock;
+using ::testing::StrictMock;
+
+NiceMock<MockFoo> nice_mock;
+NaggyMock<MockFoo> naggy_mock;
+StrictMock<MockFoo> strict_mock;
+```
+
+### Caveats
+
+- `NiceMock` and `StrictMock` only affect mock methods defined *directly* using `MOCK_METHOD` in the class. Methods mocked in base classes may not obey these modes correctly.
+- Nesting wrappers is not supported (e.g., `NiceMock<StrictMock<MockClass>>`).
+- Destructor of the mock class must be virtual for strictness modes to work properly.
+
+### When to Use What
+
+- Start tests with `NiceMock` to reduce log noise.
+- Use `NaggyMock` to get warnings when you’re debugging or developing tests.
+- Use `StrictMock` when you want to enforce exact mock expectations and avoid unexpected behavior.
+
+---
+
+## 4. Tips For Writing Robust Mocks
+
+### a) Define Mock Methods in the Public Section
+
+Always declare your `MOCK_METHOD` macros in the `public:` section even if the base methods are protected or private. This is required for `EXPECT_CALL` and `ON_CALL` to work.
+
+```cpp
+class MockFoo : public Foo {
+public:
+  MOCK_METHOD(int, ProtectedMethod, (), (override));  // Must be public here
+};
+```
+
+### b) Use Qualifiers Correctly
+
+If mocking a `const` method, include `(const)` or `(const, override)` as appropriate.
+
+### c) Avoid Unprotected Commas in Argument Types
+
+For argument or return types that contain commas (e.g. templates like `std::pair<bool, int>`), wrap the types in extra parentheses or use type aliases.
+
+### d) Use `RetiresOnSaturation` to Avoid Sticky Expectations
+
+By default, expectations remain active even after their cardinality is met, which can cause conflicts. Use `.RetiresOnSaturation()` to retire an expectation after it saturates.
+
+```cpp
+EXPECT_CALL(mock, Foo())
+    .WillOnce(Return(1))
+    .RetiresOnSaturation();
+```
+
+### e) When Verifying Multiple Calls in Order, Use `InSequence`
+
+Wrap `EXPECT_CALL`s in an `InSequence` block when call order matters.
+
+```cpp
+{
+  InSequence s;
+  EXPECT_CALL(mock, Foo(1));
+  EXPECT_CALL(mock, Foo(2));
+}
+```
+
+### f) Prefer Using Wildcard Matchers (`_`) When Argument Details Don’t Matter
+
+Avoid unnecessary over-specification by matching necessary arguments only.
+
+---
+
+## 5. Troubleshooting Common Issues
+
+### Uninteresting Calls Warning
+
+If you see warnings about uninteresting calls:
+
+```
+GMOCK WARNING:
+Uninteresting mock function call - returning default value.
+```
+
+- This means that a method without any `EXPECT_CALL` has been called.
+- To suppress warnings:
+  - Add a catch-all `EXPECT_CALL(...).Times(AnyNumber())`
+  - Or use `NiceMock` wrapper
+  - Or set default behavior with `ON_CALL`
+
+**Do not** add broad `EXPECT_CALL`s without reason—this can hide real issues.
+
+### Unexpected Calls
+
+An unexpected call is a call that does not match any active expectation (`EXPECT_CALL`). This always results in test failure.
+
+### Default Actions May Not Be What You Expect
+
+- By default, functions with return types return zero-initialized or default constructed objects.
+- Use `ON_CALL` or specify `WillOnce` / `WillRepeatedly` in `EXPECT_CALL` to override.
+
+### Problems Mocking Non-Virtual Methods
+
+- gMock cannot override non-virtual methods.
+- For non-virtual, unrelated classes, consider mocking by defining an unrelated mock with matching methods, and use dependency injection.
+
+### Ambiguity with Overloaded Methods
+
+If method overloading causes compiler errors, explicitly specify mocks for all overloads or use `using` to import the base class methods.
+
+---
+
+## 6. Special Topics
+
+### How to Mock Overloaded Methods
+
+Define mocks for every overload. For const overloads, add `(const, override)`. You may need to use `using BaseClass::MethodName;` to bring base overloads into scope if you mock only some versions.
+
+```cpp
+MOCK_METHOD(int, Add, (int a), (override));
+MOCK_METHOD(int, Add, (int a, int b), (override));
+MOCK_METHOD(int, Add, (int a), (const, override));
+```
+
+### Handling Move-Only Types
+
+gMock supports mocking methods taking or returning move-only types (e.g. `std::unique_ptr`) using the standard `MOCK_METHOD` macro. When returning move-only values, prefer using lambdas or callables to create new instances for each call rather than returning a moved-from object.
+
+### Delegating Calls to Real Objects or Fakes
+
+You can have your mock delegate default actions to a real or fake object to maintain real behavior while verifying interactions.
+
+```cpp
+ON_CALL(*this, Method(_)).WillByDefault([this](Args... args) {
+  return real_.Method(std::forward<Args>(args)...);
+});
+```
+
+### Mocking Destructors
+
+GoogleMock does not support mocking destructors directly; instead, define a mock method like `Die()` and invoke it from the destructor.
+
+---
+
+## 7. Best Practices Summary
+
+- **Set expectations (`EXPECT_CALL`) before exercising mocks.** Setting expectations afterwards leads to undefined behavior.
+- **Use `ON_CALL` to specify behavior without enforcing call counts.**
+- **Use sequences and `.After` to specify order constraints when necessary.**
+- **Suppress uninteresting call warnings using `NiceMock`, default actions (`ON_CALL`), or catch-all expectations.**
+- **Avoid over-specifying matchers to keep tests maintainable.**
+- **Verify mocks are destructed or call `Mock::VerifyAndClearExpectations()` to enforce verification explicitly.**
+
+---
+
+## 8. Further Resources
+
+- [Mocking Reference](../reference/mocking.md) — full API and detailed macro usage.
+- [gMock Cookbook](../gmock_cook_book.md) — practical recipes and best practices.
+- [Mocking Basics Guide](../guides/mocking-and-advanced-scenarios/mocking-basics.md) — fundamental concepts.
+- [Mock Strictness Modes](../api-reference/mocking-api/mock-strictness.md) — details on NiceMock, NaggyMock, and StrictMock.
+- [GoogleMock for Dummies](../docs/gmock_for_dummies.md) — beginner-friendly introduction.
+- [GoogleMock FAQ](../docs/gmock_faq.md) — answers to common questions and pitfalls.
+
+<Tip>
+When diagnosing mismatched or unexpected calls, running tests with the `--gmock_verbose=info` flag provides extensive debug logging, including matched expectations, unmatched calls, and call locations.
+</Tip>
+
+<Note>
+Always place `MOCK_METHOD` declarations in the public section of your mock classes to ensure proper access for GoogleMock's mechanisms.
+</Note>
+
+<Warning>
+Beware that overly strict expectations can make tests fragile and increase maintenance overhead. Striking the right balance in expectation granularity is key for effective mock-based testing.
+</Warning>
+
