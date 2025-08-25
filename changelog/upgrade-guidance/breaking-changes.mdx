@@ -1,175 +1,218 @@
 ---
-title: "Breaking Changes & Migration Notes"
-description: "Catalogues API or behavioral changes that may require test updates or codebase modification. Provides decision makers with early visibility into significant migrations or removals."
+title: "Breaking Changes Overview"
+description: "Summarizes breaking changes and compatibility shifts between releases, with clear explanations of what has changed, affected components, and steps required for user code updates."
 ---
 
-# Breaking Changes & Migration Notes
+# Breaking Changes Overview
 
-This documentation details API and behavioral modifications in GoogleMock that may require updates to your test code or other codebases depending on it. It serves to provide you with early visibility into important migrations, removals, or incompatibilities introduced across versions to aid smooth upgrades.
-
----
-
-## 1. Transition to C++17 as Minimum Requirement
-
-Starting with recent releases, GoogleMock requires a C++17-compliant compiler and standard library. This change implies:
-
-- Legacy build environments or compilers not supporting C++17 will no longer successfully compile GoogleMock.
-- Your test projects must enable and configure C++17 or later compliance.
-
-Refer to the [System Requirements & Supported Platforms](https://google.github.io/googletest/getting-started/setup-prerequisites-installation/system-requirements.html) page for detailed environment support.
+This page provides a clear, structured summary of the breaking changes and compatibility shifts that have occurred between GoogleMock releases. It explains what has changed, which components are affected, and what users must do to update their test code accordingly.
 
 ---
 
-## 2. Adoption of New `MOCK_METHOD` Macro Syntax
+## 1. Purpose and Scope
 
-The older family of macros (`MOCK_METHODn`, `MOCK_CONST_METHODn`, etc.) remain supported but are deprecated.
+Breaking changes are modifications in GoogleMock that may cause existing user code or tests to fail or behave differently without modification. This overview focuses on:
 
-The new unified `MOCK_METHOD` macro syntax improves expressiveness and compatibility with modern C++ features.
+- Changes in the mocking macros, particularly `MOCK_METHOD` and related expectations.
+- Adjustments in behavior of GoogleMock's internal mechanisms that impact mock setup or verification.
+- Updates in how mock behavior and expectations are specified and matched.
 
-### Key Implications:
+This is not an exhaustive list of all changes, but highlights those that require user attention for a smooth upgrade experience.
 
-- Refactor mock method definitions to use the new syntax for better compile-time error diagnostics and future-proofing.
-- Parentheses are now necessary around return types or argument types containing commas; alternatively, use type aliases.
+---
+
+## 2. Notable Breaking Changes and Compatibility Shifts
+
+### 2.1 `MOCK_METHOD` Macro Signature and Usage
+
+- **Enhanced Qualification Support:** The `MOCK_METHOD` macro now fully supports various qualifiers such as `const`, `override`, `noexcept`, calling conventions via `Calltype()`, and reference qualifiers via `ref()`.
+
+- **Comma Handling in Signatures:** To accommodate return types or argument lists that contain commas (e.g., `std::pair<bool, int>` or template types), these must now be wrapped in parentheses to avoid parsing errors. For example:
 
 ```cpp
-// Old style (still works but discouraged):
-MOCK_METHOD1(Foo, bool(int));
-
-// New style (recommended):
-MOCK_METHOD(bool, Foo, (int), (override));
-
-// Handling types with commas using parentheses:
-MOCK_METHOD((std::pair<int, int>), GetPair, (), (const));
+MOCK_METHOD((std::pair<bool, int>), GetPair, ());
+MOCK_METHOD(bool, CheckMap, ((std::map<int, double>), bool));
 ```
 
-See the [Mocking Reference](https://google.github.io/googletest/docs/reference/mocking.html#MOCK_METHOD) and the [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html#SimplerInterfaces) for detailed migration instructions.
+- **Strict Public Placement:** Mock method definitions must appear in the `public:` section even if the mocked method in the base class is `protected` or `private`. This ensures accessibility for setting expectations.
 
----
+- **Overloaded Methods:** All overloads considered in user code must be mocked in the mock class. Failure to mock all overloads can lead to hidden method warnings and potential runtime surprises. Use `using` declarations to bring base class methods into scope if needed.
 
-## 3. Improved Strictness and Behavior of Expectations
+### 2.2 Changes in Expectation Matching Order
 
-GoogleMock has refined its default semantics for the following scenarios which may affect existing tests:
+- Expectations (`EXPECT_CALL`) on mock methods are matched against calls in reverse declaration order (later expectations override earlier ones). This allows default/less specific expectations to be overridden by more specific ones later in the code.
 
-- **Expectation Stickiness:**
-  - Expectations remain active (“sticky”) until they are saturated or explicitly retired.
-  - To avoid some brittle failures on repeated calls, consider using `.RetiresOnSaturation()` or explicit sequences.
-- **Uninteresting Calls:**
-  - Calls to mock methods with no expectations generate warnings by default (naggy behavior).
-  - Using `NiceMock` or `StrictMock` wrappers can suppress or escalate these warnings to errors.
+- This rule requires tests to declare `EXPECT_CALL`s before exercising the mock methods. Setting expectations after method calls is disallowed and may lead to undefined behavior.
 
-### Migration tips:
+### 2.3 Sticky Expectations and Saturation Behavior
 
-- Review tests relying on implicit call counts or behaviors that might have changed due to stricter cardinality enforcement.
-- Introduce explicit `.Times()` clauses and `.RetiresOnSaturation()` where necessary.
-- Add catch-all expectations (`EXPECT_CALL(mock, Method(_)).Times(AnyNumber())`) to handle permitted but unspecified calls.
+- By default, expectations are "sticky": they remain active even after reaching their invocation count limit. This can cause unexpected upper-bound violation errors if additional calls match the same expectation.
 
-Consult the [Nice, Strict, and Naggy Mocks documentation](https://google.github.io/googletest/api/gmock_nice_strict_mocks.html) for best practices.
-
----
-
-## 4. Updated Matcher Interface and Custom Matcher Macros
-
-Enhancements in matcher interfaces and new polymorphic matcher patterns may require:
-
-- Updating custom matchers from legacy APIs to the polymorphic matcher model allowing better type inference and error messages.
-- Transitioning custom matchers to use `MATCHER` and `MATCHER_Pk` macros where applicable for matchers with parameters.
-
-Basic example of migration:
+- To retire an expectation immediately after it's saturated (and avoid such errors), use `.RetiresOnSaturation()` clause. For example:
 
 ```cpp
-// Legacy matcher:
-class DivisibleBy7Matcher {
+EXPECT_CALL(mock, Foo(5))
+    .Times(2)
+    .RetiresOnSaturation();
+```
+
+- Expectations within an `InSequence` block retire automatically when the subsequent expectations in the sequence activate.
+
+### 2.4 Sequencing and Partial Ordering of Calls
+
+- The `InSequence` clause can be applied to multiple sequences to specify complex partial orders of calls.
+
+- The `.After()` clause allows specifying call order dependencies on explicit expectations or sets of them.
+
+- Both clauses must be used before setting `.WillOnce()` or `.WillRepeatedly()` actions to maintain syntactical correctness.
+
+### 2.5 Default Actions and `ON_CALL` Behavior
+
+- `ON_CALL` sets default actions for mock methods without adding expectations. Newer `ON_CALL` clauses take precedence over older ones.
+
+- The default action for void-returning or built-in types remains unchanged: methods that return built-in types or default-constructible types will return zero or a default value if no action is specified.
+
+- Removing default actions can be done using `Mock::VerifyAndClear()`.
+
+### 2.6 Strictness Wrappers: NiceMock, NaggyMock, and StrictMock
+
+- `NiceMock` suppresses warnings on uninteresting calls (calls without matching expectations).
+
+- `NaggyMock`, the default behavior, logs warnings for uninteresting calls.
+
+- `StrictMock` treats uninteresting calls as errors, causing test failures.
+
+- Wrappers only affect uninteresting calls, not unexpected calls (calls that do not match expectations defined).
+
+- Wrappers only affect mock methods declared with `MOCK_METHOD` **directly** in the mock class, not inherited mock methods.
+
+### 2.7 Return Types and Move-Only Types
+
+- Mocking methods returning move-only types such as `std::unique_ptr` is now supported with `MOCK_METHOD`.
+
+- Use lambdas or callable objects in `.WillOnce()` and `.WillRepeatedly()` clauses to return fresh objects on each invocation for move-only types to avoid reusing moved-from instances.
+
+- Previous workarounds involving delegation to auxiliary non-move-only mock methods are no longer necessary.
+
+### 2.8 Thread Safety and Synchronization
+
+- GoogleMock is thread-safe on platforms with pthreads or Windows threading support.
+
+- Mock method actions will execute in the thread invoking the mock method.
+
+- Setting expectations (`EXPECT_CALL`) and default actions (`ON_CALL`) must not be done concurrently with method calls for correct behavior.
+
+### 2.9 Deprecation of Old Mock Macros
+
+- The older `MOCK_METHODn` family of macros have been replaced by the single generic `MOCK_METHOD` macro. Usage of old macros is deprecated and users should migrate.
+
+### 2.10 Updated Diagnostics and Verbosity Control
+
+- Use the `--gmock_verbose` flag with values `info`, `warning`, or `error` to control logging verbosity related to mock calls.
+
+- With `info`, all mock function calls, matching expectations, and uninteresting calls are reported.
+
+- Stack traces accompany warnings in `info` verbosity level.
+
+
+---
+
+## 3. Migration Recommendations
+
+- **Modify mock method declarations:** Wrap complex return or parameter types containing commas with parentheses in `MOCK_METHOD` declarations.
+
+- **Add `.RetiresOnSaturation()`** for expectations that must not remain active after their call limit is reached.
+
+- **Use sequences or `.After()` clauses** to explicitly specify call order constraints when important.
+
+- **Prefer lambdas or callable objects for move-only return types** to allow fresh values per call.
+
+- **Wrap your mocks with `NiceMock` or `StrictMock`** if you want to suppress warnings for uninteresting calls or treat them as errors, respectively.
+
+- **Avoid interleaving calls and expectations:** declare all your `EXPECT_CALL`s before exercising mocks.
+
+- **Migrate old `MOCK_METHODn` macros to the new `MOCK_METHOD` macro** for cleaner, more consistent syntax.
+
+- **During upgrade, run your tests with `--gmock_verbose=info`** to get detailed diagnostics about mock call matching.
+
+
+---
+
+## 4. Troubleshooting
+
+- **Unexpected call failures:** Check that expectations are defined before method calls and that argument matchers match your actual call parameters.
+
+- **Upper bound violated:** Verify if sticky expectations were saturated; add `.RetiresOnSaturation()` if needed.
+
+- **Ambiguous overload errors:** Fully mock all overloads or use explicit casting and `Const()` wrapper to disambiguate.
+
+- **Compilation errors on mocking with comma-containing types:** Ensure these types are parenthesized in `MOCK_METHOD` declarations.
+
+- **False warnings about uninteresting calls:** Use `NiceMock` wrapper around mocks or add broad `EXPECT_CALL` with `Times(AnyNumber())`.
+
+- **Move-only type errors in expectations:** Return fresh objects with lambdas in `WillOnce`/`WillRepeatedly` instead of `Return(std::move(...))`.
+
+
+---
+
+## 5. Additional Resources
+
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html) — Beginner-friendly mocking introduction.
+- [Mocking Reference](reference/mocking.md) — Detailed API descriptions.
+- [gMock Cookbook](gmock_cook_book.md) — Recipes and best practices.
+- [Legacy gMock FAQ](gmock_faq.md) — Troubleshooting commonly encountered issues.
+- [Mock Strictness Wrappers](api-reference/mocking-framework/mock-strictness-wrappers.mdx) — Guidance on `NiceMock`, `NaggyMock`, `StrictMock`.
+
+---
+
+## 6. Summary
+
+This overview equips users with the knowledge to identify and resolve breaking changes related to expectations, mock definitions, and runtime behaviors. Users should update their mocking code per the migration recommendations for a seamless transition to the latest GoogleMock release.
+
+
+---
+
+<Check>
+For comprehensive upgrade success, ensure all mock classes adopt the new `MOCK_METHOD` signatures, expectations are declared prior to mock invocations, and test runs use the `--gmock_verbose=info` flag to uncover mismatches early.
+</Check>
+
+---
+
+## Example Migration Pattern
+
+```cpp
+// Before (old macro, unwrapped type, no RetiresOnSaturation or sequences)
+class MockFoo : public Foo {
  public:
-  bool MatchAndExplain(int n, std::ostream* os) const { ... }
-  void DescribeTo(std::ostream* os) const { ... }
+  MOCK_METHOD1(Foo, std::pair<bool, int>(int));
 };
-Matcher<int> DivisibleBy7() { return DivisibleBy7Matcher(); }
 
-// Polymorphic matcher using MATCHER macro:
-MATCHER(IsDivisibleBy7, "") { return (arg % 7) == 0; }
+TEST(MyTest, Usage) {
+  MockFoo mock;
+  EXPECT_CALL(mock, Foo(5)).Times(3);
+  // ... code that calls mock.Foo(5) ...
+}
+
+// After (new macro, wrapped types, RetiresOnSaturation added)
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD((std::pair<bool, int>), Foo, (int), (override));
+};
+
+TEST(MyTest, Usage) {
+  MockFoo mock;
+  EXPECT_CALL(mock, Foo(5))
+      .Times(3)
+      .RetiresOnSaturation();
+  // ... code that calls mock.Foo(5) ...
+}
 ```
 
-See the [Writing New Matchers Quickly](https://google.github.io/googletest/gmock_cook_book.html#NewMatchers) section of the gMock Cookbook for detailed guidelines.
-
 ---
 
-## 5. Changes to Default Actions and Return Value Handling
+## Concluding Notes
 
-- Default values for return types are now more strictly controlled. If your tests depended on implicit defaults, verify behavior.
-- For methods returning references or move-only types, use the appropriate actions (`ReturnRef()`, lambdas) explicitly.
+GoogleMock continues to evolve with an emphasis on usability, clearer API design, and safer default behaviors. Understanding and adopting these breaking change guidelines ensures stable and maintainable tests for modern C++ development.
 
 
----
 
-## 6. Migration Steps and Best Practices
-
-To ensure the smoothest upgrade:
-
-1. **Verify Compiler and Build Environment**
-   - Confirm C++17 support in your compiler toolchain.
-   - Adjust build configurations and flags accordingly.
-
-2. **Update Mock Classes and Methods**
-   - Replace old `MOCK_METHODn` macros with new `MOCK_METHOD` syntax.
-   - Wrap complex types with parentheses or typedef them.
-
-3. **Review Expectation Clauses**
-   - Audit `EXPECT_CALL` statements for cardinality and stickiness.
-   - Add `.RetiresOnSaturation()` when appropriate.
-   - Include catch-all expectations using wildcards for unspecified calls.
-
-4. **Refactor Custom Matchers and Actions**
-   - Adopt polymorphic matcher macros and interfaces for new and existing custom matchers.
-   - Use `MATCHER_P`-family macros for parameterized matchers.
-
-5. **Adjust Test Code for Behavioral Changes**
-   - Test your suite under increased verbosity (`--gmock_verbose=info`) to identify unexpected matches or failures.
-   - Use sequences and `After` constructs to manage call ordering if applicable.
-
-<Callout>
-**Note:** Changes that might affect performance or behavior in subtle ways should be carefully regression-tested in your environment.
-</Callout>
-
----
-
-## 7. Deprecated and Removed Features
-
-- The legacy `MOCK_METHODn` macro family is supported for compatibility but will be removed in the future.
-- Some legacy matcher interfaces and `ACTION*` macro styles are discouraged in favor of modern polymorphic equivalents.
-
-For removal timelines and replacement strategies, track the [official GoogleTest GitHub repository](https://github.com/google/googletest) release notes.
-
----
-
-## 8. Troubleshooting Common Migration Issues
-
-- **Compilation errors about overloaded/mock methods:**
-  Use fully qualified `MOCK_METHOD` syntax and disambiguate overloads with explicit matcher types or the `Const()` wrapper.
-
-- **Unmatched expectations or unexpected calls:**
-  Use verbose logging (`--gmock_verbose=info`) to trace how calls are matched to expectations.
-
-- **Crashes due to virtual destructors missing:**
-  Ensure all base classes being mocked have virtual destructors.
-
-- **Warnings on uninteresting calls despite default actions:**
-  Add explicit expectations with `.Times(AnyNumber())` or switch mocks to `NiceMock`.
-
-- **Tests failing due to changed expectation stickiness:**
-  Adjust expectations to retire upon saturation where necessary.
-
----
-
-## 9. Additional Resources
-
-- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) for detailed usage
-- [Mocking Reference](https://google.github.io/googletest/reference/mocking.html) for core API
-- [System Requirements & Supported Platforms](https://google.github.io/googletest/getting-started/setup-prerequisites-installation/system-requirements.html)
-- [Mocking Workflow Guide](https://google.github.io/googletest/guides/core-workflows/mocking-workflow.html)
-- [Migration Guide](https://google.github.io/googletest/guides/integration-and-scenarios/migration-guide.html)
-
----
-
-## Summary
-
-This document catalogs significant breaking changes and migration steps in GoogleMock. It guides developers to upgrade codebases for C++17 compliance, migrate to new macro syntaxes, adapt to expectation stickiness changes, and update custom matchers and actions. Adhering to best practices ensures tests remain robust, maintainable, and compatible with evolving GoogleMock releases.
