@@ -1,0 +1,334 @@
+---
+title: "Declaring and Using Mocks"
+description: "Step-by-step reference for declaring mock classes with the MOCK_METHOD macro, supported class method features, and usage in tests. Explains integration with test fixtures and edge cases, such as const/override/multithreaded usage."
+---
+
+# Declaring and Using Mocks
+
+This page offers a practical, detailed reference on declaring mock classes using the `MOCK_METHOD` macro and deploying mock objects in tests with GoogleMock (gMock). It covers how to define mocks for various class method types, including const, overloaded, and template methods, how to handle method qualifiers, and how to integrate mocks in your tests for effective interaction verification. Additionally, it explains important concepts such as mock strictness (NiceMock, NaggyMock, StrictMock) and advanced mocking scenarios like move-only types, delegating to fakes or real implementations, and multi-threaded use.
+
+---
+
+## Defining Mock Classes with `MOCK_METHOD`
+
+GoogleMock provides the `MOCK_METHOD` macro to declare mock methods inside mock classes with a straightforward syntax that mirrors the signature of the method being mocked.
+
+### Basic Usage of `MOCK_METHOD`
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(ReturnType, MethodName, (Args...), (Specs...));
+};
+```
+
+- `ReturnType`: The return type of the method.
+- `MethodName`: The method's name.
+- `Args...`: The argument types wrapped in parentheses.
+- `Specs...`: Optional qualifiers, also in parentheses (e.g., `const`, `override`).
+
+### Handling Special Method Qualifiers
+
+The fourth parameter to `MOCK_METHOD` can contain a comma-separated list of method qualifiers:
+
+| Qualifier                | Purpose                                                                 |
+|--------------------------|-------------------------------------------------------------------------|
+| `const`                  | Marks the method as a `const` method. Must be used to override a const method.
+| `override`               | Marks the method as `override`, recommended for virtual method overrides.
+| `noexcept`               | Marks the method as `noexcept`, required to correctly mock such methods.
+| `Calltype(convention)`    | Specifies calling convention (e.g., `Calltype(STDMETHODCALLTYPE)` for Windows).
+| `ref(&)` or `ref(&&)`    | Specifies reference qualifiers if the base method has them.
+
+Example:
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, GetSize, (), (const, override));  // Mocking a const method
+};
+```
+
+### Dealing with Commas in Arguments
+
+Because unprotected commas in argument or return types confuse the macro parser, wrap types containing commas in parentheses or use type aliases:
+
+```cpp
+class MyMock {
+ public:
+  // Bad: won't compile
+  MOCK_METHOD(std::pair<bool, int>, GetPair, ());
+
+  // Good: use parentheses
+  MOCK_METHOD((std::pair<bool, int>), GetPair, ());
+
+  // Or use type alias
+  using BoolIntPair = std::pair<bool, int>;
+  MOCK_METHOD(BoolIntPair, GetPair, ());
+};
+```
+
+### Mocking Non-public Methods
+
+Always place `MOCK_METHOD` declarations in the `public:` section of your mock class, even if the original methods are protected or private. This allows `EXPECT_CALL` and `ON_CALL` to access the mocked methods from tests.
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(bool, Transform, (Gadget* g), (override)); // public
+  MOCK_METHOD(void, Resume, (), (override));             // was protected
+  MOCK_METHOD(int, GetTimeOut, (), (override));          // was private
+};
+```
+
+### Mocking Overloaded Methods
+
+You can mock overloaded functions by declaring all overloaded variants explicitly:
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, Add, (Element x), (override));
+  MOCK_METHOD(int, Add, (int times, Element x), (override));
+  MOCK_METHOD(Bar&, GetBar, (), (override));
+  MOCK_METHOD(const Bar&, GetBar, (), (const, override));
+};
+```
+
+If you only want to mock some overloads, use `using` to bring the others into scope to avoid hiding them:
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  using Foo::Add;  // Bring other overloads into scope
+  MOCK_METHOD(int, Add, (Element x), (override));
+};
+```
+
+### Mocking Class Templates
+
+Mock class templates the same way as normal classes:
+
+```cpp
+template <typename T>
+class MockStack : public StackInterface<T> {
+ public:
+  MOCK_METHOD(int, GetSize, (), (const, override));
+  MOCK_METHOD(void, Push, (const T& x), (override));
+};
+```
+
+### Mocking Non-Virtual Methods
+
+While `MOCK_METHOD` is designed for mocking virtual methods, gMock also supports mocking non-virtual methods for high-performance dependency injection. Mock classes don't inherit from the original class but replicate method signatures.
+
+```cpp
+class MockPacketStream {
+ public:
+  MOCK_METHOD(const Packet*, GetPacket, (size_t index), (const));
+  MOCK_METHOD(size_t, NumberOfPackets, (), (const));
+};
+```
+
+Your production and testing code can be templated on the packet stream type.
+
+### Legacy `MOCK_METHODn` Macros
+
+Old-style macros like `MOCK_METHOD1()` are still supported but not recommended. Prefer `MOCK_METHOD`.
+
+
+## Integrating Mocks in Tests
+
+Using mocks typically follows this workflow:
+
+1. Import necessary gMock symbols from the `testing` namespace.
+2. Define and create mock objects.
+3. Optionally set default actions with `ON_CALL`.
+4. Specify expectations on mock methods using `EXPECT_CALL`.
+5. Exercise your code using the mocks.
+6. Mocks verify expectations automatically upon destruction.
+
+Example:
+
+```cpp
+using ::testing::Return;
+
+TEST(FooTest, Basic) {
+  MockFoo mock;
+  ON_CALL(mock, GetSize()).WillByDefault(Return(10));
+
+  EXPECT_CALL(mock, GetSize()).Times(1);
+
+  ASSERT_EQ(SomeFunctionUsingMock(&mock), 10);
+}
+```
+
+### Setting Default Behaviors with `ON_CALL`
+
+Use `ON_CALL(mock, method(args))` to specify default action when the mock method is called but no explicit `EXPECT_CALL` matches.
+
+```cpp
+ON_CALL(mock, Method(_)).WillByDefault(Return(default_value));
+```
+
+### Setting Expectations with `EXPECT_CALL`
+
+Specify that a mock method is expected to be called (optionally multiple times), with argument matchers and actions describing behavior.
+
+```cpp
+EXPECT_CALL(mock, Method(42))
+    .Times(3)
+    .WillOnce(Return(1))
+    .WillRepeatedly(Return(2));
+```
+
+### Mock Strictness: Nice, Naggy, Strict
+
+- **NaggyMock** (default): Prints warnings on unintended calls.
+- **NiceMock**: Suppresses warnings for uninteresting calls.
+- **StrictMock**: Treats uninteresting calls as test failures.
+
+Use them like:
+
+```cpp
+NiceMock<MockFoo> nice_mock;
+StrictMock<MockFoo> strict_mock;
+```
+
+### Handling Move-Only Types
+
+Mock methods can accept and return move-only types (e.g., `std::unique_ptr`). You mock them as usual with `MOCK_METHOD`. Use lambdas or functors for actions that return new instances each time, avoiding multiple moves of the same object.
+
+```cpp
+MOCK_METHOD(std::unique_ptr<Foo>, MakeFoo, (), (override));
+
+EXPECT_CALL(mock, MakeFoo())
+    .WillRepeatedly([]() { return std::make_unique<Foo>(); });
+```
+
+### Delegating Calls to a Fake or Real Object
+
+You can delegate mock method calls to a fake or real implementation to combine existing behavior with expectations:
+
+```cpp
+ON_CALL(mock, Method(_)).WillByDefault([this](Args... args) {
+  return fake_.Method(std::forward<Args>(args)...);
+});
+```
+
+### Multi-Threaded Usage
+
+Always set up mocks (creation and expectation setting) in a single thread before using them across multiple threads. Calls to mock methods are thread-safe; gMock serializes matching and invocation internally.
+
+### Forcing Verification Mid-Test
+
+If your mock's lifetime is managed externally, call:
+
+```cpp
+Mock::VerifyAndClearExpectations(&mock);
+```
+
+to force validation before destruction.
+
+## Example Patterns
+
+### Declaring a Mock Class
+
+```cpp
+#include <gmock/gmock.h>
+
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, GetSize, (), (const, override));
+  MOCK_METHOD(void, SetValue, (int value), (override));
+};
+```
+
+### Using `EXPECT_CALL`
+
+```cpp
+MockFoo mock;
+
+EXPECT_CALL(mock, SetValue(42))
+    .Times(1);
+
+mock.SetValue(42);  // Passes.
+```
+
+### Using `ON_CALL` for Default Behavior
+
+```cpp
+ON_CALL(mock, GetSize()).WillByDefault(Return(5));
+EXPECT_CALL(mock, GetSize()).Times(2);
+
+int size = mock.GetSize();  // Returns 5.
+```
+
+### Using `NiceMock` to Suppress Warnings
+
+```cpp
+NiceMock<MockFoo> mock;
+// No warnings for uninteresting calls.
+mock.SetValue(10);
+```
+
+### Testing Move-Only Types
+
+```cpp
+class MockBuzzer : public Buzzer {
+ public:
+  MOCK_METHOD(std::unique_ptr<Buzz>, MakeBuzz, (std::string text), (override));
+};
+
+EXPECT_CALL(mock_buzzer, MakeBuzz(_))
+    .WillRepeatedly([](const std::string& text) {
+      return std::make_unique<Buzz>(AccessLevel::kInternal);
+    });
+```
+
+## Troubleshooting Common Pitfalls
+
+- **Expectations must be set before exercising mocks:** Calls to `EXPECT_CALL` must precede any code invoking mocked methods to avoid undefined behavior.
+- **Commas in templates require parentheses:** Always wrap types containing commas in parentheses or use type aliases.
+- **Mock method definitions must be in `public:`:** Even if the original method is protected or private.
+- **Beware expectations are sticky:** Saturated expectations remain active unless `.RetiresOnSaturation()` is specified.
+- **Use `NiceMock` or `StrictMock` cautiously:** Overusing `StrictMock` can make tests brittle.
+
+## Additional Considerations
+
+### Mocking Destructors
+
+Mocking destructors directly is unsupported by `MOCK_METHOD`. Instead, add a mock method like `Die()` and call it from the destructor.
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(void, Die, ());
+  ~MockFoo() override { Die(); }
+};
+
+EXPECT_CALL(mock_foo, Die());
+```
+
+### Using `MockFunction` to Mock `std::function`
+
+`MockFunction<R(Args...)>` defines a mock with a method `Call()`. You can obtain a `std::function` proxy:
+
+```cpp
+MockFunction<int(std::string)> mock;
+EXPECT_CALL(mock, Call("test")).WillOnce(Return(1));
+std::function<int(std::string)> func = mock.AsStdFunction();
+```
+
+---
+
+<Callout title="Tip">
+Always mock virtual destructors in interfaces to avoid undefined behavior when deleting polymorphic objects.
+</Callout>
+
+---
+
+For comprehensive guidance on expectation setting, argument matching, sequences, and advanced mocking techniques, see [Writing Mock Expectations](https://google.github.io/googletest/guides/mocking-with-googlemock/writing-mock-expectations.html) and [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html).
+
+---
+
+<Source url="https://github.com/google/googletest" branch="main" paths={[{"path": "docs/gmock_cheat_sheet.md", "range": "1-200"},{"path": "docs/reference/mocking.md", "range": "1-200"},{"path": "docs/gmock_for_dummies.md", "range": "1-150"},{"path": "docs/gmock_cook_book.md", "range": "1-350"}]} />

@@ -1,0 +1,228 @@
+---
+title: "Cardinalities and Mock Expectations"
+description: "Explore cardinalities and expectation-setting in GoogleMock: specify how many times a method should be called, how to sequence expectations, and the impact on test outcomes. Discover how to leverage these constructs to model and enforce business logic contracts."
+---
+
+# Cardinalities and Mock Expectations
+
+In GoogleMock, cardinalities and expectations form the backbone for specifying *how many times* a mock method should be called during a test. Mastering these concepts empowers you to precisely define interaction contracts within your code, enforce call order, and accurately verify business logic behavior.
+
+---
+
+## Understanding Cardinalities: Defining Call Counts
+
+A **cardinality** describes the expected number of invocations of a mock method matching an expectation. It defines bounds such as "called exactly once" or "called at least twice." GoogleMock provides a rich set of built-in cardinalities to express your intent precisely.
+
+### Built-in Cardinalities
+
+| Cardinality         | Meaning                                             |
+|---------------------|-----------------------------------------------------|
+| `AnyNumber()`       | Can be called any number of times (including zero). |
+| `AtLeast(n)`        | Called at least *n* times.                           |
+| `AtMost(n)`         | Called at most *n* times.                            |
+| `Between(m, n)`     | Called between *m* and *n* times, inclusive.        |
+| `Exactly(n)` or `n` | Called exactly *n* times.                            |
+
+### Expressive Cardinality Examples
+
+```cpp
+EXPECT_CALL(mock_object, SomeMethod())
+    .Times(Exactly(3));  // Must be called exactly 3 times
+
+EXPECT_CALL(mock_object, SomeMethod())
+    .Times(AtLeast(1)); // Must be called one or more times
+
+EXPECT_CALL(mock_object, SomeMethod())
+    .Times(AnyNumber()); // Any number of calls allowed
+
+EXPECT_CALL(mock_object, SomeMethod())
+    .Times(Between(2, 4)); // Called between 2 and 4 times
+```
+
+### Default Cardinality Inference
+
+If you omit `.Times()`, GoogleMock infers cardinalities based on your use of actions (`WillOnce()`, `WillRepeatedly()`):
+
+- No `WillOnce()` or `WillRepeatedly()` → inferred `Times(1)` (called once)
+- *n* `WillOnce()` clauses and no `WillRepeatedly()` → inferred `Times(n)`
+- *n* `WillOnce()` clauses and one `WillRepeatedly()` → inferred `Times(AtLeast(n))`
+
+> **Tip:** Understanding this inference avoids surprising failures due to unexpected number of calls.
+
+### Common Pitfalls
+
+- Specifying `Times(0)` requires the method **not to be called**; any call will cause a test failure.
+- Overcalling beyond the upper bound causes an immediate error.
+- Forgetting to specify `.Times()` may lead to stricter expectations than you expect.
+
+---
+
+## Setting Expectations on Mock Methods
+
+Expectations in GoogleMock specify the contract your mock method must adhere to during tests. They govern not only how many times a method is called but also **how** and **when**.
+
+### Specifying Expectations with `EXPECT_CALL`
+
+The primary mechanism is `EXPECT_CALL`, which declares an expectation on a mock method:
+
+```cpp
+EXPECT_CALL(mock_object, MethodName(matchers...))
+    .Times(cardinality)
+    .WillOnce(action)
+    .WillRepeatedly(action)
+    .RetiresOnSaturation()
+    .InSequence(sequences...)
+    .After(expectations...);
+```
+
+- `.Times(cardinality)` sets how many times this call is expected.
+- `.WillOnce(action)` and `.WillRepeatedly(action)` define what happens when the method is called.
+- `.RetiresOnSaturation()` deactivates the expectation once saturated (see below).
+- `.InSequence()` and `.After()` specify ordering constraints.
+
+### The Sticky Nature of Expectations
+
+By default, expectations are "sticky" — they remain active even after reaching their invocation upper bound. For example:
+
+```cpp
+EXPECT_CALL(mock, Foo(7)).Times(2);
+
+mock.Foo(7);  // OK
+mock.Foo(7);  // OK
+mock.Foo(7);  // Error: over-saturated
+```
+
+This sticky behavior enforces strict adherence unless `RetiresOnSaturation()` is applied, which, when used, **retires** the expectation immediately after it is saturated, allowing other matching expectations to handle further calls.
+
+### Using `RetiresOnSaturation()` to Manage Multiple Expectations
+
+Sometimes you want sequential expectations on the same call:
+
+```cpp
+EXPECT_CALL(mock, Foo(7)).Times(2).RetiresOnSaturation();
+EXPECT_CALL(mock, Foo(_)).Times(AnyNumber());
+```
+
+- The first expects exactly two calls to `Foo(7)`, then retires.
+- Subsequent calls to `Foo(7)` match the catch-all expectation without error.
+
+---
+
+## Sequencing and Ordering
+
+Cardinalities define *how many* times calls are made, but tests often require control over *when* calls happen.
+
+### Using `InSequence` to Require Strict Call Order
+
+Wrapping expectations within an `InSequence` object enforces that calls occur exactly in the order expected:
+
+```cpp
+{
+  testing::InSequence seq;
+
+  EXPECT_CALL(mock, FirstCall());
+  EXPECT_CALL(mock, SecondCall());
+}
+
+mock.FirstCall();   // OK
+mock.SecondCall();  // OK
+mock.FirstCall();   // Error: out of order
+```
+
+This also ties into cardinalities — the expectations activities depend on how many times a call is made.
+
+### Partial Ordering with Sequences
+
+Multiple sequences can describe a DAG of call order constraints. For example:
+
+```cpp
+Sequence s1, s2;
+EXPECT_CALL(mock, CallA()).InSequence(s1, s2);
+EXPECT_CALL(mock, CallB()).InSequence(s1);
+EXPECT_CALL(mock, CallC()).InSequence(s2);
+```
+
+This enforces that `CallA` is called before `CallB` and `CallC`, but not the order between `CallB` and `CallC`.
+
+### Using `.After()` to Specify Call Dependencies
+
+The `.After()` clause explicitly states that an expectation must be invoked after other expectations succeed:
+
+```cpp
+auto e1 = EXPECT_CALL(mock, Initialize());
+auto e2 = EXPECT_CALL(mock, Process()).After(e1);
+```
+
+This ensures `Process()` is not called before `Initialize()`.
+
+---
+
+## Impact of Cardinalities on Test Outcomes
+
+Cardinalities directly influence test pass/fail results:
+
+- **Too Few Calls:** If calls are below the lower bound, the test will fail when the mock object is destroyed or verified, showing "Actual: never called" or below the expected count.
+- **Too Many Calls:** Invoking calls beyond the upper bound causes immediate failures with detailed messages.
+- **Exactly(0) Calls:** Ensures a method is never called.
+
+### Helpful Failure Messages
+
+GoogleMock generates precise messages like:
+
+```
+Actual function call count doesn't match EXPECT_CALL(mock, Foo())...
+    Expected: to be called at least twice
+    Actual: called once - unsatisfied and active
+```
+
+These messages help you quickly identify mismatches in call counts.
+
+---
+
+## Practical Tips and Best Practices
+
+- **Use Cardinalities to Express Intent Clearly:** Avoid vague expectations; be explicit with `.Times()` where calls count matters.
+- **Prefer `RetiresOnSaturation()` When Chaining Sequential Expectations:** It prevents "upper-bound violated" errors in code with repetitive calls matching multiple expectations.
+- **Define Call Sequences Explicitly:** Use `InSequence` or `.After()` to enforce order when business logic requires it.
+- **Use Catch-All Expectations Wisely:** For methods where most calls are unimportant, add an `EXPECT_CALL(...).Times(AnyNumber())` as a fallback.
+- **Watch for Sticky Expectations:** Unretired expectations matching calls beyond the upper bound cause errors.
+- **Leverage Default Cardinality Inference:** When specifying actions only, trust the built-in inference, but understand its rules.
+
+---
+
+## Troubleshooting Common Issues
+
+<AccordionGroup title="Common Issues with Cardinalities and Expectations">
+<Accordion title='Why does my test fail with "expected to be called once" even though I called the method multiple times?'>
+By default, expectations are sticky — once their call count upper bound is reached, further calls matching that expectation will trigger an error. Use `.RetiresOnSaturation()` to automatically deactivate the expectation when it is saturated, or adapt your cardinality to allow more calls.
+</Accordion>
+<Accordion title="What happens if I omit `.Times()` in my `EXPECT_CALL`?">
+GoogleMock infers the call count from the number of `WillOnce()` and presence of `WillRepeatedly()`. Be aware of the inference rules to avoid unintended strictness.
+</Accordion>
+<Accordion title="Why are unexpected calls reported despite setting `ON_CALL`?">
+`ON_CALL` sets default behavior but *does not* establish an expectation that the method will be called. To avoid warnings on unexpected calls, add appropriate `EXPECT_CALL` with relaxed cardinality like `Times(AnyNumber())` or use `NiceMock`.
+</Accordion>
+<Accordion title="How to handle multiple matching expectations for the same method?">
+GoogleMock selects the last expectation that matches the call. Ensure specific expectations are declared after general ones, or use sequencing and retirement to avoid confusion.
+</Accordion>
+</AccordionGroup>
+
+---
+
+## Summary
+
+Cardinalities in GoogleMock specify the bounds on the number of times mock methods are expected to be called, ranging from exact counts to flexible ranges such as "at least n times" or "any number." Expectations set with `EXPECT_CALL` define the contract of how methods should be called, what actions to take, and how call ordering affects tests. Seamlessly combining cardinalities with sequencing constructs allows modeling complex business logic accurately.
+
+
+---
+
+## See Also
+
+- [gMock for Dummies - Setting Expectations](docs/gmock_for_dummies.md#setting-expectations)
+- [Mocking Reference - EXPECT_CALL.Times](api-reference/mocking-apis/defining-expectations.md#EXPECT_CALL.Times)
+- [gMock Cookbook - Setting Expectations](guides/mocking-with-googlemock/writing-mock-expectations.md)
+- [Matchers Reference](api-reference/matcher-action-references/matchers-reference.md) for argument matching details
+- [Actions Reference](api-reference/matcher-action-references/actions-reference.md) for method behavior
+- [Sequence and After clauses](api-reference/mocking-apis/defining-expectations.md#EXPECT_CALL.InSequence)
+
+For an in-depth example, see the `docs/gmock_for_dummies.md` and `docs/gmock_cook_book.md` sections about cardinalities and expectation sequences.
