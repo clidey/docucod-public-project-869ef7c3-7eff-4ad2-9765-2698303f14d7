@@ -1,0 +1,253 @@
+---
+title: "Custom Actions and Matchers"
+description: "Empowers users to extend GoogleMock by defining reusable, domain-specific actions and matchers. Includes tips for maintainability and cross-test reuse."
+---
+
+# Custom Actions and Matchers
+
+Extend GoogleMock by defining reusable, domain-specific matchers and actions that enhance expressiveness and maintainability in your tests.
+
+---
+
+## Overview
+
+While GoogleMock provides a rich set of built-in matchers and actions, custom definitions allow you to encapsulate complex validation logic or side-effects particular to your domain. This guide presents practical methods to create new matchers and actions, ensuring they are reusable across tests and easy to maintain.
+
+## Why Extend GoogleMock?
+
+Imagine you often verify that a complex object meets certain invariants or that a function must perform a sequence of side effects beyond simple return values. Creating specific matchers or actions:
+
+- Improves test readability by abstracting complex conditions.
+- Centralizes reusable logic to avoid duplication.
+- Provides more meaningful failure messages.
+
+## Writing Custom Matchers
+
+### Using the `MATCHER` Macros
+
+The simplest way to define a matcher is with the `MATCHER` and `MATCHER_P` (parameterized) macros.
+
+**Basic Matcher Example:**
+
+```cpp
+MATCHER(IsEven, "Checks if a number is even") {
+  return (arg % 2) == 0;
+}
+
+// Usage in test
+EXPECT_CALL(mock_obj, Func(IsEven()));
+```
+
+When this expectation fails, GoogleMock will output that it expected a value that "is even".
+
+**Parameterized Matcher Example:**
+
+```cpp
+MATCHER_P(IsDivisibleBy, divisor, "Checks if divisible by given divisor") {
+  return (arg % divisor) == 0;
+}
+
+// Usage
+EXPECT_CALL(mock_obj, Func(IsDivisibleBy(3)));
+```
+
+This outputs the parameter in failure messages, e.g., "is divisible by 3".
+
+**Best Practices:**
+
+- Implement expressive descriptions to help understand failures.
+- Avoid side effects inside matchers: they must be pure.
+- Use `EXPECT_` macros inside matcher bodies to improve failure diagnostics.
+
+### Writing Matcher Classes
+
+For more advanced or widely used matchers, define a matcher class implementing the interface:
+
+- `bool MatchAndExplain(const T& value, std::ostream* listener) const` — returns whether `value` matches and optionally appends explanation for failure.
+- `void DescribeTo(std::ostream* os) const` — describes matcher behavior.
+- `void DescribeNegationTo(std::ostream* os) const` — describes negation.
+
+Then provide a factory function that returns a `testing::Matcher<T>`.
+
+*Example: match if sum of two fields equals a number:*
+
+```cpp
+class BarPlusBazEqMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  explicit BarPlusBazEqMatcher(int expected_sum) : expected_sum_(expected_sum) {}
+
+  bool MatchAndExplain(const Foo& foo, std::ostream* listener) const {
+    if ((foo.bar() + foo.baz()) == expected_sum_) return true;
+    if (listener) *listener << "sum is " << (foo.bar() + foo.baz());
+    return false;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "bar() + baz() equals " << expected_sum_;
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "bar() + baz() does not equal " << expected_sum_;
+  }
+
+ private:
+  const int expected_sum_;
+};
+
+::testing::Matcher<const Foo&> BarPlusBazEq(int expected_sum) {
+  return ::testing::MakeMatcher(new BarPlusBazEqMatcher(expected_sum));
+}
+```
+
+### Composing Matchers
+
+You can combine matchers using logical operators:
+
+- `AllOf(m1, m2, ...)` — all matchers must match.
+- `AnyOf(m1, m2, ...)` — any matcher may match.
+- `Not(m)` — negates matcher.
+
+These improve expressiveness and make complex conditions readable.
+
+## Writing Custom Actions
+
+Actions define what a mock function does when called. Custom actions enable you to:
+
+- Return values computed dynamically.
+- Modify arguments.
+- Perform side effects or invoke callbacks.
+
+### Defining Actions using Lambdas or Functors
+
+The easiest way is to provide a callable with a compatible signature.
+
+**Example lambda action:**
+
+```cpp
+EXPECT_CALL(mock, Method(_))
+    .WillOnce([](int x) { return x * 2; });
+```
+
+When `Method` is called, the lambda computes the return value dynamically.
+
+**Functors:**
+
+```cpp
+struct MultiplyBy {
+  int factor;
+  int operator()(int arg) { return arg * factor; }
+};
+EXPECT_CALL(mock, Method(_)).WillOnce(MultiplyBy{3});
+```
+
+### Using `ACTION` Macros
+
+For commonly used actions, define them with the `ACTION` macros at namespace scope.
+
+```cpp
+ACTION(IncrementArg0) {
+  return ++arg0;
+}
+
+EXPECT_CALL(mock, Foo(_)).WillOnce(IncrementArg0());
+```
+
+You can parameterize actions using `ACTION_P, ACTION_P2`, etc.
+
+```cpp
+ACTION_P(Add, n) { return arg0 + n; }
+EXPECT_CALL(mock, Foo(_)).WillOnce(Add(5));
+```
+
+### Using `Invoke` to Call Functions or Methods
+
+You may want the mock function to call an existing function or method.
+
+```cpp
+int ComputeSum(int x, int y) { return x + y; }
+EXPECT_CALL(mock, Sum(_, _)).WillOnce(::testing::Invoke(ComputeSum));
+```
+
+Or call a method on a helper object:
+
+```cpp
+EXPECT_CALL(mock, DoWork(_))
+    .WillOnce(::testing::Invoke(&helper, &Helper::DoWork));
+```
+
+### Chaining Multiple Sub-Actions
+
+Use `DoAll()` to chain multiple actions and return the last one's result.
+
+```cpp
+EXPECT_CALL(mock, Modify(_, _))
+    .WillOnce(::testing::DoAll(
+        ::testing::SetArgPointee<0>(5),
+        ::testing::Return(true)));
+```
+
+### Special Actions Provided by GoogleMock
+
+- `SetArgPointee<N>(value)` — sets value pointed to by `N`-th argument.
+- `SaveArg<N>(ptr)` — copies argument `N` to `*ptr`.
+- `DeleteArg<N>()` — deletes `N`-th argument, if pointer.
+- `InvokeArgument<N>(args...)` — calls `N`-th argument as callable with `args...`.
+
+## Best Practices for Maintainability
+
+- Name your custom matchers and actions clearly to reflect their intent.
+- Keep matchers pure (no side effects) for reliability and repeatability.
+- Write descriptive matcher failure messages to guide debugging.
+- For actions, carefully consider copy vs move semantics, especially for move-only types.
+- Use parameterized matchers/actions to avoid code duplication.
+- Keep custom code small and focused to facilitate understanding.
+
+## Example: Defining a Custom Matcher and Action
+
+```cpp
+// Custom matcher that checks that a vector contains an even count of positive numbers
+MATCHER(IsEvenCountPositive, "has even number of positive elements") {
+  int count = 0;
+  for (int x : arg) {
+    if (x > 0) ++count;
+  }
+  return (count % 2) == 0;
+}
+
+// Custom action that appends an element to a vector passed by pointer
+ACTION_P(AppendValue, value) {
+  arg0->push_back(value);
+}
+
+// Usage
+EXPECT_CALL(mock, ProcessVector(_))
+  .WillOnce(DoAll(AppendValue(42), Return(true)));
+
+EXPECT_CALL(mock, CheckVector(IsEvenCountPositive()));
+```
+
+## Troubleshooting & Tips
+
+- If an uninteresting call warning annoys you, consider using `NiceMock` wrappers.
+- If matchers don't behave as expected, enable verbose debugging with `--gmock_verbose=info`.
+- Avoid over-specifying expectations and actions to keep tests robust.
+- When mocking overloaded methods, help resolve ambiguity with `using` declarations or explicit casts.
+
+## Next Steps & Related Guides
+
+- Explore [Creating and Using Mocks](https://google.github.io/googletest/guides/mocking-best-practices/creating-mocks) to tie custom matchers/actions into your mock objects.
+- Review [Writing Expectations and Actions](https://google.github.io/googletest/guides/mocking-best-practices/writing-expectations-actions) for deeper insights.
+- Consult the [Matchers Reference](https://google.github.io/googletest/reference/matchers.html) for built-in matcher extensions.
+- Leverage [Mocking Best Practices](https://google.github.io/googletest/guides/mocking-best-practices) for writing maintainable and expressive tests.
+
+## Additional Resources
+
+- [MATCHER macros documentation](https://google.github.io/googletest/gmock_cook_book.html#NewMatchers)
+- [Custom Actions documentation](https://google.github.io/googletest/docs/gmock_cook_book.html#QuickNewActions)
+- [GoogleMock Documentation Home](https://google.github.io/googletest/gmock)
+
+---
+
+This page empowers you to write tailored matchers and actions giving your tests expressive power while ensuring clarity and maintainability.
