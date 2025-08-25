@@ -1,0 +1,279 @@
+---
+title: "Organizing and Scaling Large Test Suites"
+description: "Best practices for structuring large testing codebases, integrating with continuous integration systems, and managing test fixtures, dependencies, and environments. Learn to scale GoogleTest and GoogleMock as your project grows."
+---
+
+# Organizing and Scaling Large Test Suites
+
+## Overview
+This guide provides best practices for structuring large testing codebases as they grow. It covers strategies for organizing tests, managing test fixtures and dependencies effectively, and integrating GoogleTest and GoogleMock into continuous integration (CI) systems. By following these practices, you will maximize test maintainability, scalability, and efficiency in your projects.
+
+---
+
+## 1. Designing Test Suites for Scalability
+
+### Why Organize Your Test Suites?
+As projects expand, test suites tend to grow in number and complexity. Well-organized test suites help:
+
+- Keep tests maintainable and readable
+- Reduce test execution time by enabling selective runs
+- Facilitate parallel and incremental testing
+- Integrate smoothly with CI pipelines
+
+### Approach to Structuring Large Test Suites
+
+- **Group by Module or Feature:** Align test suites with the codebase's logical modules or features. This mirrors your code structure and supports focused changes.
+- **Limit Suite Size:** Avoid monolithic test suites with hundreds of tests. Large suites increase setup/teardown overhead and reduce isolation.
+- **Use Test Fixtures Wisely:** Share common setup code with test fixtures to avoid duplication, but keep fixtures lightweight and focused.
+- **Consistent Naming:** Use clear, consistent naming conventions without underscores in test suite or test names for compatibility and readability.
+
+```cpp
+// Avoid underscores in suite and test names
+TEST(FooModule, HandlesEdgeCase) { ... }
+```
+
+### Test Suite Example
+
+```cpp
+class DatabaseTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    db_.Connect();
+  }
+  void TearDown() override {
+    db_.Disconnect();
+  }
+  Database db_;
+};
+
+TEST_F(DatabaseTest, InsertsRecord) {
+  EXPECT_TRUE(db_.Insert("record"));
+}
+
+TEST_F(DatabaseTest, DeletesRecord) {
+  db_.Insert("record");
+  EXPECT_TRUE(db_.Delete("record"));
+}
+```
+
+---
+
+## 2. Managing Test Fixtures, Dependencies, and Environment
+
+### Principles for Test Fixtures
+
+- **Per-Test Freshness:** GoogleTest creates a fresh fixture for each test ensuring isolation.
+- **Lightweight SetUp/TearDown:** Keep setup and teardown fast to avoid slowing down tests.
+- **Shared Resources:** For expensive resources, use `SetUpTestSuite()` and `TearDownTestSuite()` for shared initialization/cleanup.
+
+```cpp
+class ExpensiveResourceTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    resource_ = new ExpensiveResource();
+  }
+  static void TearDownTestSuite() {
+    delete resource_;
+  }
+  static ExpensiveResource* resource_;
+};
+
+ExpensiveResource* ExpensiveResourceTest::resource_ = nullptr;
+```
+
+### Integrating Mocks into Fixtures
+
+- Define mocks as class members inside the fixture.
+- Use `ON_CALL` to set default behaviors for mock methods in fixture `SetUp()`.
+- Specify strict expectations in each test individually with `EXPECT_CALL`.
+- Use `NiceMock` or `StrictMock` wrappers to control uninteresting call warnings.
+
+```cpp
+#include <gmock/gmock.h>
+using ::testing::NiceMock;
+
+class MockDatabase : public Database {
+ public:
+  MOCK_METHOD(bool, Insert, (const std::string& record), (override));
+  MOCK_METHOD(bool, Delete, (const std::string& record), (override));
+};
+
+class DatabaseTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    ON_CALL(mock_db_, Insert).WillByDefault(::testing::Return(true));
+    ON_CALL(mock_db_, Delete).WillByDefault(::testing::Return(true));
+  }
+  NiceMock<MockDatabase> mock_db_;
+};
+```
+
+---
+
+## 3. Integrating with Continuous Integration Systems
+
+### Generating Test Reports
+
+- Use GoogleTest's built-in XML or JSON output by running test binaries with:
+  
+  ```sh
+  ./my_test --gtest_output=xml:report.xml
+  ./my_test --gtest_output=json:report.json
+  ```
+
+- These reports integrate easily with CI tools like Jenkins, CircleCI, GitHub Actions.
+
+### Controlling Test Execution
+
+- Use flags for filtering tests to speed up CI runs:
+  
+  ```sh
+  ./my_test --gtest_filter=DatabaseTest.*
+  ```
+
+- Use sharding for parallel execution across multiple machines:
+
+  - Set environment variables:
+  
+    ```sh
+    export GTEST_TOTAL_SHARDS=2
+    export GTEST_SHARD_INDEX=0  # Or 1 on the second machine
+    ```
+
+- Control verbosity and logging as needed with flags like `--gtest_brief=1`, `--gtest_repeat`.
+
+### Automating Test Setup and Teardown
+
+- Use `testing::Environment` to define global setup and teardown for test runs.
+- Register environments with `AddGlobalTestEnvironment()` before `RUN_ALL_TESTS()`.
+
+```cpp
+class GlobalEnvironment : public ::testing::Environment {
+ public:
+  void SetUp() override {
+    // Global setup code
+  }
+  void TearDown() override {
+    // Global teardown code
+  }
+};
+
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  ::testing::AddGlobalTestEnvironment(new GlobalEnvironment);
+  return RUN_ALL_TESTS();
+}
+```
+
+---
+
+## 4. Best Practices and Common Pitfalls
+
+### Best Practices
+
+- **Set precise expectations:** Use `EXPECT_CALL` conservatively to verify key interactions.
+- **Use `ON_CALL` for graceful default behavior:** Avoid over-specifying mocks, which leads to brittle tests.
+- **Prefer small fixtures:** Too much shared state can hide test dependencies.
+- **Name tests clearly:** Avoid underscores and reflect the behavior or scenario.
+- **Modularize tests:** Break tests logically so they mirror code responsibilities.
+- **Leverage sequences and ordered expectations:** For verifying call order where necessary.
+
+### Common Pitfalls to Avoid
+
+- Setting expectations after mock methods are called leads to undefined behavior.
+- Mixing `EXPECT_CALL` and actual calls violates gMock's anticipatory expectations.
+- Over-using strict mocks can produce brittle tests that fail on harmless refactors.
+- Skipping default constructor in fixtures causes compile errors.
+- Using fatal assertions in constructors or destructors leads to compilation errors.
+
+---
+
+## 5. Example: Structuring a Feature Test Suite with Mocks and InSequence
+
+```cpp
+#include <gtest/gtest.h>
+#include <gmock/gmock.h>
+
+using ::testing::InSequence;
+using ::testing::Return;
+using ::testing::NiceMock;
+using ::testing::_;
+
+class Interface {
+ public:
+  virtual ~Interface() {}
+  virtual void Step1(int val) = 0;
+  virtual void Step2() = 0;
+  virtual int GetValue() const = 0;
+};
+
+class MockInterface : public Interface {
+ public:
+  MOCK_METHOD(void, Step1, (int val), (override));
+  MOCK_METHOD(void, Step2, (), (override));
+  MOCK_METHOD(int, GetValue, (), (const, override));
+};
+
+class FeatureTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    ON_CALL(mock_, GetValue).WillByDefault(Return(10));
+  }
+  NiceMock<MockInterface> mock_;
+};
+
+TEST_F(FeatureTest, PerformsStepsInOrder) {
+  {
+    InSequence seq;
+    EXPECT_CALL(mock_, Step1(5));
+    EXPECT_CALL(mock_, Step2());
+  }
+  EXPECT_CALL(mock_, GetValue()).Times(2);
+
+  mock_.Step1(5);  // Must call Step1 before Step2
+  mock_.Step2();
+  EXPECT_EQ(mock_.GetValue(), 10);
+  EXPECT_EQ(mock_.GetValue(), 10);
+}
+```
+
+---
+
+## 6. Troubleshooting
+
+**Problem:** Unexpected mock method call or missing expectation.
+
+**Solution:** Verify that all `EXPECT_CALL` statements are made before exercising the mock. Ensure matchers correctly reflect expected arguments. Use `--gmock_verbose=info` to trace expectation matches.
+
+**Problem:** Tests run too slow with shared expensive fixtures.
+
+**Solution:** Move setup into `SetUpTestSuite()` and teardown into `TearDownTestSuite()`.
+
+**Problem:** Build or linker errors when including mock classes.
+
+**Solution:** Move mock class constructors and destructors definitions to `.cc` files to reduce compile time and duplication.
+
+---
+
+## 7. Next Steps & Related Content
+
+- **Writing Your First Unit Test:** Learn fundamentals of test writing with GoogleTest and GoogleMock.
+- **Mocking Techniques:** Deep dive into setting expectations and controlling mock behaviors.
+- **Parameterized and Typed Tests:** Scale tests with parameter-driven and type-driven test suites.
+- **Integration and Ecosystem:** Explore integrating GoogleTest with CI systems and external tools.
+- **Performance Optimization:** Improve test runtime for large-scale test suites.
+
+---
+
+## References
+
+- [GoogleTest Primer](primer.md)
+- [gMock for Dummies](gmock_for_dummies.md)
+- [Mocking Reference](docs/reference/mocking.md)
+- [Setting Up and Building Tests](guides/getting-started/setup-build-integration.mdx)
+
+---
+
+*For additional insights and comprehensive understanding, please consult linked guides and references.*
+
+---

@@ -1,0 +1,304 @@
+---
+title: "How do I customize mock behaviors for complex scenarios?"
+description: "Covers advanced mocking techniques, such as conditional actions, multiple expectations, or custom matchers, empowering power users to fully utilize the capabilities of GoogleMock."
+---
+
+# How do I customize mock behaviors for complex scenarios?
+
+GoogleMock offers powerful tools to tailor mock objects’ behaviors precisely to fit complex or nuanced testing requirements. This guide helps advanced users understand how to use conditional actions, multiple expectations, custom matchers, and strictness modifiers to unlock GoogleMock’s full potential.
+
+---
+
+## 1. Setting Conditional Actions Based on Arguments
+
+You can specify different behaviors to be executed when mock methods are called with different arguments. The key is to use multiple `EXPECT_CALL` statements with matchers or to use `.With()` clauses for expressive conditional controls.
+
+### Example: Different Return Values Based on Arguments
+
+```cpp
+using ::testing::Return;
+using ::testing::_;
+using ::testing::Lt;
+
+EXPECT_CALL(foo, DoThis(_))
+    .WillRepeatedly(Return('b'));           // Default behavior
+
+EXPECT_CALL(foo, DoThis(Lt(5)))            // More specific case
+    .WillRepeatedly(Return('a'));
+```
+
+Here, calls with argument less than 5 will return `'a'`, and others `'b'`.
+
+### Using `.With()` for Complex Argument Relations
+
+If you want to enforce relationships between arguments, use the `.With()` clause with multi-argument matchers:
+
+```cpp
+EXPECT_CALL(mock_obj, Func(_, _))
+    .With(Lt())  // E.g., first arg is less than the second
+    .WillOnce(Return(true));
+```
+
+The matcher inside `.With()` applies to a tuple of arguments.
+
+---
+
+## 2. Using Multiple Expectations for Fine-Grained Control
+
+GoogleMock evaluates expectations in reverse order to allow specificity overrides. You can define multiple expectations to handle different argument patterns or call counts.
+
+### Example: Handling Different Calls Separately
+
+```cpp
+EXPECT_CALL(foo, Bar(5))
+    .Times(Exactly(1))
+    .WillOnce(Return(true));
+EXPECT_CALL(foo, Bar(_))
+    .Times(AnyNumber())
+    .WillRepeatedly(Return(false));
+```
+
+This means `Bar(5)` is expected exactly once and returns `true`; other calls may happen any number of times returning `false`.
+
+### Beware of Sticky Expectations
+
+Expectations remain active even after their call counts are reached, unless explicitly told to retire:
+
+```cpp
+EXPECT_CALL(foo, Bar(5))
+    .Times(1)
+    .WillOnce(Return(true))
+    .RetiresOnSaturation();  // Retire when saturated
+```
+
+This prevents later calls from erroneously matching the same expectation.
+
+---
+
+## 3. Customizing Strictness with NiceMock, NaggyMock, and StrictMock
+
+Mock objects allow control over uninteresting call behavior:
+
+- **NiceMock:** Suppresses warnings for uninteresting calls.
+- **NaggyMock:** (Default) Prints warnings for uninteresting calls.
+- **StrictMock:** Treats all uninteresting calls as test failures.
+
+### Choosing Strictness
+
+Use `NiceMock` when you want to ignore uninteresting calls to reduce noise, `StrictMock` to catch any unexpected behavior, and `NaggyMock` for warnings during development.
+
+### Example:
+
+```cpp
+using ::testing::NiceMock;
+using ::testing::StrictMock;
+
+NiceMock<MockFoo> nice_mock;
+EXPECT_CALL(nice_mock, DoThis());
+
+StrictMock<MockFoo> strict_mock;
+EXPECT_CALL(strict_mock, DoThis());
+// Unexpected calls on strict_mock will fail the test.
+```
+
+### Caveats
+
+- Applies only to methods **directly** mocked using `MOCK_METHOD` in the mock class.
+- May not propagate properly for inherited mocked methods.
+
+---
+
+## 4. Defining and Using Custom Matchers
+
+When built-in matchers are insufficient, you can define your own.
+
+### Using `MATCHER` Macros
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  return (arg % 7) == 0;
+}
+```
+
+Used as:
+
+```cpp
+EXPECT_CALL(foo, Bar(IsDivisibleBy7()));
+```
+
+Custom matchers can print detailed failure messages by streaming to `result_listener`.
+
+### Parameterized Matchers
+
+Create matchers with parameters with `MATCHER_P` and variants:
+
+```cpp
+MATCHER_P(HasAbsoluteValue, value, "") {
+  return abs(arg) == value;
+}
+
+EXPECT_THAT(x, HasAbsoluteValue(10));
+```
+
+### Benefits
+
+- Produce human-readable error messages.
+- Can compose complex matching logic.
+
+---
+
+## 5. Writing New Actions to Control Mock Behavior
+
+Beyond built-in actions, define your own for specialized side effects, value computations, or interactions.
+
+### Simple Lambda Actions
+
+```cpp
+EXPECT_CALL(mock, DoSomething(_, _))
+    .WillOnce([](int a, int b) { return a + b; });
+```
+
+### Using `ACTION` Macros for More Complex Actions
+
+```cpp
+ACTION(IncrementArg0) {
+  return arg0 + 1;
+}
+
+EXPECT_CALL(mock, Func(_))
+    .WillOnce(IncrementArg0());
+```
+
+### Polymorphic Actions
+
+To define actions usable with multiple function signatures, implement `Perform` method template and use `MakePolymorphicAction()`.
+
+```cpp
+class ReturnSecondArg {
+ public:
+  template <typename R, typename Args>
+  R Perform(const Args& args) const {
+    return std::get<1>(args);
+  }
+};
+
+auto ReturnSecondArgument() {
+  return ::testing::MakePolymorphicAction(ReturnSecondArg());
+}
+```
+
+---
+
+## 6. Delegating Calls to Fakes or Real Objects
+
+Sometimes you want your mock to delegate default behavior to an existing real or fake object.
+
+### Delegate to Fake
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(int, DoThis, (), (override));
+  ...
+  void DelegateToFake() {
+    ON_CALL(*this, DoThis).WillByDefault([this]() { return fake_.DoThis(); });
+  }
+ private:
+  FakeFoo fake_;
+};
+```
+
+### Delegate to Real Object
+
+Same technique works to delegate calls to an embedded real object, verifying call counts but preserving real behavior.
+
+---
+
+## 7. Ordering Calls and Partial Orders
+
+Besides simple sequences enforced by `InSequence`, use `After` and multiple `Sequence` objects to define complex partial orders of expected calls.
+
+### Sequences
+
+```cpp
+Sequence s1, s2;
+EXPECT_CALL(foo, A()).InSequence(s1, s2);
+EXPECT_CALL(bar, B()).InSequence(s1);
+EXPECT_CALL(bar, C()).InSequence(s2);
+```
+
+Implies:
+
+A must happen before B and C, C before D, etc.
+
+### After Clause
+
+```cpp
+Expectation e1 = EXPECT_CALL(foo, Init());
+EXPECT_CALL(foo, Run()).After(e1);
+```
+
+Specifies that `Run` must be called after `Init`.
+
+---
+
+## 8. Verifying and Resetting Mocks
+
+You can explicitly verify and clear expectations on mock objects using:
+
+- `Mock::VerifyAndClearExpectations(&mock_object)`: verifies all expectations have been met and clears them.
+
+- `Mock::VerifyAndClear(&mock_object)`: also clears default `ON_CALL` actions.
+
+Use these to proactively check mocks before destruction or for test phases.
+
+Remember, setting new expectations after verifying and clearing is undefined.
+
+---
+
+## 9. Troubleshooting Common Complex Behaviors
+
+### Unexpected Call Failures
+
+Use `--gmock_verbose=info` flag to trace calls and expectations to diagnose why calls do not match.
+
+### Uninteresting Call Warnings
+
+If you receive "Uninteresting mock function call" warnings unexpectedly:
+
+- Consider using `NiceMock` to suppress harmless but noisy warnings.
+- Add catch-all expectations like `EXPECT_CALL(foo, Bar(_)).Times(AnyNumber());`.
+
+### Sticky Expectation Issues
+
+If tests fail because calls match saturated expectations, use `.RetiresOnSaturation()` or arrange calls in proper `InSequence` blocks.
+
+---
+
+## 10. Additional Tips and Best Practices
+
+- **Readability:** Use type aliases for complex argument types in `MOCK_METHOD`.
+- **Avoid Over-Specification:** Specify only necessary matchers and expectations.
+- **Order of Expectations:** Write more general expectations first, then more specific ones.
+- **Use Custom Matchers for Clarity:** Simplify argument validation for complex objects.
+- **Delegate Default Behavior When Possible:** Minimizes boilerplate and mimics real behavior.
+- **Control Verbosity Properly:** Use `--gmock_verbose` flag to adjust logging as needed.
+
+---
+
+## Related Documentation
+
+- [gMock Cookbook](gmock_cook_book.md) for detailed recipes and advanced mocking patterns.
+- [Mocking Reference](reference/mocking.md) for complete API and macros.
+- [gMock Cheat Sheet](gmock_cheat_sheet.md) for quick syntax reference.
+- [gMock for Dummies](gmock_for_dummies.md) for step-by-step introduction to mocking.
+
+---
+
+## Source
+For implementation details and examples, see the code and tests in GoogleTest repository under:
+- `googlemock/include/gmock/gmock-nice-strict.h`
+- `googlemock/test/gmock-spec-builders_test.cc`
+- `googlemock/test/gmock-nice-strict_test.cc`
+
+<Source url="https://github.com/google/googletest" paths='[{"path":"googlemock/include/gmock/gmock-nice-strict.h","range":"1-114"},{"path":"googlemock/test/gmock-spec-builders_test.cc","range":"1-840"},{"path":"googlemock/test/gmock-nice-strict_test.cc","range":"1-299"}]' />
