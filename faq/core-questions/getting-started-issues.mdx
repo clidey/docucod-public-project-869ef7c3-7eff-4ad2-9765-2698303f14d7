@@ -1,0 +1,242 @@
+---
+title: "Getting Started Problems"
+description: "Covers the most frequent hurdles users face when installing or beginning to use GoogleTest and GoogleMock, including build system issues, version compatibility, and test discovery problems. Guides users through effective resolutions so they can begin testing quickly."
+---
+
+# Getting Started Problems
+
+This page addresses the most frequent hurdles users face when installing or beginning to use GoogleTest and GoogleMock. From build system configuration issues to test discovery problems, this FAQ guides you through effective solutions to get your testing environment up and running quickly.
+
+---
+
+## Common Setup Issues
+
+### 1. Why won't my tests run after building GoogleTest?
+
+- **Problem:** You have built the library and linked it into your test binary, but no tests are detected or run.
+
+- **Cause:** 
+  - The test executable may not include any `TEST()` or `TEST_F()` macros.
+  - The GoogleTest `RUN_ALL_TESTS()` function has not been called.
+  - Your test suite names or test names contain underscores (`_`), which can cause naming conflicts.
+
+- **Solution:**
+  1. Verify your test code contains valid `TEST()` or `TEST_F()` macros with valid names.
+  2. Ensure your `main` function calls `testing::InitGoogleTest()` followed by `RUN_ALL_TESTS()`.
+
+```cpp
+int main(int argc, char** argv) {
+  testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
+}
+```
+
+  3. Avoid using underscores (`_`) in test suite and test names, as it is reserved for internal use. See [Why should test suite names and test names not contain underscore?](faq.md#why-should-test-suite-names-and-test-names-not-contain-underscore).
+
+### 2. Linking errors related to GoogleTest symbols
+
+- **Problem:** You encounter linker errors such as undefined references to GoogleTest symbols.
+
+- **Cause:**
+  - GoogleTest libraries are not linked correctly.
+  - Missing default constructor in your test fixture classes.
+
+- **Solution:**
+  1. Make sure you link with `gtest` and/or `gtest_main` libraries.
+  2. Confirm that your test fixture class has a default constructor (explicit or implicit).
+
+### 3. Fatal Assertions in Non-void Functions Cause Compilation Errors
+
+- **Problem:** Using `ASSERT_*` macros inside non-void functions results in compilation errors like "void value not ignored as it ought to be".
+
+- **Cause:** Fatal assertions (`ASSERT_*`) are designed to abort the current function, which only works with `void` return types due to no exceptions being used.
+
+- **Solution:**
+  - Refactor your function to return `void`.
+  - Alternatively, use `EXPECT_*` macros which generate nonfatal errors and don't abort.
+  - For complex cases, separate test logic into `void` helper functions.
+
+See more in [Assertion Placement](advanced.md#assertion-placement).
+
+### 4. Test Not Executing Because of Filter or Disabled Tests
+
+- **Problem:** Your tests compile but do not run, and no errors are shown.
+
+- **Cause:** 
+  - You have set filters via `--gtest_filter` or the environment variable which exclude your tests.
+  - Tests or test suites are prefixed with `DISABLED_`.
+
+- **Solution:**
+  - Check the current test filter.
+  - Remove or rename disabled tests.
+  - Run your test binary with `--gtest_also_run_disabled_tests` to include disabled tests.
+
+### 5. Symptoms of No Tests Found or No Tests Run
+
+- Verify that tests show up with the `--gtest_list_tests` flag.
+- If the output of `--gtest_list_tests` is empty, ensure you’re compiling test source files containing valid tests into your executable.
+
+### 6. Linking Against `gtest_main` vs Providing Your Own `main`
+
+- Use `gtest_main` to avoid writing a custom `main()`.
+- If you provide your own `main()`, ensure correct initialization:
+
+```cpp
+int main(int argc, char** argv) {
+  testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
+}
+```
+
+---
+
+## Understanding Assertion Failures and Their Effects
+
+### 7. Why does a failed `ASSERT_*` only abort the current function, not the whole test?
+
+GoogleTest aborts only the current function for fatal failures (e.g., using `ASSERT_*`). If the risky code is inside a helper function, the test may continue unexpectedly.
+
+**How to manage this:**
+- Use `ASSERT_NO_FATAL_FAILURE()` to ensure no fatal failures happen inside a function call.
+- Check `testing::Test::HasFatalFailure()` to conditionally skip further test code if a fatal failure already occurred.
+- Alternatively, use exceptions with a custom listener that throws upon fatal failure.
+
+### 8. Why can't I use `ASSERT_*` macros inside constructor or destructor?
+
+Fatal assertions generate `return` statements, but constructors and destructors do not return values, so `ASSERT_*` macros in them cause compilation errors.
+
+**Recommendation:** Move assertions to `SetUp()` and `TearDown()`.
+
+See [Should I use the constructor/destructor of the test fixture or SetUp()/TearDown()?](faq.md#CtorVsSetUp).
+
+---
+
+## Environment and Global Setup Issues
+
+### 9. Global Test Environments are not running or behave unexpectedly
+
+- Use `testing::AddGlobalTestEnvironment()` to register global environments before running tests.
+- Global environment `SetUp()` and `TearDown()` run in registration order and reverse order respectively.
+- If `SetUp()` in an environment causes a fatal failure, tests are not run but `TearDown()` still runs.
+- Testing validates failures in environment setup and teardown.
+
+Example:
+
+```cpp
+class MyGlobalEnvironment : public testing::Environment {
+ public:
+  void SetUp() override {
+    // do setup
+  }
+
+  void TearDown() override {
+    // do teardown
+  }
+};
+
+testing::AddGlobalTestEnvironment(new MyGlobalEnvironment);
+```
+
+See `googletest/test/gtest_environment_test.cc`.
+
+### 10. Tests Not Running Due to `SetUpTestSuite()` or `TearDownTestSuite()` Failures
+
+- If `SetUpTestSuite()` fails fatally, no tests in that suite run.
+- If `TearDownTestSuite()` fails, tests run but failure is reported.
+
+Example:
+
+```cpp
+class MyTestSuite : public testing::Test {
+ public:
+   static void SetUpTestSuite() {
+     ASSERT_TRUE(false) << "Fail in SetUpTestSuite";
+   }
+};
+
+TEST_F(MyTestSuite, DummyTest) {
+  // This test won’t run because SetUpTestSuite failed.
+}
+```
+
+See `googletest/test/googletest-setuptestsuite-test_.cc` for details.
+
+---
+
+## Death Tests and Their Challenges
+
+### 11. My death test modifies state, but changes seem lost after test ends. Why?
+
+Death tests run the tested code in a child process. In-memory changes are local and do *not* persist after child termination.
+
+### 12. Death test hangs or segfaults unexpectedly
+
+- Death tests run in child processes; threading and shared states can cause flakiness.
+- Avoid creating threads outside death test macros.
+- Consider using the "threadsafe" death test style for robustness with multi-threaded code.
+- GoogleTest recommends naming test suites containing death tests ending with `DeathTest` for proper ordering.
+
+---
+
+## Best Practices and Tips
+
+### 13. Counting Disabled Tests
+
+Run:
+
+```bash
+grep DISABLED_ -r tests/
+```
+
+to get a list and count, to help monitor test quality.
+
+### 14. Using SCOPED_TRACE for better failure messages
+
+Use `SCOPED_TRACE("message")` inside a test or helper function to embed trace messages automatically with assertion failures.
+
+### 15. Avoid Underscore in Test Names
+
+Underscores can cause duplicate class names internally and undefined behavior. Stick to alphanumeric names.
+
+### 16. Always Use the Return Value of RUN_ALL_TESTS()
+
+Ignoring it may cause your test to appear passed even if failures occurred.
+
+```cpp
+return RUN_ALL_TESTS();
+```
+
+### 17. Organizing Tests
+
+Group related tests into suites, share setup via fixtures, and use parameterized and typed tests to avoid duplication.
+
+---
+
+## Troubleshooting Checklist
+
+1. Verify your test source files contain `TEST` or `TEST_F` macros with valid names.
+2. Make sure your build links against the correct GoogleTest libraries.
+3. Check that your `main` calls `InitGoogleTest` and `RUN_ALL_TESTS()`.
+4. Use `--gtest_list_tests` to confirm tests are detected.
+5. Avoid underscores in test and suite names.
+6. Review environment setup and teardown for fatal failures.
+7. Use `SCOPED_TRACE` to clarify assertion failures.
+8. For declaration and usage of parameterized/typed tests, refer to [Parameterized and Typed Tests](reference/testing.md#TEST_P) and corresponding guides.
+
+---
+
+## Getting More Help
+
+For further assistance, consult related documentation and community resources:
+
+- [GoogleTest Primer](primer.md) - fundamentals of test writing
+- [Assertions Reference](reference/assertions.md) - details on all assertions
+- [Testing Reference](reference/testing.md) - detailed usage of test macros
+- [Advanced Guide](advanced.md) - advanced topics including death tests
+- [Official GitHub Repository](https://github.com/google/googletest) for issues and examples
+
+---
+
+This page helps you overcome initial hurdles so you can quickly verify your test code behaves as expected in GoogleTest.
+
+---
