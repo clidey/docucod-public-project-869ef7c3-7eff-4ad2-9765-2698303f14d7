@@ -1,0 +1,240 @@
+---
+title: "Custom Matchers"
+description: "Shows how to create user-defined matchers for specialized validation logic, including interface contracts and best practices for writing explainable matcher code."
+---
+
+# Custom Matchers
+
+This page demonstrates how to create user-defined matchers in GoogleTest and GoogleMock for specialized validation logic beyond the built-in matchers. It focuses on crafting expressive, reusable matchers that encapsulate complex matching criteria and how to provide informative failure messages to clarify test results. Custom matchers empower you to verify interface contracts or domain-specific invariants effectively.
+
+---
+
+## Overview of Custom Matchers
+
+GoogleMock provides a rich set of built-in argument matchers for common cases, but sometimes you need to validate arguments in ways the built-in matchers don’t support. This is where **custom matchers** come in. They enable you to implement specialized validation logic tailored to your use cases.
+
+A custom matcher is a function-like or class-like object that can be used inside `EXPECT_CALL()`, `ON_CALL()`, or `EXPECT_THAT()` to specify how a particular argument should be matched.
+
+### Benefits of Using Custom Matchers
+
+- **Expressiveness:** Encapsulate complex validation logic in a readable, reusable matcher.
+- **Maintainability:** Avoid repeating complex checks at multiple call sites.
+- **Debuggability:** Provide meaningful explanations when a match fails.
+
+
+## Writing Custom Matchers Using the `MATCHER*` Macros
+
+The simplest way to write a custom matcher is to use the `MATCHER` macro family, which lets you define matchers with intuitive syntax. The matchers defined this way behave polymorphically, supporting any type matching context.
+
+### Basic MATCHER Example
+
+```cpp
+MATCHER(IsEven, "") {
+  return (arg % 2) == 0;
+}
+```
+
+This defines a matcher called `IsEven` that matches an argument if it is even.
+
+Use it like this:
+
+```cpp
+EXPECT_CALL(mock_object, Foo(IsEven()));
+EXPECT_THAT(some_value, IsEven());
+```
+
+If a match fails, the failure message will include a description based on the matcher name ("is even" here).
+
+### Parameterized MATCHER_P
+
+To define matchers with parameters, use `MATCHER_P` (or `MATCHER_P2` up to `MATCHER_P10` for multiple parameters):
+
+```cpp
+MATCHER_P(IsDivisibleBy, n, "") {
+  return (arg % n) == 0;
+}
+```
+
+Use as:
+
+```cpp
+EXPECT_CALL(mock_object, Bar(IsDivisibleBy(7)));
+EXPECT_THAT(x, IsDivisibleBy(3));
+```
+
+### Adding Descriptions
+
+You can provide custom description strings to improve failure messages. For example:
+
+```cpp
+MATCHER_P(IsDivisibleBy, n,
+          absl::StrCat(negation ? "isn't" : "is", " divisible by ", n)) {
+  return (arg % n) == 0;
+}
+```
+
+The `negation` boolean indicates whether the matcher is negated, thus providing grammatically correct descriptions whether matching or its negation.
+
+### Explaining Match Failures
+
+To provide richer failure diagnostics, you can output additional information using the `result_listener`:
+
+```cpp
+MATCHER_P(IsDivisibleBy, n, "") {
+  if ((arg % n) == 0) return true;
+
+  *result_listener << "the remainder is " << (arg % n);
+  return false;
+}
+```
+
+If the match fails, the listener explanation is appended to the failure message, helping users understand the mismatch.
+
+## Writing Custom Matcher Classes
+
+For more advanced or heavily-reused matchers, implement a matcher class explicitly. A monomorphic matcher for type `T` must:
+
+- Define `using is_gtest_matcher = void;`
+- Implement the method `bool MatchAndExplain(const T& value, std::ostream* listener) const` (or use `MatchResultListener*` for richer output)
+- Implement `void DescribeTo(std::ostream* os) const`
+- Optionally implement `void DescribeNegationTo(std::ostream* os) const`
+
+Example: a monomorphic matcher for `int` checking divisibility.
+
+```cpp
+class DivisibleByMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  explicit DivisibleByMatcher(int divisor) : divisor_(divisor) {}
+
+  bool MatchAndExplain(int value, std::ostream* os) const {
+    if (value % divisor_ == 0) {
+      return true;
+    }
+    if (os != nullptr) {
+      *os << "which is " << (value % divisor_) << " modulo " << divisor_;
+    }
+    return false;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "is divisible by " << divisor_;
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "is not divisible by " << divisor_;
+  }
+
+ private:
+  const int divisor_;
+};
+
+::testing::Matcher<int> DivisibleBy(int divisor) {
+  return ::testing::Matcher<int>(new DivisibleByMatcher(divisor));
+}
+```
+
+Use:
+
+```cpp
+EXPECT_THAT(x, DivisibleBy(7));
+```
+
+## Writing Polymorphic Matchers
+
+A **polymorphic matcher** can be applied to arguments of different types. Usually, polymorphic matchers are implemented as a class with a templated `MatchAndExplain()` method.
+
+Example of a polymorphic `NotNull()` matcher:
+
+```cpp
+class NotNullMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  template <typename T>
+  bool MatchAndExplain(T* p, std::ostream*) const {
+    return p != nullptr;
+  }
+
+  void DescribeTo(std::ostream* os) const { *os << "isn't NULL"; }
+
+  void DescribeNegationTo(std::ostream* os) const { *os << "is NULL"; }
+};
+
+PolymorphicMatcher<NotNullMatcher> NotNull() {
+  return MakePolymorphicMatcher(NotNullMatcher());
+}
+```
+
+## Best Practices for Writing Custom Matchers
+
+- **Keep matchers pure:** Custom matchers must *never* have side effects or depend on mutable states. Ensure the `MatchAndExplain()` function is deterministic and repeatable.
+- **Provide clear failure messages:** Override `DescribeTo()` and `DescribeNegationTo()` to give human-readable descriptions.
+- **Use listener explanation wisely:** Use the `result_listener` to append detailed failure explanations only when they add value.
+- **Make reuse easy:** Extract common evaluation logic inside matchers for maintainability.
+- **Prefer polymorphic matchers** if your matcher can sensibly apply to multiple types.
+- **For parameters,** use the `MATCHER_P(k)` versions with descriptive messages to clarify intent.
+
+## Using Custom Matchers in Tests
+
+Once defined, custom matchers behave just like built-in ones.
+
+```cpp
+TEST(MyTest, CustomMatcherExample) {
+  EXPECT_CALL(mock_obj, MethodName(IsDivisibleBy(3)))
+      .Times(AtLeast(1));
+
+  EXPECT_THAT(some_value, IsEven());
+}
+```
+
+Failures will yield messages like:
+
+```
+Value of: some_value
+Expected: is even
+  Actual: 7
+```
+
+or with explanation:
+
+```
+Value of: some_value
+Expected: is divisible by 7
+  Actual: 27 (the remainder is 6)
+```
+
+## Troubleshooting Custom Matchers
+
+- **Matcher never matches:** Ensure your `MatchAndExplain()` logic correctly returns `true` or `false` and does not rely on external mutable states.
+- **Poor failure messages:** Implement meaningful `DescribeTo()`, `DescribeNegationTo()`, and append details to the listener.
+- **Compilation errors:** Use correct signatures and `using is_gtest_matcher = void;` to help the matcher integrate properly.
+- **Unexpected behavior with implicit conversions:** Avoid relying on implicit conversions inside matchers. Parameterize matchers explicitly.
+
+## Additional Advanced Custom Matcher Topics
+
+If you require more control or reusable building blocks:
+
+- Implement `MatcherInterface<T>` directly for monomorphic matchers.
+- Use `MakePolymorphicMatcher()` for polymorphic matchers.
+- Compose matchers using existing combinators like `AllOf()`, `AnyOf()`, `Not()` to create complex matching rules.
+
+## Summary
+
+Custom matchers are powerful tools enabling precise, expressive verification in tests. By creating your own matchers, you can encode detailed argument validation and provide more helpful failure diagnostics — resulting in cleaner, more maintainable tests.
+
+For a complete guide and examples, see the [gMock Cookbook: Writing New Matchers Quickly](https://google.github.io/googletest/gmock_cook_book.html#WritingNewMatchers) and the detailed [Matchers Reference](https://google.github.io/googletest/reference/matchers.html).
+
+---
+
+## See Also
+
+- [Matchers Reference](matchers.md): Comprehensive list of built-in matchers.
+- [gMock Cookbook: New Matchers](gmock_cook_book.md#NewMatchers): Recipes and details for custom matchers.
+- [Mocking Reference](mocking.md): How custom matchers integrate with mock expectations.
+- [gMock for Dummies](gmock_for_dummies.md): Introduction to mocking and matchers.
+
+<Source url="https://github.com/google/googletest" paths={[{"path":"googlemock/include/gmock/gmock-matchers.h"}]} />
+<Source url="https://github.com/google/googletest" paths={[{"path":"docs/reference/matchers.md"}]} />
+<Source url="https://github.com/google/googletest" paths={[{"path":"docs/reference/mocking.md"}]} />

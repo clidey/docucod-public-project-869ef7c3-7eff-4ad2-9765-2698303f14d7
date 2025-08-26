@@ -1,0 +1,326 @@
+---
+title: "Action and Expectation Specification"
+description: "Documents how to declare, configure, and validate mock expectations using ON_CALL, EXPECT_CALL, sequences, and action macros. Covers verification of call count, argument matching, and failure diagnostics."
+---
+
+# Action and Expectation Specification
+
+This page guides you through declaring, configuring, and validating mock expectations using GoogleMock's powerful `ON_CALL`, `EXPECT_CALL`, sequences, and action macros. It empowers you to precisely define how mocked methods should behave, verify the expected call count, match arguments flexibly, and diagnose failures with detailed error messages.
+
+---
+
+## 1. Understanding Expectations and Default Actions
+
+### ON_CALL
+
+Use `ON_CALL` to specify **default behavior** of mock methods without setting any expectation on whether or how many times they are called. This is useful to define fallback actions for uninteresting calls—calls the test doesn't explicitly expect but allows.
+
+- **Syntax:**
+
+```cpp
+ON_CALL(mock_object, Method(matchers))
+    .With(multi_argument_matcher) // optional
+    .WillByDefault(action);
+```
+
+- Only one `.WillByDefault()` clause per `ON_CALL`.
+- The `.With()` clause restricts application to calls whose full argument tuple matches the matcher.
+
+### EXPECT_CALL
+
+Use `EXPECT_CALL` to declare an **expectation** about a mock method invocation. It not only defines behavior but *asserts* that the method will be called with arguments matching the given matchers, possibly ordered and with cardinality constraints.
+
+- **Syntax:**
+
+```cpp
+EXPECT_CALL(mock_object, Method(matchers))
+    .With(multi_argument_matcher)  // optional, once
+    .Times(cardinality)            // optional, once
+    .InSequence(sequences...)      // optional, multiple
+    .After(expectations...)        // optional, multiple
+    .WillOnce(action)              // optional, multiple
+    .WillRepeatedly(action)        // optional, once
+    .RetiresOnSaturation();        // optional, once
+```
+
+- **Order matters:** `EXPECT_CALL` declarations occurring later have precedence when matching calls.
+- `Times()` limits how many times the call must occur. If omitted, gMock infers cardinality based on actions.
+
+---
+
+## 2. Specifying Matchers and Argument Constraints
+
+### Argument Matchers
+
+Matchers define how arguments are compared to expectations. Use `_` for "any value".
+
+```cpp
+EXPECT_CALL(mock, Foo(42, _)); // Expects first argument to be 42, second can be anything
+```
+
+- Use [built-in matchers](../matchers.md) for sophisticated matching (e.g., `Ge()`, `HasSubstr()`).
+- Matchers are combined in `EXPECT_CALL` argument lists.
+
+### Multi-Argument Matchers with `.With()` Clause
+
+Sometimes matching on the full argument tuple as a unit is needed, e.g., to express relational constraints between arguments:
+
+```cpp
+EXPECT_CALL(mock, SetPosition(_, _))
+    .With(Lt()); // Expect first argument less than second
+```
+
+- The matcher passed to `With()` must be of the form `Matcher<std::tuple<A1, ..., An>>`.
+- The `.With()` clause can be only once per expectation and must be the first clause.
+
+---
+
+## 3. Cardinalities: Controlling How Often Functions Are Called
+
+Control invocation count with `Times()`:
+
+| Cardinality      | Description                        |
+|------------------|----------------------------------|
+| `AnyNumber()`    | Any number of calls allowed       |
+| `AtLeast(n)`     | At least n calls expected         |
+| `AtMost(n)`      | At most n calls allowed           |
+| `Between(m, n)`  | Between m and n (inclusive) calls |
+| `Exactly(n)` or `n` | Exactly n calls expected (0 means never called) |
+
+If omitted, cardinality is inferred:
+- No `WillOnce` or `WillRepeatedly` implies `Times(1)`.
+- N `WillOnce`s but no `WillRepeatedly` implies `Times(N)`.
+- N `WillOnce`s and one `WillRepeatedly` implies `Times(AtLeast(N))`.
+
+### Example
+
+```cpp
+EXPECT_CALL(mock, Foo())
+    .Times(3);
+```
+
+This expects exactly 3 calls to `mock.Foo()`.
+
+
+---
+
+## 4. Sequencing: Ordering Expectations
+
+### Using `Sequence` Objects and `.InSequence()`
+
+To specify call order, group expectations in one or more `Sequence` objects.
+
+```cpp
+Sequence s1, s2;
+EXPECT_CALL(mock, First()).InSequence(s1, s2);
+EXPECT_CALL(mock, Second()).InSequence(s1);
+EXPECT_CALL(mock, Third()).InSequence(s2);
+```
+
+This means:
+- `First()` must precede `Second()` and `Third()`
+- `Second()` and `Third()` order relative to each other is unspecified
+
+### Anonymous Sequence Using `InSequence` Object
+
+```cpp
+{
+  InSequence seq;
+  EXPECT_CALL(mock, Step1());
+  EXPECT_CALL(mock, Step2());
+  EXPECT_CALL(mock, Step3());
+}
+```
+
+All expectations within the scope share a strict sequential order.
+
+### Using `.After()`
+
+Specify partial order by declaring prerequisite expectations:
+
+```cpp
+Expectation e1 = EXPECT_CALL(mock, Init1());
+Expectation e2 = EXPECT_CALL(mock, Init2());
+EXPECT_CALL(mock, Process()).After(e1, e2);
+```
+
+`Process()` must be called after both `Init1()` and `Init2()`. Supports up to 5 prerequisites, passed either as individual `Expectation` or `ExpectationSet`.
+
+---
+
+## 5. Actions: Defining Mock Behavior
+
+Mock methods do not have real implementations. Actions tell them what to do when called.
+
+### WillOnce and WillRepeatedly
+
+- `.WillOnce(action)`: Specifies behavior for a single call. Multiple `WillOnce`s specify a series of behaviors for successive calls.
+- `.WillRepeatedly(action)`: Specifies behavior for all subsequent calls after exhausting all `WillOnce` actions.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, GetNumber())
+    .WillOnce(Return(1))
+    .WillOnce(Return(2))
+    .WillRepeatedly(Return(3));
+```
+
+### Built-In Actions
+
+- Return values (`Return()`, `ReturnRef()`, `ReturnPointee()`, etc.)
+- Side effects (`SetArgPointee<N>()`, `SaveArg<N>()`, `DeleteArg<N>()`)
+- Calling other functions (`Invoke()`, `InvokeWithoutArgs()`, `InvokeArgument<N>()`)
+- Composite actions (`DoAll()`, `IgnoreResult()`)
+
+### Defining Lambdas or Custom Callables
+
+You can specify arbitrary callable objects or lambdas with matching signatures as actions.
+
+```cpp
+EXPECT_CALL(mock, Method()).WillOnce([](int arg) { return arg * 2; });
+```
+
+### Important Notes
+
+- Actions are evaluated/executed only when the mock method is called.
+- Beware of side effects in actions specified by `Return(value)` - the `value` is captured when the expectation is set, not at call time.
+
+---
+
+## 6. Retiring Expectations
+
+By default, expectations remain "sticky" after being saturated, causing errors on excess calls.
+
+Use `.RetiresOnSaturation()` to retire an expectation immediately after its upper bound is reached:
+
+```cpp
+EXPECT_CALL(mock, Foo())
+    .Times(2)
+    .RetiresOnSaturation();
+```
+
+This allows later (more general) expectations to match excess calls.
+
+---
+
+## 7. Verifying and Clearing Expectations
+
+### Automatic Verification
+
+Expectations are verified automatically when mock objects are destructed, reporting failures if expectations are unmet.
+
+### Manual Verification
+
+You can verify and clear expectations early with:
+
+```cpp
+// Verifies expectations but leaves default actions.
+Mock::VerifyAndClearExpectations(&mock_obj);
+
+// Verifies and clears expectations and default actions.
+Mock::VerifyAndClear(&mock_obj);
+```
+
+> **Tip:** Use these in teardown or after exercising the mock if you want to assert completeness early.
+
+---
+
+## 8. Common Pitfalls and Diagnostics
+
+### Call Order Violations
+
+- Calls that do not respect sequence or `.After()` ordering cause failures.
+- Ordering issues are detected immediately when the offending call is made.
+
+### Call Count Mismatches
+
+- Calling a mock method fewer or more times than expected generates errors.
+- Excessive calls trigger warnings or failures depending on mock strictness.
+
+### Argument Mismatches
+
+- Calls with arguments that do not match any expectation cause errors showing expected vs actual values with detailed matcher mismatch info.
+
+### Retired Expectations
+
+- Calls matching a retired expectation cause failures with message indicating the retirement.
+
+### Uninteresting Calls
+
+- Calls to mock methods without expectations generate warnings (naggy mock) or failures (strict mock).
+- To suppress warnings for uninteresting calls, use `NiceMock` or add catch-all `EXPECT_CALL` with `Times(AnyNumber())`.
+
+---
+
+## 9. Practical Examples
+
+### Setting Default Behavior with ON_CALL
+
+```cpp
+ON_CALL(foo, GetSize())
+    .WillByDefault(Return(5));
+```
+
+### Declaring an Expectation
+
+```cpp
+EXPECT_CALL(foo, GetSize())
+    .Times(3)
+    .WillOnce(Return(10))
+    .WillRepeatedly(Return(20));
+```
+
+### Sequencing with InSequence
+
+```cpp
+{
+  InSequence s;
+  EXPECT_CALL(foo, Start());
+  EXPECT_CALL(foo, Process());
+  EXPECT_CALL(foo, End());
+}
+```
+
+### Specifying Partial Order with After
+
+```cpp
+Expectation e1 = EXPECT_CALL(foo, Init());
+EXPECT_CALL(foo, Run()).After(e1);
+```
+
+### Retiring Expectations
+
+```cpp
+EXPECT_CALL(foo, Close())
+    .Times(2)
+    .RetiresOnSaturation();
+```
+
+### Manual Verification
+
+```cpp
+ASSERT_TRUE(Mock::VerifyAndClearExpectations(&foo));
+```
+
+---
+
+## 10. Troubleshooting Tips
+
+- Run your tests with `--gmock_verbose=info` to get detailed traces of all expectations and calls.
+- If you encounter "Uninteresting mock function call" warnings unexpectedly, consider turning the mock into `NiceMock` or explicitly setting expectations.
+- Use `RetiresOnSaturation()` to prevent "sticky" expectations causing upper-bound violations.
+- Carefully examine argument matcher compositions to avoid mismatches.
+
+---
+
+## 11. Reference Links
+
+- [ON_CALL - Default Actions](../reference/mocking.md#ON_CALL)
+- [EXPECT_CALL - Expectations](../reference/mocking.md#EXPECT_CALL)
+- [Matchers Reference](../reference/matchers.md)
+- [Actions Reference](../reference/actions.md)
+- [Sequences and Ordering](../reference/mocking.md#EXPECT_CALL.InSequence)
+- [Using Checkpoints for Advanced Ordering](../gmock_cook_book.md#UsingCheckPoints)
+
+For additional detailed guidance and patterns, see the [gMock Cookbook](../gmock_cook_book.md) and [gMock for Dummies](../gmock_for_dummies.md).

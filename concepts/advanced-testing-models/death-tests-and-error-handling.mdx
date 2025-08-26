@@ -1,0 +1,177 @@
+---
+title: "Death Tests & Error-Handling Scenarios"
+description: "Explore GoogleTest's support for 'death tests'—verifying that code fails as expected under specific error conditions. Learn about the testing strategies and the underlying model for handling error reporting and process termination safely in tests."
+---
+
+# Death Tests & Error-Handling Scenarios
+
+Explore GoogleTest's support for **death tests**—tests that verify your program terminates as expected under specified error conditions. This guide explains the user-focused testing strategies GoogleTest offers for error-reporting scenarios, how death tests are executed safely, and how they detect correct program failure behavior.
+
+---
+
+## Introduction to Death Tests
+
+In many applications, assertions ensure the program is in a valid state by terminating the process if a critical error occurs. Death tests let you verify that these fatal conditions cause your program to stop in predictable ways.
+
+A death test verifies:
+
+1. That *your code causes the process to abort or exit*.
+2. That the *exit status* meets the expected condition.
+3. That the *error output matches* a given regular expression or matcher.
+
+GoogleTest distinguishes death tests that check for process termination from exception-based tests. Code throwing catchable exceptions is **not** considered a death test scenario.
+
+Typical use cases include:
+- Checking that invalid inputs *assert* or terminate.
+- Validating that fatal system errors cause immediate program termination.
+- Testing that debug-only failure modes trigger process death.
+
+## Writing Death Tests
+
+GoogleTest provides the following key macros for authoring death tests inside your test cases:
+
+| Macro | Description |
+|----------|-------------|
+| `EXPECT_DEATH(statement, regex)` | Verifies `statement` causes abnormal process termination with stderr matching `regex`.
+| `ASSERT_DEATH(statement, regex)` | Same as `EXPECT_DEATH`, but aborts the current test function on failure.
+| `EXPECT_EXIT(statement, predicate, regex)` | Verifies `statement` causes process exit matching predicate and output matches `regex`.
+| `ASSERT_EXIT(statement, predicate, regex)` | Like `EXPECT_EXIT`, but aborts the test on failure.
+| `EXPECT_DEBUG_DEATH(statement, regex)` | In debug builds asserts death as in `EXPECT_DEATH`; in release builds executes statement without asserting.
+| `ASSERT_DEBUG_DEATH(statement, regex)` | As above but aborts on failure.
+
+Example:
+
+```cpp
+TEST(MyDeathTest, TerminationOnInvalidValue) {
+  ASSERT_DEATH({ ValidateInput(-1); }, "Invalid value");
+}
+
+TEST(MyDeathTest, ExitWithCodeZero) {
+  EXPECT_EXIT(ExitProgram(0), testing::ExitedWithCode(0), "Success");
+}
+
+TEST(MyDeathTest, KilledBySignal) {
+  EXPECT_EXIT(KillProcess(), testing::KilledBySignal(SIGKILL), "Killed by signal");
+}
+```
+
+> Use compound statements `{ ... }` if multiple statements form the test condition.
+
+## Underlying Model & Execution Flow
+
+When you write a death test, GoogleTest indirectly runs your test code in a *sub-process* designed to isolate failure.
+
+### How Death Tests Work:
+
+1. **Check for multi-threading:** Death tests are safe only with a single thread active. GoogleTest emits warnings if multiple threads run during a death test.
+2. **Sub-process creation:** GoogleTest creates a child process either by `fork()` (POSIX), `clone()` (Linux), or `CreateProcess()` (Windows).
+3. **Test execution inside child:** The child runs the test statement. It captures `stderr` output and detects whether the process terminates as expected.
+4. **Parent waits and verifies:** The parent waits for child termination and verifies:
+   - The child died (did not return normally or throw uncaught exceptions).
+   - The child’s exit code or signal matches the predicate.
+   - The stderr output matches the expected matcher or regex.
+5. **Report test result:** If all conditions pass, the death test passes; otherwise it fails with a detailed message.
+
+### Death Test Styles
+
+GoogleTest supports two styles of death tests, selectable via the `--gtest_death_test_style` flag or the `GTEST_FLAG_SET(death_test_style, style)` API:
+
+- **`fast` style (default on most platforms):** Uses `fork()` to create a child process which immediately runs the death test logic.
+- **`threadsafe` style (recommended for complex/multithreaded environments):** Spawns a child process that re-executes the test binary with flags to run only the specified death test.
+
+These styles differ primarily in safety around multi-threaded test environments and how the child process is spawned.
+
+### Naming Recommendations
+
+Name test suites containing death tests with the suffix `DeathTest` to ensure proper sequencing and reduce threading conflicts:
+
+```cpp
+class MyClassDeathTest : public testing::Test { ... };
+
+TEST_F(MyClassDeathTest, DiesOnInvalidInput) {
+  ASSERT_DEATH(DoSomething(-1), "Invalid input");
+}
+```
+
+## Handling Exceptions and Unusual Death Scenarios
+
+### Exceptions inside Death Tests
+
+While death tests expect process termination, if an exception is thrown instead:
+
+- GoogleTest treats this as a failure.
+- It reports the exception message and location.
+- Exceptions escaping death test macros are caught and flagged as errors.
+
+Example:
+
+```cpp
+TEST(CxxExceptionDeathTest, ExceptionIsFailure) {
+  EXPECT_NONFATAL_FAILURE(
+      EXPECT_DEATH(throw std::runtime_error("foo"), ""),
+      "threw an exception");
+}
+```
+
+### Structured Exception Handling (SEH) on Windows
+
+GoogleTest can catch Windows SEH exceptions to treat them as process death. This behavior is controlled by the `catch_exceptions` flag. SEH exceptions are interoperable with death tests.
+
+### Death Test Failures
+
+GoogleTest recognizes several failure modes for death tests:
+
+| Failure Mode                | Description                                                              |
+|----------------------------|--------------------------------------------------------------------------|
+| **LIVED**                  | Code completed normally instead of dying.                             |
+| **THREW**                  | Code threw an exception instead of dying.                             |
+| **RETURNED**               | Code executed a `return` statement, which is forbidden in death tests. |
+| **DIED (Success)**         | Code died as expected (matching output and exit code).                 |
+| **DIED (Failure)**         | Code died but with incorrect exit code or output.                      |
+
+Failures include detailed messages showing stderr content and line location.
+
+## Best Practices & Tips
+
+- **Isolate death tests from other tests** by placing them into uniquely named test suites with the `DeathTest` suffix.
+- **Prefer the `threadsafe` style** when tests start threads or use complex environments. Set with `GTEST_FLAG_SET(death_test_style, "threadsafe");`
+- **Avoid non-void return statements** inside death test macros; doing so causes test failures.
+- **Expect stderr output patterns to match your regex or matcher strictly**, including multi-line output.
+- **Be aware that side effects of death test statements occur only in the child process**, so external state changes will not be observed in parent.
+- **Use `EXPECT_DEATH_IF_SUPPORTED` and `ASSERT_DEATH_IF_SUPPORTED`** to conditionally run death tests on platforms supporting them.
+
+## Troubleshooting Common Issues
+
+- **Death test warnings on threads:** If you see warnings about multiple threads, prefer `threadsafe` death test style or isolate the death test.
+- **Death test not dying:** Verify that the death test statement indeed causes the process to terminate or abort.
+- **Regex not matching:** Check your error regex for unsupported features (GoogleTest uses simplified regex on Windows).
+- **Exceptions escaping death tests:** Ensure exception-catching behavior does not leak exceptions outside death test macros.
+- **Multiple death tests on one line:** Not supported; place death tests on separate lines.
+
+## Summary Diagram of Death Test Execution Flow
+
+```mermaid
+flowchart TD
+  U[User Test Code with Death Test Macro]
+  U --> P[Parent Process]
+  P -->|Fork/Spawn| C[Child Process]
+  C -->|Run Death Test Statement|
+  C -->|Capture stderr, exit code| P
+  P -->|Wait for child|
+  P --> E{Check Outcome}
+  E -->|DIED as expected| PASS[Test Passed]
+  E -->|Did not die/Threw/Returned| FAIL[Test Failed with Diagnostic]
+```
+
+## Additional Resources
+
+- Assertions Reference: [Assertions Reference](reference/assertions.md#death)
+- Advanced Topics: [Advanced GoogleTest Topics - Death Tests](docs/advanced.md#death-tests)
+- Core Concepts: [Core Concepts and Terminology](overview/core-concepts/core-concepts-terminology)
+- Practical Guidance: [Death Tests and Exception Handling Guide](guides/advanced-testing-patterns/death-tests-and-exception-handling)
+
+---
+
+For detailed API documentation and examples, visit the [GoogleTest GitHub repository](https://github.com/google/googletest).
+
+---
