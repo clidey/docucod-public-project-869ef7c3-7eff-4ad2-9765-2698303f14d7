@@ -1,0 +1,275 @@
+---
+title: "Writing Custom Matchers and Actions"
+description: "Guides advanced users through the creation of their own matchers and actions, including necessary interface implementations and best practices for reuse and clarity."
+---
+
+# Writing Custom Matchers and Actions
+
+Guide advanced users through creating custom matchers and actions within GoogleMock. Includes necessary interface implementations, detailed usage patterns, and best practices to promote maintainable, clear, and reusable test definitions.
+
+---
+
+## Introduction
+
+In many testing scenarios, built-in GoogleMock matchers and actions satisfy typical needs. However, complex or domain-specific logic often requires crafting your own matchers and actions. This guide empowers you to extend GoogleMock by defining:
+
+- Custom Matcher classes for verifying intricate argument conditions.
+- Custom Actions for controlling mock method behaviors beyond built-in options.
+
+You'll learn how to implement these components while adhering to GoogleMock's interface contracts, ensuring seamless integration and maintainability.
+
+---
+
+## Writing Custom Matchers
+
+Matchers check whether mock method arguments meet user-defined criteria. When built-in matchers fall short, you can create your own.
+
+### Quick Methods: Using `MATCHER` and `MATCHER_P` Macros
+
+For simple custom matchers, GoogleMock offers concise macros:
+
+- `MATCHER(name, description) { /* boolean expression using `arg` */ }`
+- `MATCHER_P(name, param, description) { /* access `arg` and `param` */ }`
+
+Example:
+
+```cpp
+MATCHER(IsEven, "Checks if a number is even") {
+  return (arg % 2) == 0;
+}
+
+// Usage:
+EXPECT_CALL(mock, Method(IsEven()));
+```
+
+The macro provides `arg` as the argument to match, and you return a bool indicating match success.
+
+### Advanced: Defining Matcher Classes
+
+For more control, define a matcher class that implements the following interface:
+
+```cpp
+class BarPlusBazEqMatcher {
+ public:
+  using is_gtest_matcher = void;  // Identifies this as a matcher
+
+  explicit BarPlusBazEqMatcher(int expected_sum) : expected_sum_(expected_sum) {}
+
+  bool MatchAndExplain(const Foo& foo, std::ostream* os) const {
+    bool matches = (foo.bar() + foo.baz()) == expected_sum_;
+    if (!matches && os) {
+      *os << "sum was " << (foo.bar() + foo.baz());
+    }
+    return matches;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "bar() + baz() equals " << expected_sum_;
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "bar() + baz() does not equal " << expected_sum_;
+  }
+
+ private:
+  int expected_sum_;
+};
+
+::testing::Matcher<const Foo&> BarPlusBazEq(int expected_sum) {
+  return ::testing::MakeMatcher(new BarPlusBazEqMatcher(expected_sum));
+}
+```
+
+This approach:
+
+- Supports full explanation of match success or failure.
+- Provides rich descriptions for error messages.
+- Offers complete type safety and control.
+
+---
+
+## Writing Custom Actions
+
+Actions specify what happens when mock methods are called, such as returning values, invoking callbacks, or manipulating state.
+
+### Simple Approach: Lambdas or Callable Objects
+
+You can use any callable (lambda, function pointer, functor) whose signature matches the mock method:
+
+```cpp
+MockFunction<int(int)> mock;
+
+EXPECT_CALL(mock, Call)
+    .WillOnce([](int x) { return x * 2; });
+
+ASSERT_EQ(mock.AsStdFunction()(3), 6);
+```
+
+### Implementing the `ActionInterface`
+
+For more complex or reusable actions, implement `::testing::ActionInterface<F>`, where `F` is the function signature. For example:
+
+```cpp
+template <typename F>
+class ActionInterface {
+ public:
+  virtual ~ActionInterface() {}
+  virtual typename ::testing::internal::Function<F>::Result Perform(
+       const typename ::testing::internal::Function<F>::ArgumentTuple& args) = 0;
+};
+```
+
+Example:
+
+```cpp
+class IncrementAction : public ::testing::ActionInterface<int(int*)> {
+ public:
+  int Perform(const std::tuple<int*>& args) override {
+    int* p = std::get<0>(args);
+    return ++(*p);
+  }
+};
+
+::testing::Action<int(int*)> Increment() {
+  return ::testing::MakeAction(new IncrementAction);
+}
+```
+
+You then use `Increment()` as an action in `WillOnce()` or `WillRepeatedly()`.
+
+### Polymorphic Actions
+
+If your action can fit multiple function signatures, wrap it using `MakePolymorphicAction`:
+
+```cpp
+class ReturnSecondArgumentAction {
+ public:
+  template <typename Result, typename ArgsTuple>
+  Result Perform(const ArgsTuple& args) const {
+    return std::get<1>(args);
+  }
+};
+
+::testing::PolymorphicAction<ReturnSecondArgumentAction> ReturnSecondArgument() {
+  return ::testing::MakePolymorphicAction(ReturnSecondArgumentAction());
+}
+```
+
+---
+
+## Using `ON_CALL` and `EXPECT_CALL` with Custom Matchers and Actions
+
+- Use `ON_CALL(mock, Method(matchers))` to specify default actions with `.WillByDefault(action)`.
+- Use `EXPECT_CALL(mock, Method(matchers))` to specify expected calls along with `.WillOnce()`, `.WillRepeatedly()`, `.Times()`, and sequencing clauses.
+- Custom matchers can be used as any matcher in the `Method` call.
+- Custom actions can be passed as arguments to `.WillOnce()` / `.WillRepeatedly()` / `.WillByDefault()`.
+
+Example combining both:
+
+```cpp
+EXPECT_CALL(mock, Process(CustomMatcher(param)))
+    .WillOnce(CustomAction());
+
+ON_CALL(mock, Process(_))
+    .WillByDefault([](const ArgType& arg) {
+      // default behavior
+      return DefaultValue();
+    });
+```
+
+---
+
+## Best Practices
+
+- **Match only what matters:** Your matcher should verify key invariants, avoiding over-specification.
+- **Keep matchers pure:** Avoid side effects as matchers may be called multiple times.
+- **Reuse matchers and actions:** Assign matchers and actions to variables to share them across tests.
+- **Use `RetiresOnSaturation()` when chaining multiple `WillOnce()` actions:** This ensures expectations retire properly.
+- **Document intent:** Give matchers descriptive names and provide meaningful failure messages.
+
+---
+
+## Troubleshooting
+
+- Ensure matchers return `bool` and implement `DescribeTo` and `DescribeNegationTo` properly.
+- If your action uses state, be aware that sharing action objects (e.g., assigning to a variable) shares their internal state.
+- Use `--gmock_verbose=info` to get detailed logs of matcher evaluation and action invocation.
+- When using `InvokeArgument<N>(...)` to call callable arguments, wrap reference parameters with `std::ref()`.
+
+---
+
+## Summary
+
+Custom matchers and actions extend GoogleMock’s capabilities to express complex test conditions and behaviors beyond built-in options. By following the API interfaces and conventions described here, tests remain robust, clear, and maintainable.
+
+---
+
+## Example: Custom Matcher and Action
+
+```cpp
+// Custom matcher: verifies a string contains a substring.
+class ContainsSubstringMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  explicit ContainsSubstringMatcher(const std::string& substring)
+      : substring_(substring) {}
+
+  bool MatchAndExplain(const std::string& s, std::ostream* os) const {
+    bool found = s.find(substring_) != std::string::npos;
+    if (!found && os) {
+      *os << "string did not contain '" << substring_ << "'";
+    }
+    return found;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "contains substring '" << substring_ << "'";
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "does not contain substring '" << substring_ << "'";
+  }
+
+ private:
+  std::string substring_;
+};
+
+inline ::testing::Matcher<std::string> ContainsSubstring(const std::string& sub) {
+  return ::testing::MakeMatcher(new ContainsSubstringMatcher(sub));
+}
+
+// Custom Action: returns the length of the string argument.
+class StringLengthAction : public ::testing::ActionInterface<int(const std::string&)> {
+ public:
+  int Perform(const std::tuple<const std::string&>& args) override {
+    return static_cast<int>(std::get<0>(args).size());
+  }
+};
+
+inline ::testing::Action<int(const std::string&)> StringLength() {
+  return ::testing::MakeAction(new StringLengthAction);
+}
+
+// Usage in test:
+EXPECT_CALL(mock, GetValue(ContainsSubstring("foo")))
+    .WillOnce(StringLength());
+```
+
+---
+
+## Additional Resources
+
+- [gMock Cookbook — Writing New Matchers and Actions](https://google.github.io/googletest/gmock_cook_book.html#CustomMatchers)
+- [Mocking Reference: EXPECT_CALL and ON_CALL](../api-reference/mocking-framework/setting-expectations.md)
+- [Matchers Reference](../api-reference/matchers-actions/builtin-matchers.md)
+- [Actions Reference](../api-reference/matchers-actions/builtin-actions.md)
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html)
+
+---
+
+## Source Code Insight
+
+The core implementation of `EXPECT_CALL` and `ON_CALL` macros leveraging matcher and action interfaces is found in [`gmock-spec-builders.h`](https://github.com/google/googletest/blob/main/googlemock/include/gmock/gmock-spec-builders.h).
+
+---
