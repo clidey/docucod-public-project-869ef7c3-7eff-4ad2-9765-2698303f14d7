@@ -1,163 +1,77 @@
 ---
-title: "Advanced Mocking Patterns & Troubleshooting"
-description: "Real-world patterns for managing complex mock hierarchies, strict/nice/naggy mocks, and performance considerations. Includes troubleshooting guides for common mocking pitfalls."
+title: "Advanced Mocking Patterns and Tips"
+description: "Master advanced GoogleMock patterns such as controlling call count cardinalities, working with sequences, and strict/nice/naggy mocks. Includes solutions for tricky mocking scenarios and performance trade-offs."
 ---
 
-# Advanced Mocking Patterns & Troubleshooting
+# Advanced Mocking Patterns and Tips
 
-## Introduction
-This guide provides practical insights and advanced patterns for managing complex mock hierarchies, configuring strict/nice/naggy mocks, and optimizing mock performance in GoogleMock. It also includes detailed troubleshooting strategies for common mocking pitfalls encountered during test development.
-
-Whether you are building complex test scenarios involving numerous interdependent mocks or resolving unexpected test failures, this guide will help you gain mastery over GoogleMock's powerful but nuanced features.
+Master advanced GoogleMock patterns that empower you to precisely control your mock behaviors, validate interactions in complex call sequences, and handle tricky mocking scenarios effectively. This guide will take you through managing call count cardinalities, working with ordered and partially ordered sequences, choosing between nice, naggy, and strict mocks, and optimizing mock performance.
 
 ---
 
-## 1. Managing Complex Mock Hierarchies
+## 1. Understanding and Controlling Call Count Cardinalities
 
-### Understanding Mock Hierarchies
-In large systems, mock objects often depend on or interact with other mocks, forming complex hierarchies. Properly structuring these hierarchies ensures test correctness and maintainability.
+GoogleMock allows you to specify how many times a mock method is expected to be called, known as its *cardinality*. Getting cardinalities right is key to writing robust and maintainable tests.
 
-#### Best Practices
-- **Explicit Ownership and Lifetime:** Clearly define ownership to prevent dangling pointers or premature destruction.
-- **Use Smart Pointers:** Use `std::shared_ptr` or `std::unique_ptr` where applicable to manage mock lifetimes safely.
-- **Delegate Behavior Appropriately:** Consider delegating default actions from high-level mocks to their lower-level collaborators to simulate real interactions more accurately.
+### What Cardinalities Are and How to Use Them
 
-### Deleting Mocks Specifically and Safely
-GoogleMock supports deletion of mock objects inside their own actions, enabling advanced control of mock lifetimes:
+Use the `Times()` clause in `EXPECT_CALL` to describe the expected number of calls:
+
+- `Times(AnyNumber())` — any number of times, including zero
+- `Times(AtLeast(n))` — at least *n* times
+- `Times(AtMost(n))` — at most *n* times
+- `Times(Between(m, n))` — between *m* and *n* times (inclusive)
+- `Times(Exactly(n))` or `Times(n)` — exactly *n* times
+- `Times(0)` — the method should never be called
 
 ```cpp
-// Example: Deleting a mock from within an action
-class MockA {
- public:
-  MOCK_METHOD(void, DoA, (int), ());
-};
-
-ACTION_P(Delete, ptr) { delete ptr; }
-
-TEST(MockLifetimeTest, CanDeleteSelf) {
-  MockA* a = new MockA;
-  EXPECT_CALL(*a, DoA(_)).WillOnce(Delete(a));
-  a->DoA(42);  // Deletes 'a' during call
-}
+EXPECT_CALL(mock, Foo()).Times(3);  // Exactly 3 calls expected
+EXPECT_CALL(mock, Bar(_)).Times(AtLeast(1));  // Called one or more times
+EXPECT_CALL(mock, Baz).Times(AnyNumber());    // Called any number of times
 ```
 
-This technique should be used cautiously and only when necessary.
+### Implicit Cardinality Inference
 
----
+If you omit `Times()`, GoogleMock infers cardinality based on how you specify actions:
 
-## 2. Configuring Mock Strictness: Strict, Nice, and Naggy Mocks
-
-GoogleMock provides three distinct modes to control how uninteresting calls are handled. Choosing the correct strictness affects test behavior and debug output.
-
-| Mock Type    | Behavior on Uninteresting Calls                          | Use Case                                      |
-|--------------|-----------------------------------------------------------|-----------------------------------------------|
-| `NiceMock`   | Silently ignores uninteresting calls                     | When tests shouldn't fail on unexpected calls |
-| `NaggyMock`  | Logs warnings for uninteresting calls (default behavior) | During development to detect unplanned calls   |
-| `StrictMock` | Treats uninteresting calls as test failures               | To enforce strict interaction contracts       |
-
-### Using Strictness Modifiers
-They are wrappers around your mock class:
+- No `WillOnce` or `WillRepeatedly`: inferred as `Times(1)`
+- *n* `WillOnce` clauses, no `WillRepeatedly`: inferred as `Times(n)`
+- *n* `WillOnce` clauses and one `WillRepeatedly`: inferred as `Times(AtLeast(n))`
 
 ```cpp
-#include <gmock/gmock.h>
-using ::testing::NiceMock;
-using ::testing::NaggyMock;
-using ::testing::StrictMock;
-
-StrictMock<MockFoo> strict_mock;
-NiceMock<MockFoo> nice_mock;
-NaggyMock<MockFoo> naggy_mock;
+EXPECT_CALL(mock, Foo()).WillOnce(Return(1));  // Times(1) inferred
+EXPECT_CALL(mock, Foo()).WillOnce(Return(1)).WillRepeatedly(Return(2));  // Times(AtLeast(1))
 ```
 
-### Important Notes
-- The strictness wrappers only apply to mock methods defined with `MOCK_METHOD` directly in the class.
-- Nesting strictness wrappers like `NiceMock<StrictMock<MockFoo>>` is not supported.
+### Sticky Expectations and Retiring on Saturation
 
-### When to Choose Which
-- Use **`NiceMock`** to reduce noise when you expect many calls but only verify a few.
-- Use **`NaggyMock`** to detect unexpected calls during the test debugging phase.
-- Use **`StrictMock`** when you want to ensure no unexpected calls happen, increasing test brittleness but gaining rigor.
+By default, expectations stay active even after reaching their call limit. This *stickiness* can cause errors if you expect a method to be called exactly twice but it is called thrice.
 
----
-
-## 3. Performance Considerations in Mocking
-
-Mocking can impact test compile-time and run-time. Follow these tips to optimize:
-
-### Speeding Up Compilation
-- **Move Mock Constructor/Destructor Definitions:** Define constructors and destructors of your mock classes in `.cc` files instead of inline to reduce recompilation overhead.
-- **Reduce Number of Mock Methods per Class:** Splitting large mocks into focused smaller mocks can help.
-
-### Optimizing Runtime
-- Use **`WillRepeatedly`** instead of multiple `WillOnce` when behavior is repetitive.
-- Prefer **`NiceMock`** during benchmarking tests to reduce logging overhead.
-- Avoid overly complex matchers or actions in frequently called mock methods.
-
----
-
-## 4. Troubleshooting Common Mocking Pitfalls
-
-### Symptom: "Uninteresting mock function call" Warning
-Occurs when a mock method is called without an `EXPECT_CALL` but has no matching `ON_CALL` default behavior.
-
-#### Solution
-- If the call is expected but you don't care about verifying it, use `NiceMock` to suppress warnings.
-- Alternatively, add an `EXPECT_CALL(...).Times(AnyNumber())` or an `ON_CALL(...).WillByDefault(...)` for the method.
-
-### Symptom: "Unexpected mock function call" Failure
-Occurs when a mocked method is called with arguments not matching any `EXPECT_CALL`.
-
-#### Solution
-- Add specific `EXPECT_CALL` matching those arguments.
-- Use wildcard matcher `_` or broader matchers for calls you want to allow but not strictly verify.
-
-### Symptom: "Too many actions" or "Too few actions" Warning
-Happens when the number of `WillOnce` actions does not match the declared or inferred cardinality.
-
-#### Solution
-- Align `WillOnce` clauses with the expected call count.
-- Use `WillRepeatedly` for an action that can be used after `WillOnce`s are exhausted.
-- Explicitly set `.Times()` to clarify expectations.
-
-### Symptom: "Saturated and inactive" or 'retired expectations' causing failed matching
-Means an expectation has reached its call limit or has been retired but a matching call was attempted.
-
-#### Solution
-- Use `.RetiresOnSaturation()` to retire expectations automatically when saturated.
-- Rearrange call order or cardinalities to prevent early saturation.
-
-### Symptom: Dangling mock pointers or crashes on deletion
-Happens if mock objects are deleted too early or in actions improperly.
-
-#### Solution
-- Verify ownership and lifetime management.
-- Use smart pointers where appropriate.
-- Avoid deleting mocks inside actions unless necessary and done carefully with proper cleanup.
-
-### Debugging Techniques
-- Use the `--gmock_verbose=info` flag to get detailed mock call traces and expectation matches.
-- Combine with `--gtest_stack_trace_depth=0` to suppress stack traces if too verbose.
-
-Example:
-
-```bash
-test_binary --gmock_verbose=info --gtest_stack_trace_depth=0
-```
-
----
-
-## 5. Real-World Mocking Scenarios & Patterns
-
-### Pattern: Multiple Expectations with Overlapping Matchers
-Arrange expectations so more specific matchers are declared later, as GoogleMock matches in reverse order.
+To prevent this, use `.RetiresOnSaturation()`. This will deactivate the expectation once the expected number of calls is met.
 
 ```cpp
-EXPECT_CALL(mock, Foo(_)).Times(AnyNumber());  // Less specific
-EXPECT_CALL(mock, Foo(42)).Times(1);           // More specific
+EXPECT_CALL(mock, Foo()).Times(2).RetiresOnSaturation();
 ```
 
-### Pattern: Sequence Enforcement
-Use `InSequence` to ensure calls happen in a defined order.
+### Best Practices
+
+- Start with the loosest cardinalities you can, tighten if needed for better validation.
+- Use `.RetiresOnSaturation()` when expecting multiple calls with different behaviors.
+- Use sequences for ordered calls—see next section.
+
+<Check>
+Setting cardinalities explicitly prevents over-matching and improves test clarity.
+</Check>
+
+---
+
+## 2. Ordering and Sequences in Mocks
+
+Interactions often must happen in a certain order. GoogleMock lets you specify call order precisely.
+
+### Sequential Ordering with `InSequence`
+
+Wrap `EXPECT_CALL`s in an `InSequence` block so that expectations must be met in the order they appear:
 
 ```cpp
 using ::testing::InSequence;
@@ -165,85 +79,302 @@ using ::testing::InSequence;
   InSequence seq;
   EXPECT_CALL(mock, FirstCall());
   EXPECT_CALL(mock, SecondCall());
+  EXPECT_CALL(mock, ThirdCall());
 }
 ```
 
-### Pattern: Partial Orders with `After`
-Express partial ordering dependencies between calls using `After` clause.
+Calls happening out of order will cause test failures.
+
+### Partial Ordering with Sequences and the DAG Model
+
+Sometimes you care about partial orders; e.g., `A` must happen before both `B` and `C`, but `B` and `C` may occur in any order.
+
+Declare multiple `Sequence` objects and assign expectations to one or more sequences:
 
 ```cpp
-Expectation e1 = EXPECT_CALL(mock, Init1());
-EXPECT_CALL(mock, Init2()).After(e1);
+using ::testing::Sequence;
+Sequence s1, s2;
+EXPECT_CALL(mock, A()).InSequence(s1, s2);
+EXPECT_CALL(mock, B()).InSequence(s1);
+EXPECT_CALL(mock, C()).InSequence(s2);
 ```
 
-### Pattern: Delegating to a Fake or Real Implementation for Default Behavior
-Implement default behavior by delegating calls from mocks to fakes or real objects using `ON_CALL`.
+This means `A` precedes both `B` and `C`, but no order between `B` and `C` is enforced.
+
+### Using the `.After()` Clause for Explicit Ordering
+
+You can specify that a call happens after one or more other expectations or sets:
+
+```cpp
+using ::testing::Expectation;
+Expectation e1 = EXPECT_CALL(mock, Initialize());
+EXPECT_CALL(mock, Process()).After(e1);
+```
+
+Useful for complex dependencies between calls.
+
+### Retirement Behavior in Sequences
+
+Expectations in sequences retire automatically when a later expectation in the sequence has been satisfied, preventing over-matching issues.
+
+---
+
+## 3. Mock Behavior Modes: Nice, Naggy, and Strict
+
+GoogleMock supports different levels of strictness for handling uninteresting calls — calls to mock methods without expectations.
+
+### Naggy Mocks (Default)
+
+*Warn* on uninteresting calls (default behavior). Use for debugging or when you want to be notified but not fail immediately.
+
+### Nice Mocks
+
+Suppress warnings on uninteresting calls. Useful for tests where the exact details of interactions aren’t important.
+
+```cpp
+using ::testing::NiceMock;
+NiceMock<MockFoo> nice_mock;
+```
+
+### Strict Mocks
+
+Turn *uninteresting calls into failures,* making the test fail if any unexpected mock calls occur.
+
+```cpp
+using ::testing::StrictMock;
+StrictMock<MockFoo> strict_mock;
+```
+
+### Usage Considerations
+
+- Use **nice mocks** for broad, forgiving tests.
+- Use **naggy mocks** (default) to catch possible issues during development.
+- Use **strict mocks** when you want to enforce precise interaction.
+- Nesting nice and strict mocks is not supported.
+
+<Warning>
+Strict mocks may cause brittle tests. Prefer nice mocks when possible.
+</Warning>
+
+---
+
+## 4. Handling Tricky Mocking Scenarios
+
+### Mocking Overloaded Methods
+
+Mock all overloaded versions explicitly to avoid hiding base class methods. Use `using` declarations to expose hidden overloads:
 
 ```cpp
 class MockFoo : public Foo {
-  MOCK_METHOD(int, Compute, (int), (override));
-  Foo real_;
-public:
-  MockFoo() {
-    ON_CALL(*this, Compute).WillByDefault([this](int x) {
-      return real_.Compute(x);
-    });
-  }
+ public:
+  using Foo::Add;  // Bring in other overloads.
+  MOCK_METHOD(int, Add, (Element x), (override));
 };
 ```
 
-### Pattern: Handling Move-Only Types in Mock Methods
-Define mocks for methods using move-only types normally.
+### Mocking Non-Virtual Methods
 
-Return values using lambdas instead of `Return(std::move(...))` for multiple calls to avoid runtime errors.
+Use *high-performance dependency injection* by creating unrelated mock classes with the same method signatures.
+
+Use templates to choose the implementation at compile-time:
+
+```cpp
+template <class Stream>
+void Process(Stream* stream);
+
+MockPacketStream mock;
+EXPECT_CALL(mock, GetPacket(_));
+Process(&mock);
+```
+
+### Delegating Calls to Fakes or Real Objects
+
+You can have your mock delegate to a fake or a real object for default behavior, enabling comprehensive yet flexible testing.
+
+```cpp
+void DelegateToFake() {
+  ON_CALL(*this, Method).WillByDefault([this](Args... args) {
+    return fake_.Method(args...);
+  });
+}
+```
+
+### Simplifying Complex Interfaces in Mocks
+
+If interface methods have long argument lists difficult to mock, use delegation or introduce simplified mock methods for ease of use.
+
+### Mocking Free Functions
+
+Mocking free functions requires introducing interfaces or using `MockFunction` to mock `std::function` wrappers.
 
 ---
 
-## Summary
-This guide advanced your understanding of GoogleMock by teaching you how to manage complex mock setups, choose and apply different strictness levels for mocks, optimize performance, and handle common and subtle issues in mock-based testing.
+## 5. Performance and Compilation Tips
 
-By leveraging these strategies and best practices, you can write more robust, maintainable, and performant tests for your C++ projects.
+### Moving Constructor and Destructor Out-of-Line
 
----
+For mock classes with many mocked methods, moving constructors and destructors to `.cc` implementation files reduces compilation time dramatically.
 
-## Additional Resources
-- [GoogleMock Reference - Mocking Basics](reference/mocking.md)
-- [GoogleMock Cookbook](docs/gmock_cook_book.md)
-- [GoogleMock Cheat Sheet](docs/gmock_cheat_sheet.md)
-- [GoogleMock for Dummies](docs/gmock_for_dummies.md)
-- [Managing Call Cardinalities and Strictness](reference/mocking.md#EXPECT_CALL.Times)
-- [Debugging with --gmock_verbose](docs/gmock_cook_book.md#GainingSuperVisionIntoMockCalls)
+### Avoid Over-Mocking Concrete Classes
+
+Avoid making all concrete class methods virtual just for mocking; prefer coding to interfaces and mocking those interfaces.
 
 ---
 
-## Mermaid Diagram: Mock Call Handling Overview
+## 6. Troubleshooting and Best Practices
+
+- **Uninteresting Call Warnings**: Use `NiceMock` to suppress them if intentional or add catch-all `EXPECT_CALL(...).Times(AnyNumber())`.
+- **Rigid Expectations**: Avoid over-specifying expectation matchers or cardinalities to reduce brittle tests.
+- **Order Sensitivity**: Use sequences or partial ordering to express call order clearly instead of relying on implicit ordering.
+- **Use ON_CALL for Defaults**: Use `ON_CALL` to set default mock behavior, reserving `EXPECT_CALL` for expectation verification.
+- **Delegate or Use Fakes for Complex Behavior**: Delegate to real implementations or fakes when mocking complex logic to avoid duplication.
+
+---
+
+## 7. Quick Reference Examples
+
+### Defining a Strict Mock
+
+```cpp
+using ::testing::StrictMock;
+StrictMock<MockFoo> strict_mock;
+EXPECT_CALL(strict_mock, DoThis());  // Fails if other methods are called without EXPECT_CALL
+```
+
+### Ordered Calls Using Sequences
+
+```cpp
+using ::testing::Sequence;
+Sequence seq;
+EXPECT_CALL(mock, Init()).InSequence(seq);
+EXPECT_CALL(mock, Process()).InSequence(seq);
+EXPECT_CALL(mock, Finish()).InSequence(seq);
+```
+
+### Delegating Calls to a Real Object
+
+```cpp
+class MockDatabase : public Database {
+ public:
+  MockDatabase() {
+    ON_CALL(*this, GetUser(_))
+       .WillByDefault([this](int id) {
+         return real_db_.GetUser(id);
+       });
+  }
+  MOCK_METHOD(User, GetUser, (int id), (override));
+ private:
+  RealDatabase real_db_;
+};
+```
+
+### Handling Overloads
+
+```cpp
+class MockService : public Service {
+ public:
+  MOCK_METHOD(bool, Process, (int), (override));
+  MOCK_METHOD(bool, Process, (const std::string&), (override));
+};
+
+MockService mock;
+EXPECT_CALL(mock, Process(42));
+EXPECT_CALL(mock, Process(::testing::StrEq("hello")));
+```
+
+---
+
+Explore additional recipes and patterns in the [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) for deeper insights.
+
+---
+
+<AccordionGroup title="Additional Resources">
+<Accordion title="gMock Cookbook - Advanced Recipes">
+Detailed examples on mocking move-only types, delegating calls, and complex argument matching.
+</Accordion>
+<Accordion title="gMock Cheat Sheet">
+Quick reference for mock class definitions, setting expectations, default actions, and managing uninteresting calls.
+</Accordion>
+<Accordion title="Mocking Reference">
+Comprehensive API reference for EXPECT_CALL, ON_CALL, matchers, actions, sequences, and cardinalities.
+</Accordion>
+</AccordionGroup>
+
+<Tip>
+Use `EXPECT_CALL` to express exact behavioral expectations, and `ON_CALL` to establish default mock behaviors without strict expectations.
+</Tip>
+<Warning>
+Be cautious with strict mocks as they may cause brittle tests that fail on innocuous code changes.
+</Warning>
+<Note>
+Properly use `.RetiresOnSaturation()` when chaining multiple `WillOnce()` calls to avoid unexpected test failures.
+</Note>
+<Check>
+Ordering constraints dramatically improve test robustness by clearly specifying permissible call sequences.
+</Check>
+
+---
+
+### Mermaid.js Diagram: Mock Call Flow with Sequences and Retiring Expectations
+
 ```mermaid
 flowchart TD
-  Start([Mock Function Call]) --> FindExpectation{Find matching EXPECT_CALL?}
-  FindExpectation -->|No| UninterestingCall
-  FindExpectation -->|Yes| CheckCardinality
+  Start([Test Start]) --> CreateMock["Create Mock Object"]
+  CreateMock --> SetDefaults["Set ON_CALL Defaults"]
+  SetDefaults --> SetExpectations["Set EXPECT_CALL Expectations"]
+  SetExpectations --> ExerciseCode["Exercise Code Under Test"]
 
-  UninterestingCall --> CheckStrictness{Mock Strictness?}
-  CheckStrictness -->|Nice| DefaultAction
-  CheckStrictness -->|Naggy| Warn+DefaultAction
-  CheckStrictness -->|Strict| FailTest
+  subgraph Call Flow
+    ExerciseCode --> CallMockMethod1["Mock Method 1 Called"]
+    ExerciseCode --> CallMockMethod2["Mock Method 2 Called"]
+  end
 
-  CheckCardinality -->|Calls left| InvokeAction
-  CheckCardinality -->|Exceeded| ExcessiveCall
+  CallMockMethod1 --> CheckExpectation1{Matches EXPECT_CALL #1?}
+  CallMockMethod2 --> CheckExpectation2{Matches EXPECT_CALL #2?}
 
-  ExcessiveCall --> CheckStrictnessExcessive{Mock Strictness?}
-  CheckStrictnessExcessive -->|Nice| DefaultAction
-  CheckStrictnessExcessive -->|Naggy| Warn+DefaultAction
-  CheckStrictnessExcessive -->|Strict| FailTest
+  CheckExpectation1 -- Yes --> ValidateCall1["Validate Call Count"]
+  CheckExpectation1 -- No --> CheckNextExpectation1
+  CheckNextExpectation1["Check Next Matching EXPECT_CALL"] --> |None| DefaultAction1
 
-  InvokeAction --> ReturnResult
+  CheckExpectation2 -- Yes --> ValidateCall2["Validate Call Count"]
+  CheckExpectation2 -- No --> CheckNextExpectation2
+  CheckNextExpectation2["Check Next Matching EXPECT_CALL"] --> |None| DefaultAction2
 
-  DefaultAction --> ReturnResult
+  ValidateCall1 --> IsSat1{Is Expectation Saturated?}
+  IsSat1 -- Yes --> RetireExpectation1["Retire Expectation #1"]
+  IsSat1 --> Continue
 
-  Warn+DefaultAction --> ReturnResult
+  ValidateCall2 --> IsSat2{Is Expectation Saturated?}
+  IsSat2 -- Yes --> RetireExpectation2["Retire Expectation #2"]
+  IsSat2 --> Continue
 
-  FailTest --> Terminate
+  RetireExpectation1 --> Continue
+  RetireExpectation2 --> Continue
 
-  ReturnResult --> End
-  Terminate --> End([Test Failed])
+  Continue --> CheckSequenceOrder{Is Call in Sequence Order?}
+  CheckSequenceOrder -- No --> Error["Report Unexpected Call Order"]
+  CheckSequenceOrder -- Yes --> ContinueTest["Continue Testing"]
+
+  DefaultAction1 --> ContinueTest
+  DefaultAction2 --> ContinueTest
+
+  Error --> End([Test Failure])
+  ContinueTest --> EndSuccess([Test Success])
 ```
+
+Explore this flow to understand how mock calls are matched, validated, possibly retired, and how ordering constraints are enforced.
+
+---
+
+## 8. Next Steps & Learning Path
+
+- **Creating and Using Mocks**: Start here if you haven’t defined mock classes before.
+- **Custom Actions and Matchers**: Extend GoogleMock's capabilities.
+- **gMock Cookbook**: For practical recipes and advanced use.
+- **Mocking Reference**: Comprehensive API details to deepen understanding.
+
+For practical onboarding, review the [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html) and [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html).
+
+---
+
+Your mastery of these patterns will yield tests that are maintainable, precise, and expressive, giving you ultimate control over your test double interactions.

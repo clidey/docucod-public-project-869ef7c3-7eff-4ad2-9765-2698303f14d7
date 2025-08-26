@@ -1,0 +1,219 @@
+---
+title: "Custom Actions and Matchers"
+description: "Describes how to define user-specific actions and matchers to extend the expressiveness of tests. Covers necessary interfaces and macro facilities for creating new behaviors and constraints within the framework."
+---
+
+# Custom Actions and Matchers
+
+Extend the capability of Google Mock (gMock) far beyond its built-in functionality by creating your own custom actions and matchers. This empowers you to specify very domain-specific test behaviors and argument validations that perfectly fit your use case.
+
+---
+
+## Introduction
+
+Google Mock provides a rich set of built-in actions and matchers suitable for many testing scenarios. However, real-world systems often require specialized behaviors that these built-ins cannot express. By defining **custom actions**, you teach mocks how to behave in new ways, and by defining **custom matchers**, you specify new constraints on method arguments.
+
+This page details the interfaces, macros, and best practices you need to create and integrate your own actions and matchers in C++ tests based on gMock.
+
+---
+
+## Custom Matchers
+
+Matchers validate whether mock function arguments meet expected constraints. While gMock offers many built-in matchers, custom matchers let you express richer, domain-specific predicates.
+
+### Matcher Essentials
+
+A matcher in gMock acts like a predicate on arguments, but also knows how to describe itself to produce clear error messages when expectations fail.
+
+To define a simple matcher, implement a callable class that provides:
+
+-  A method `MatchAndExplain(const T& arg, std::ostream* os)` returning `bool` which determines if the argument matches; it can also write explanations to `os` to clarify failures.
+-  Methods `DescribeTo(std::ostream* os)` and `DescribeNegationTo(std::ostream* os)` describing the matcher behavior on success and negation.
+-  A member typedef `using is_gtest_matcher = void;` to identify it as a matcher.
+
+Then provide a factory function that returns a `testing::Matcher<T>` by invoking `MakePolymorphicMatcher()` with your matcher class instance.
+
+#### Example: A Basic Custom Matcher
+
+```cpp
+class DivisibleBy7Matcher {
+ public:
+  using is_gtest_matcher = void;
+
+  bool MatchAndExplain(int n, std::ostream* os) const {
+    if (n % 7 == 0) return true;
+    if (os) *os << "which leaves remainder " << (n % 7);
+    return false;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "is divisible by 7";
+  }
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "is not divisible by 7";
+  }
+};
+
+inline testing::Matcher<int> DivisibleBy7() {
+  return testing::MakePolymorphicMatcher(DivisibleBy7Matcher());
+}
+```
+
+Usage:
+
+```cpp
+EXPECT_CALL(mock, Foo(DivisibleBy7()));
+```
+
+### Macros to Define Matchers Quickly
+
+Google Mock provides `MATCHER`, `MATCHER_P`, `MATCHER_P2`, ..., macros which simplify matcher creation for most needs.
+
+Example using `MATCHER`:
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  return (arg % 7) == 0;
+}
+```
+
+Example using `MATCHER_P` for a parameterized matcher:
+
+```cpp
+MATCHER_P(InClosedRange, range, "") {
+  return arg >= range.first && arg <= range.second;
+}
+```
+
+### Advanced Matcher Topics
+
+- Use `EXPECT_` assertions inside matchers to generate informative diagnostics.
+- Write polymorphic matchers by templating `MatchAndExplain` to accept multiple argument types.
+- Combine matchers by nesting or composing them for complex validation.
+- Implement composite matchers that accept other matchers as parameters, forwarding descriptive calls accordingly.
+
+---
+
+## Custom Actions
+
+Actions define what a mock method does when invoked. The built-in actions cover most use cases, like returning values or invoking callbacks, but sometimes you need to create your own to perform specialized side effects or behaviors.
+
+### Ways to Define an Action
+
+#### 1. Using Lambdas, Functors or Function Objects
+
+The simplest method is to write a lambda or a functor with a call operator matching the mock method signature.
+
+typical example:
+
+```cpp
+EXPECT_CALL(mock, Foo(_))
+    .WillOnce([](int x) { return x * 7; });
+```
+
+This method is often the best balance of flexibility and simplicity.
+
+#### 2. Using ACTION Macros (Legacy-style)
+
+You can use `ACTION`, `ACTION_P`, `ACTION_P2` macros to define named actions:
+
+```cpp
+ACTION(PopFront) {
+  auto* deque_ptr = arg0;
+  deque_ptr->pop_front();
+}
+```
+
+You may define parameterized actions with `ACTION_P(Add, n) { return arg0 + n; }`.
+
+Limitations:
+
+- No explicit typing for arguments; compiler errors can be cryptic.
+- Overloading actions by parameter count is possible, but care needed.
+
+NOTE: The macro system has certain type inference limitations, favoring modern functors or lambdas.
+
+#### 3. Implementing ActionInterface (Advanced)
+
+For ultimate control, implement `testing::ActionInterface<F>`, where `F` is the function signature.
+
+Example skeleton:
+
+```cpp
+template<typename R, typename... Args>
+class MyAction : public testing::ActionInterface<R(Args...)> {
+ public:
+  R Perform(const std::tuple<Args...>& args) override {
+    // Implement custom action here
+  }
+};
+```
+
+Wrap it with `testing::MakeAction(new MyAction<...>)` to use.
+
+### Polymorphic Actions
+
+To write an action usable on methods with different signatures, create an implementation class with a templated `Perform` method and wrap it with `MakePolymorphicAction()`.
+
+### Using Action Adaptors
+
+You can modify or combine actions with adaptors such as `DoAll()`, `IgnoreResult()`, `WithArgs<>`, to compose complex behaviors.
+
+### Built-In Facilities
+
+- Invoke a mock method argument as a callback: `InvokeArgument<N>(args...)`
+- Call real methods or functions from an action using `Invoke()` or lambdas.
+- Chain multiple side effects with `DoAll()`.
+
+---
+
+## Practical Tips and Best Practices
+
+- Define matchers and actions close to their usage domain for clarity and maintainability.
+- When defining custom matchers, always provide clear `DescribeTo` and `DescribeNegationTo` for useful error messages.
+- Prefer lambdas or functors over legacy macros when possible for stronger typing and better diagnostics.
+- Use `RetiresOnSaturation()` on expectations when actions sequence matters.
+- For complex mocking needs, break down your logic into smaller, composable matcher and action components.
+
+---
+
+## Troubleshooting
+
+- If custom matchers fail with poor messages, check your `DescribeTo` methods.
+- Actions that delete mocks must be careful to avoid deadlocks; do not perform action work while holding gMock internal locks.
+- Be wary of matcher side-effects: matchers must be purely functional without changing mock state.
+
+---
+
+## Example: Custom Matcher and Action in Use
+
+```cpp
+MATCHER_P(InRange, range, "") {
+  return arg >= range.first && arg <= range.second;
+}
+
+ACTION(PrintArg) {
+  std::cout << "Arg value: " << arg0 << std::endl;
+}
+
+TEST(CustomMockTest, UsesCustomMatcherAndAction) {
+  MockFoo foo;
+  EXPECT_CALL(foo, Process(InRange(std::make_pair(5, 10))))
+      .WillOnce(PrintArg());
+
+  foo.Process(7);  // Matches InRange, prints "Arg value: 7"
+}
+```
+
+---
+
+## Additional Resources
+
+- [GoogleMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html#custom-actions-and-matchers) for recipes and common patterns.
+- [Mocking Reference](../docs/reference/mocking.md) for foundational concepts.
+- [Actions Reference](../docs/reference/actions.md) for built-in actions.
+- [Matchers Reference](../docs/reference/builtin-matchers.md) for built-in matchers.
+
+Explore these links for richer understanding and practical examples.
+
+---

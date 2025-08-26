@@ -1,0 +1,353 @@
+---
+title: "Common Mistakes & How to Avoid Them"
+description: "Lists frequent missteps when using assertions or mocks, explains their symptoms, and guides the user in correcting them early."
+---
+
+# Common Mistakes & How to Avoid Them
+
+This documentation addresses frequent missteps users encounter when working with GoogleMock's assertions and mocks. It highlights the symptoms of these mistakes during test execution and provides clear guidance on correcting them early in your testing lifecycle, ensuring robust and maintainable test suites.
+
+---
+
+## 1. Setting Expectations After Calls Have Started
+
+### The Problem
+
+A common mistake is setting expectations (`EXPECT_CALL`) *after* the mock methods have already been called. Since GoogleMock expects all expectations to be declared before exercising the mock object, defining expectations afterward leads to **undefined behavior** and missed verifications.
+
+### How to Avoid
+
+Always declare your expectations before invoking any mock method:
+
+```cpp
+MockFoo mock;
+EXPECT_CALL(mock, Bar(5));  // Set before
+mock.Bar(5);                // Call after
+```
+
+Avoid interleaving calls to `EXPECT_CALL` and the mock method invocations.
+
+---
+
+## 2. Overly Strict or Overly Loose Matchers
+
+### The Problem
+
+Tests can become brittle by specifying argument matchers that are too restrictive, causing failures when unrelated changes happen in call parameters.
+
+Conversely, using only wildcards `_` everywhere might fail to detect important bugs by allowing unexpected arguments.
+
+### How to Avoid
+
+- Use specific matchers only where necessary, and wildcards `_` for arguments you don't care about.
+- Structure your expectations to cover cases of interest while allowing flexibility.
+- For example:
+
+```cpp
+EXPECT_CALL(mock, Process(Ge(5), _));  // First argument >= 5, second args can be anything
+```
+
+---
+
+## 3. Multiple Expectations Shadowing Each Other
+
+### The Problem
+
+GoogleMock matches calls using the *last* matching expectation (reverse order). Placing a generic expectation after a more specific one can unintentionally shadow the more specific case.
+
+### How to Avoid
+
+Place more specific expectations *after* the generic catch-all ones:
+
+```cpp
+EXPECT_CALL(mock, Foo(_)).Times(AnyNumber());     // Generic, put first
+EXPECT_CALL(mock, Foo(42)).Times(1);               // Specific, put last
+```
+
+This ensures the specific expectation is matched when applicable.
+
+---
+
+## 4. Unsatisfied or Over-saturated Expectations
+
+### Symptoms
+- Test failures report calls made fewer or more times than expected.
+- GoogleMock messages mention "Actual function call count doesn't match EXPECT_CALL" or "called more times than expected."
+
+### Causes
+- Missing calls or extra calls to mock methods beyond specified limits.
+- Improper use of `Times()` without corresponding `.WillOnce()` or `.WillRepeatedly()` leading to too few/few actions warnings.
+
+### How to Avoid
+
+- Use `Times()` and actions `.WillOnce()/.WillRepeatedly()` consistently.
+- When specifying multiple `WillOnce()`, ensure you add `.WillRepeatedly()` if call counts can exceed the number of `WillOnce()` clauses.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Bar(_))
+    .Times(AtLeast(1))
+    .WillOnce(Return(10))
+    .WillRepeatedly(Return(20));
+```
+
+- Use `.RetiresOnSaturation()` when expectations should be deactivated after the limit is reached.
+
+---
+
+## 5. Unexpected Calls
+
+### Symptoms
+
+- Failure messages report "Unexpected mock function call" with details of unmatched argument values.
+
+### Causes
+
+Mock methods receive calls that do not match any `EXPECT_CALL` expectation.
+
+### How to Avoid
+
+- Add expectations covering all valid argument cases.
+- Use catch-all expectations with wildcards and `Times(AnyNumber())` for methods where any call is acceptable.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Func(_)).Times(AnyNumber());  // Accept any argument
+EXPECT_CALL(mock, Func(5)).Times(1);            // More specific
+```
+
+- Use `ON_CALL` to define default behavior when calls do not match `EXPECT_CALL`.
+
+---
+
+## 6. Uninteresting Calls and Warnings
+
+### Explanation
+
+An *uninteresting call* is a call to a mock method without any matching `EXPECT_CALL` expectations. This triggers a **warning** but not a failure by default.
+
+### How to Address
+
+- If these calls are correct and expected, suppress warnings by replacing your mock with `NiceMock`:
+
+```cpp
+NiceMock<MockFoo> mock;
+```
+
+- If they should be forbidden, explicitly add an `EXPECT_CALL` with `.Times(0)`:
+
+```cpp
+EXPECT_CALL(mock, Func(_)).Times(0);
+```
+
+- Alternatively, provide a catch-all expectation with `Times(AnyNumber())` to silence warnings for allowed calls.
+
+---
+
+## 7. Leaked Mock Objects
+
+### Symptoms
+
+At program exit, you might see error messages about leaked mock objects:
+
+```
+ERROR: this mock object should be deleted but never is.
+```
+
+This usually means expectations on those mocks were never verified.
+
+### How to Avoid
+
+- Ensure that all mocks are properly deleted.
+- If a mock is intentionally leaked (not recommended), suppress the error with:
+
+```cpp
+testing::Mock::AllowLeak(mock_pointer);
+```
+
+- Prefer to allocate mocks on the stack or use smart pointers with clear ownership.
+
+---
+
+## 8. Incorrect Use of `WillOnce` and `WillRepeatedly`
+
+### Pitfall
+
+Using expressions with side-effects (like `Return(n++)`) inside `WillOnce()` causes the expression to be evaluated once at setup time, not at call time, leading to unexpected behavior.
+
+### How to Fix
+
+Use lambdas or custom actions so side effects happen at mock invocation:
+
+```cpp
+int n = 0;
+EXPECT_CALL(mock, GetValue())
+    .WillRepeatedly([]() mutable { return n++; });
+```
+
+---
+
+## 9. Incorrect Ordering of Calls
+
+### Symptoms
+
+GoogleMock reports unexpected calls due to calls occurring out of the defined sequence.
+
+### How to Fix
+
+- Use `InSequence` to enforce call ordering.
+
+```cpp
+{
+  InSequence s;
+  EXPECT_CALL(mock, FirstCall());
+  EXPECT_CALL(mock, SecondCall());
+}
+```
+
+- For partial ordering, use multiple sequences or `.After()` clause appropriately.
+
+---
+
+## 10. Mismatches in Argument Values or With Clause
+
+### Symptoms
+
+GoogleMock reports unexpected calls because arguments do not match the specified matchers or `.With()` constraint.
+
+### How to Avoid
+
+- Ensure that the argument matchers properly reflect valid input.
+- Check the `.With()` clause for correctness, ensuring it expresses the intended constraints.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Func(Ge(2), Ge(1))).With(Ge());
+```
+
+- Use `--gmock_verbose=info` to get detailed tracing of calls and expectations to debug mismatches.
+
+---
+
+## Troubleshooting Tips
+
+### Using Verbose Flag
+
+Run tests with the command line flag `--gmock_verbose=info` to see detailed mock function call logs and matching expectations, aiding in diagnosing unsatisfied or unexpected calls.
+
+### Expectation Evaluation Order
+
+Remember that newer expectations override older ones for matching calls, so arrange your `EXPECT_CALL`s accordingly.
+
+### Retiring Expectations
+
+Use `.RetiresOnSaturation()` with repeated calls or chained `WillOnce()` expectations to automatically retire an expectation after it has been satisfied the specified number of times.
+
+---
+
+## Practical Examples
+
+### Example 1: Avoiding Excessive Calls
+
+```cpp
+EXPECT_CALL(mock, Foo(5)).Times(1);
+
+mock.Foo(5);  // OK
+mock.Foo(5);  // Error: Excessive call
+```
+
+### Example 2: Allowing a Method to be Called Any Number of Times
+
+```cpp
+EXPECT_CALL(mock, Bar(_)).Times(AnyNumber());
+```
+
+### Example 3: Specific Order with Sequences
+
+```cpp
+Sequence seq;
+EXPECT_CALL(mock, Step1()).InSequence(seq);
+EXPECT_CALL(mock, Step2()).InSequence(seq);
+```
+
+### Example 4: Delegating to a Fake for Default Behavior
+
+```cpp
+class FakeFoo : public Foo {
+  char Bar(int n) override { return n > 0 ? '+' : '-'; }
+};
+
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(char, Bar, (int n), (override));
+
+  void DelegateToFake() {
+    ON_CALL(*this, Bar).WillByDefault([this](int n) {
+      return fake_.Bar(n);
+    });
+  }
+ private:
+  FakeFoo fake_;
+};
+```
+
+---
+
+## Summary of Best Practices
+
+- Always set expectations before exercising your mock objects.
+- Use argument matchers judiciously to express intent clearly without over-constraining.
+- Place generic expectations before specific ones to avoid shadowing.
+- Provide default actions with `ON_CALL()` for uninteresting calls to suppress warnings.
+- Use `NiceMock` or `StrictMock` to control behavior on uninteresting calls.
+- Employ sequences and `.After()` to model call ordering accurately.
+- Use `.RetiresOnSaturation()` to handle multiple calls sensibly.
+- Verify that your mocks are properly destroyed to avoid leaked mock errors.
+- Leverage `--gmock_verbose=info` for detailed diagnostics.
+
+---
+
+## References and Further Reading
+
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html) — Beginner-friendly introduction.
+- [Mocking Reference](reference/mocking.md) — Comprehensive technical reference.
+- [Matchers Reference](reference/matchers.md) — Details on argument matching.
+- [Actions Reference](reference/actions.md) — Available and custom mock actions.
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) — Recipes and patterns.
+
+---
+
+<Tip>
+Consider adding a generic catch-all `EXPECT_CALL` with `.Times(AnyNumber())` early in your tests to gracefully handle unexpected arguments, and layer specific expectations afterward to tighten verification.
+</Tip>
+
+<Warning>
+Avoid setting new expectations on a mock object after it has been exercised, as this leads to undefined behavior and unreliable tests.
+</Warning>
+
+<Note>
+If you want to suppress warnings about uninteresting calls but detect unexpected calls, consider using `NiceMock` as your mock wrapper.
+</Note>
+
+---
+
+### Troubleshooting Table
+
+| Mistake                                | Symptom                                               | Resolution Summary                               |
+|---------------------------------------|-------------------------------------------------------|-------------------------------------------------|
+| Setting expectations after calls      | Undefined behavior or unmet expectations              | Define all `EXPECT_CALL`s before invoking mocks |
+| Overly strict matchers                 | Test fragility, unexpected failures                   | Use `_` wildcard and specific matchers appropriately |
+| Expectation shadowing                 | Specific expectations never matched                    | Order generic expectations before specific      |
+| Unsatisfied expectations (too few calls) | Test failure stating expectations not met           | Increase call counts or adjust `Times()` clause  |
+| Excessive calls (too many calls)      | Test failure stating calls exceeded                    | Reduce calls or add `.RetiresOnSaturation()`     |
+| Unexpected calls                      | Unexpected mock call error messages                    | Add matching `EXPECT_CALL`s or generic catch-all |
+| Uninteresting calls                   | Warnings printed, potentially noise                    | Use `NiceMock` or add catch-all expectations     |
+| Leaked mocks                         | Leaked mock object errors at test end                  | Properly delete mocks or use `Mock::AllowLeak()` |
+| `WillOnce` side-effects misused       | Unexpected constant return or behavior                 | Use lambdas to defer evaluation                    |
+| Call order mismatch                  | Out-of-order call failure messages                     | Use `InSequence` or `.After()` clauses           |
+| Argument mismatch                    | Unexpected calls due to argument mismatch              | Revisit matchers and `.With()` usage               |
+
+---

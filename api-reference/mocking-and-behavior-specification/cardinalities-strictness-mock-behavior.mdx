@@ -1,0 +1,304 @@
+---
+title: "Managing Cardinalities, Strictness, and Uninteresting Calls"
+description: "Describes the Cardinality API for specifying call counts, as well as classes for enforcing strict, naggy, or forgiving mock behavior in tests. Explains how to control error handling for unexpected or surplus calls on mock objects."
+---
+
+# Managing Cardinalities, Strictness, and Uninteresting Calls
+
+This page details the Cardinality API in Google Mock, enabling you to specify how many times a mock method should be called, along with the mock behavior classes that control handling of calls outside those expectations—specifically strict, naggy, and nice mocks. You'll learn how to precisely define call counts, enforce order, and control warnings or errors for unexpected or excess calls on mocks.
+
+---
+
+## Overview
+
+In mock-based testing, it's often crucial to specify **how many times** a method can or must be called. Google Mock provides a comprehensive **Cardinality API** for this purpose. Additionally, Google Mock allows you to choose how strictly calls outside expectations are treated: ignored silently, warned about, or treated as test failures. This page explains how to manage these facets effectively.
+
+---
+
+## Cardinalities: Defining Call Counts
+
+Cardinalities specify constraints on the **number of times** a mock method call is expected or allowed to happen. This control helps you catch unexpected calls or missed calls in your tests.
+
+### Common Cardinalities
+
+Google Mock offers several built-in cardinalities defined as functions in the `testing` namespace:
+
+| Cardinality           | Meaning                                                                            |
+| --------------------- | ---------------------------------------------------------------------------------- |
+| `AnyNumber()`         | The method may be called any number of times, including zero.                      |
+| `AtLeast(n)`          | The method must be called **at least** `n` times.                                 |
+| `AtMost(n)`           | The method must be called **at most** `n` times.                                  |
+| `Between(m, n)`       | The method must be called **between** `m` and `n` times (inclusive).              |
+| `Exactly(n)` or `n`   | The method must be called **exactly** `n` times. If `0`, the method must never be called. |
+
+### Usage in Expectations
+
+Use cardinalities with the `.Times()` clause in your `EXPECT_CALL` statements to control call counts precisely. For example:
+
+```cpp
+using ::testing::Exactly;
+using ::testing::AtLeast;
+...
+EXPECT_CALL(mock_obj, Foo())
+    .Times(Exactly(3));  // Expect Foo() called exactly 3 times
+
+EXPECT_CALL(mock_obj, Bar(_))
+    .Times(AtLeast(1));  // Expect Bar() called at least once
+```
+
+---
+
+### Cardinality Behavior and Methods
+
+- **Satisfied by call count**: Whether the current number of calls meets the cardinality.
+- **Saturated**: Whether the upper bound (if any) has been reached.
+- **Over-saturated**: Whether too many calls have occurred (above the limit).
+
+For example, `AtMost(5)` is satisfied with 0-5 calls; saturated at 5 calls; and over-saturated if 6 or more calls occur.
+
+### Descriptions
+
+Google Mock provides human-friendly textual descriptions for cardinalities and the actual call counts to make error messages readable:
+
+```cpp
+// Produces description like "called twice"
+Cardinality::DescribeActualCallCountTo(call_count, &ostream);
+```
+
+---
+
+### Custom Cardinalities
+
+You can create custom cardinalities by implementing the `CardinalityInterface` with methods:
+
+- `IsSatisfiedByCallCount(int call_count)`: returns `true` if call count satisfies the cardinality.
+- `IsSaturatedByCallCount(int call_count)`: returns `true` if call count saturates the cardinality.
+- `DescribeTo(std::ostream* os)`: prints a textual description.
+
+Wrap your implementation using `MakeCardinality()`:
+
+```cpp
+class EvenCardinality : public CardinalityInterface {
+ public:
+  bool IsSatisfiedByCallCount(int call_count) const override {
+    return (call_count % 2 == 0);
+  }
+  bool IsSaturatedByCallCount(int) const override {
+    return false;  // Never saturated
+  }
+  void DescribeTo(std::ostream* os) const override {
+    *os << "called even number of times";
+  }
+};
+
+Cardinality EvenNumber() {
+  return MakeCardinality(new EvenCardinality());
+}
+
+EXPECT_CALL(mock, SomeMethod()).Times(EvenNumber());
+```
+
+---
+
+## Strictness of Mock Behavior: Nice, Naggy, and Strict Mocks
+
+Google Mock provides three behavioral modes to handle *uninteresting calls* — calls that do not have matching expectations.
+
+| Mock Type      | Behavior for Uninteresting Calls                                               |
+| -------------- | ----------------------------------------------------------------------------- |
+| **NiceMock**   | Allows uninteresting calls silently, no warnings or errors.                  |
+| **NaggyMock**  | Allows uninteresting calls but prints a warning (this is the _default_ mock behavior). |
+| **StrictMock** | Treats uninteresting calls as **test failures** (errors).                     |
+
+Uninteresting calls are calls to methods with no `EXPECT_CALL` set up, which means the test has not declared any expectation for them.
+
+### Choosing Strictness
+
+- Use `NiceMock<T>` when you want to suppress warnings on unexpected calls you don't care about.
+- Use `NaggyMock<T>` (the default) when you want to see warnings about these calls.
+- Use `StrictMock<T>` when you want any_unexpected_ call to cause test failures.
+
+Example:
+
+```cpp
+using ::testing::NiceMock;
+using ::testing::NaggyMock;
+using ::testing::StrictMock;
+
+NiceMock<MockFoo> nice_mock;  // Silences warnings
+NaggyMock<MockFoo> naggy_mock;  // Default, warns on unexpected calls
+StrictMock<MockFoo> strict_mock;  // Fails test on uninteresting calls
+```
+
+---
+
+### How Strictness Is Implemented
+
+Strictness is registered with the mock object globally and controls reaction to uninteresting calls — whether to allow silently, warn, or fail.
+
+The behavior is controlled internally by the `Mock::AllowUninterestingCalls()`, `Mock::WarnUninterestingCalls()`, and `Mock::FailUninterestingCalls()` functions, tied to the mock object instance.
+
+When a mock is destructed, strictness registration is automatically removed.
+
+### Important Notes
+
+- The strictness classes only affect **uninteresting calls** (methods with no `EXPECT_CALL`). Calls that _do_ have expectations but don't match arguments will fail regardless of strictness.
+- These classes **only work fully on mock methods defined with `MOCK_METHOD` macros directly in the mock class**; inherited or otherwise configured mocks might not reflect strictness correctly.
+
+---
+
+## Controlling Reaction to Uninteresting Calls Manually
+
+You can programmatically adjust the behavior of mocks regarding uninteresting calls using these static methods:
+
+```cpp
+// Allow uninteresting calls (ignore them).
+Mock::AllowUninterestingCalls(mock_obj);
+
+// Warn on uninteresting calls (default behavior).
+Mock::WarnUninterestingCalls(mock_obj);
+
+// Fail on uninteresting calls.
+Mock::FailUninterestingCalls(mock_obj);
+```
+
+These allow you to switch the behavior for specific mocks at runtime.
+
+---
+
+## Practical Workflow Example
+
+Here's how you might manage cardinalities and strictness in your tests:
+
+```cpp
+using ::testing::AtLeast;
+using ::testing::Exactly;
+using ::testing::StrictMock;
+
+class MockFoo {
+ public:
+  MOCK_METHOD(int, Bar, (), ());
+};
+
+TEST(MyTest, Example) {
+  StrictMock<MockFoo> mock;
+
+  EXPECT_CALL(mock, Bar())
+      .Times(AtLeast(2));  // Expect Bar to be called two or more times
+
+  mock.Bar();  // OK
+  mock.Bar();  // OK
+  mock.Bar();  // OK
+  // If Bar were called once or zero times, the test fails due to cardinality.
+
+  // Any unexpected calls to methods without EXPECT_CALL would cause failures
+  // because this is a StrictMock.
+}
+```
+
+---
+
+## Troubleshooting Common Issues
+
+### Excessive Calls
+
+Calling a mock method more times than allowed by its cardinality causes an immediate error.
+
+Example error:
+
+```text
+Mock function call count doesn't match this expectation.
+Expected: to be called exactly once.
+Actual: called twice - over-saturated and active.
+```
+
+### Unexpected Uninteresting Calls
+
+By default, uninteresting calls generate warnings. If you want to treat them as errors, use `StrictMock` or `FailUninterestingCalls(mock_obj)`.
+
+### Forgetting to Set `Times()`
+
+If you don't specify `.Times()`, Google Mock infers it:
+- No `.WillOnce()` or `.WillRepeatedly()`: `Times(1)`
+- `n` `.WillOnce()` and no `.WillRepeatedly()`: `Times(n)`
+- `n` `.WillOnce()` and one `.WillRepeatedly()`: `Times(AtLeast(n))`
+
+You can get unexpected behavior if the calls exceed these inferred counts.
+
+### Allowing Flexible Call Counts
+
+If a method can be called any number of times, use `.Times(AnyNumber())`.
+
+### Retiring Expectations when Saturated
+
+By default, expectations stay active even after being saturated, which can cause calls to fail if repeated too often. Use `.RetiresOnSaturation()` to retire an expectation immediately when saturated, allowing older or more general expectations to match subsequent calls.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Foo(7))
+    .Times(2)
+    .RetiresOnSaturation();
+// Allows other expectations to catch calls after 2 calls with argument 7
+```
+
+---
+
+## Summary
+
+Mastering cardinalities and mock strictness empowers you to write precise, robust tests with Google Mock. Use the cardinality API to specify expected call counts flexibly, and choose appropriate strictness modes to control warnings and errors for calls outside your expectations.
+
+---
+
+For details on mocking methods and defining expectations, visit [Mock Method Definitions](./mock-method-definitions) and [Setting Expectations and Call Sequences](./expectations-and-call-sequences). For a hands-on guide, see the [gMock Cookbook](https://github.com/google/googletest/blob/main/docs/gmock_cook_book.md#the-nice-the-strict-and-the-naggy).
+
+---
+
+## See Also
+
+- [gmock/gmock-cardinalities.h](https://github.com/google/googletest/blob/main/googlemock/include/gmock/gmock-cardinalities.h) - Cardinality interface and common implementations
+- [gmock/gmock-nice-strict.h](https://github.com/google/googletest/blob/main/googlemock/include/gmock/gmock-nice-strict.h) - Definitions for NiceMock, NaggyMock, StrictMock
+- [Mocking Reference](reference/mocking.md#classes) - Detailed classes including StrictMock, NiceMock, NaggyMock
+
+---
+
+## Diagram: Cardinality and Strictness Interaction Flow
+
+```mermaid
+flowchart TD
+  subgraph Cardinality API
+    direction TB
+    AnyNumber["AnyNumber()"]
+    AtLeast["AtLeast(n)"]
+    AtMost["AtMost(n)"]
+    Between["Between(m, n)"]
+    Exactly["Exactly(n)"]
+    CustomCard["Custom Cardinalities via CardinalityInterface"]
+  end
+
+  subgraph Strictness Modes
+    direction TB
+    NiceMock["NiceMock<T>\nAllow uninteresting calls"]
+    NaggyMock["NaggyMock<T>\nWarn on uninteresting calls (Default)"]
+    StrictMock["StrictMock<T>\nFail on uninteresting calls"]
+  end
+
+  MockObject["Mock Object"] -->|Times(cardinality)| Cardinality API
+
+  MockObject -->|Set Strictness| Strictness Modes
+
+  Strictness Modes -->|Control| ReactionOnUninterestingCalls["Reaction to Uninteresting Calls"]
+
+  subgraph Internal
+    ReportUninterestingCall["ReportUninterestingCall"]
+  end
+
+  ReactionOnUninterestingCalls -- allow --> LogInfo["Log info & continue"]
+  ReactionOnUninterestingCalls -- warn --> LogWarning["Log warning & continue"]
+  ReactionOnUninterestingCalls -- fail --> FailTest["Fail test (error)"]
+
+  LogInfo -.-> ReportUninterestingCall
+  LogWarning -.-> ReportUninterestingCall
+  FailTest -.-> ReportUninterestingCall
+```
+```
