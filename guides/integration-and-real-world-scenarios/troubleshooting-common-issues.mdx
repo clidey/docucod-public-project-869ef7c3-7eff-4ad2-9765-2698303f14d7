@@ -1,0 +1,253 @@
+---
+title: "Troubleshooting & Solutions to Common Issues"
+description: "A focused guide on addressing the most frequent issues faced when adopting or scaling GoogleTest—from build errors to linker issues, platform quirks, and integrating with CI."
+---
+
+# Troubleshooting & Solutions to Common Issues
+
+This guide focuses on resolving the most common problems developers face when adopting or scaling GoogleTest, especially in conjunction with GoogleMock. From build errors to linker problems, platform-specific quirks, and continuous integration (CI) considerations, this guidance helps ensure a smooth testing experience.
+
+---
+
+## 1. Build and Integration Issues
+
+### 1.1 Missing or Incorrect GoogleMock Initialization
+
+**Problem:** Tests fail to run or behave unexpectedly because GoogleMock is not initialized properly.
+
+**Solution:**
+- Ensure you call `testing::InitGoogleMock(&argc, argv);` **before** running tests.
+- If you define your own `main()`, the typical pattern is:
+
+```cpp
+#include <gmock/gmock.h>
+
+int main(int argc, char** argv) {
+  testing::InitGoogleMock(&argc, argv);
+  return RUN_ALL_TESTS();
+}
+```
+
+- When using the provided `gmock_main.cc` file, it already performs initialization, and you do not need to implement your own `main()`.
+
+### 1.2 Header and Linker Configuration
+
+**Problem:** Build errors related to missing symbols or headers.
+
+**Solution:**
+- Include `<gmock/gmock.h>` to work with mocks.
+- Ensure your build system links against both `gmock` and `gtest` libraries.
+- For Bazel users, add `@com_google_googletest//:gmock` and `@com_google_googletest//:gtest` as dependencies.
+- For CMake users, use `find_package(GTest REQUIRED)` and link with `gmock_main` and `gtest` targets.
+
+### 1.3 Slow Compilation of Mocks
+
+**Problem:** Mock classes take a long time to compile.
+
+**Solution:**
+- Move mock class constructors and destructors definitions out of the header into a `.cc` file.
+- This reduces redundant code generation across translation units.
+
+Example:
+
+```cpp
+// mock_foo.h
+class MockFoo : public Foo {
+ public:
+  MockFoo();
+  ~MockFoo();
+  MOCK_METHOD(void, DoSomething, (), (override));
+};
+
+// mock_foo.cc
+#include "mock_foo.h"
+
+MockFoo::MockFoo() {}
+MockFoo::~MockFoo() {}
+```
+
+## 2. Expectations and Mock Behavior
+
+### 2.1 Setting Expectations Before Mock Methods Are Called
+
+**Problem:** Tests exhibit undefined behavior or expectations are not verified.
+
+**Solution:** Always set `EXPECT_CALL` expectations **before** exercising the code that calls the mock methods. Setting expectations afterward leads to unpredictable results and lost verification.
+
+### 2.2 Unexpected or Uninteresting Mock Calls
+
+**Symptoms:**
+- Warning like "Uninteresting mock function call encountered - default action taken..."
+- Test failures due to unexpected calls
+
+**Explanation:**
+- **Uninteresting calls**: mock method called without any matching `EXPECT_CALL`. By default, they produce warnings but not failures.
+- **Unexpected calls**: mock method called with arguments that don't match any `EXPECT_CALL`; these *are failures*.
+
+**Solutions:**
+- To allow uninteresting calls without warnings, use `NiceMock<T>` to wrap mocks.
+
+```cpp
+NiceMock<MockFoo> mock_foo;
+EXPECT_CALL(mock_foo, ExpectedMethod()).Times(1);
+// Other calls will be ignored with no warnings.
+```
+
+- To disallow all uninteresting calls, use `StrictMock<T>`.
+
+- Use a catch-all expectation with a wildcard matcher for methods expected to be called but not strictly verified:
+
+```cpp
+EXPECT_CALL(mock_foo, AnyMethod(_)).Times(AnyNumber());
+```
+
+### 2.3 Controlling Call Order
+
+If your tests depend on call sequencing,
+- Use an `InSequence` scope or explicitly use `.InSequence()` with `Sequence` objects.
+- Use `.After()` clauses to specify dependencies between expectations.
+
+Example:
+
+```cpp
+using ::testing::Sequence;
+Sequence seq1;
+
+EXPECT_CALL(mock_foo, FirstMethod())
+    .InSequence(seq1);
+EXPECT_CALL(mock_foo, SecondMethod())
+    .InSequence(seq1);
+```
+
+### 2.4 Dealing with Sticky Expectations
+
+Expectations remain active (sticky) even after their call count saturates, which may cause unexpected test failures.
+
+**Solution:** Use `.RetiresOnSaturation()` to automatically retire expectations when their expected call count is reached.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock_foo, DoSomething()).Times(2).RetiresOnSaturation();
+```
+
+## 3. Mock Method Definition Issues
+
+### 3.1 Mocking Methods with Commas in Arguments
+
+**Problem:** `MOCK_METHOD` fails to parse methods with return types or arguments that have commas (e.g., templates).
+
+**Solution 1:** Wrap the affected argument or return type in extra parentheses.
+
+```cpp
+MOCK_METHOD((std::pair<int, int>), GetPair, ());
+```
+
+**Solution 2:** Introduce a `using` alias for complex types.
+
+```cpp
+using Pair = std::pair<int, int>;
+MOCK_METHOD(Pair, GetPair, ());
+```
+
+### 3.2 Mocking Private or Protected Methods
+
+Always place `MOCK_METHOD` declarations in the `public:` section of your mock class to enable access for `EXPECT_CALL` and `ON_CALL`.
+
+Example:
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(void, ProtectedMethod, (), (override));
+  MOCK_METHOD(int, PrivateMethod, (), (override));
+};
+```
+
+### 3.3 Mocking Overloaded Methods
+
+- Mock all overloads explicitly to avoid hiding base class methods.
+- Use `using BaseClass::MethodName;` in your mock class to bring in base overloads.
+
+## 4. Mocks in Multi-threaded and Asynchronous Code
+
+- Execute your test code in a single thread for easier debugging.
+- Expectation setup, verification, and destruction should be done while no other thread is calling the mocks.
+- GoogleMock is thread-safe for mock method invocation from multiple threads.
+- Synchronize and coordinate actions yourself to prevent race conditions.
+
+## 5. Common Pitfalls and How to Avoid Them
+
+### 5.1 Destructor Must Be Virtual
+
+If mocking an interface or base class, ensure the destructor is virtual to prevent undefined behavior during deletion.
+
+Example:
+
+```cpp
+class Foo {
+ public:
+  virtual ~Foo() {}
+};
+```
+
+### 5.2 Do Not Set Expectations After Using Mocks
+
+Don't set expectations after the tested code has called the mock methods. This causes undefined behavior and unreliable verification.
+
+### 5.3 Using `Return()` and Move-only Types
+
+- `Return(std::move(value))` can only be used once since it moves the value.
+- Use lambdas or callable objects in `WillOnce()` or `WillRepeatedly()` for returning new instances each call.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, MakeObject())
+    .WillRepeatedly([]() { return std::make_unique<MyObject>(); });
+```
+
+### 5.4 Over-specifying Expectations
+
+- Avoid setting too many precise expectations as it makes tests brittle.
+- Use the most general expectations needed to verify behavior.
+- Use `ON_CALL` for generic behavior definitions and use `EXPECT_CALL` only when verifying calls.
+
+## 6. Using Diagnostic Flags for Debugging
+
+- Run your tests with `--gmock_verbose=info` to get detailed logs of mock calls and expectation matching.
+- Combine with `--gtest_stack_trace_depth=0` to reduce stack trace verbosity.
+
+Example command line:
+
+```bash
+./my_test_binary --gmock_verbose=info --gtest_stack_trace_depth=0
+```
+
+This helps you track why some expectations are not satisfied or why certain mock calls are matched unexpectedly.
+
+## 7. Continuous Integration (CI) Considerations
+
+- Ensure all dependencies (gtest, gmock) are installed or vendored into the CI environment.
+- Cache compiled artifacts if possible to speed up builds.
+- Use the proper initialization sequence in test executables.
+- Use `TEST_F`, `TEST`, and mock initialization appropriately to isolate tests.
+- Monitor test time and failures; use verbose diagnostics for flaky or failing tests.
+
+## 8. Additional Resources and Next Steps
+
+- Consult [Creating and Using Mocks](../guides/mocking-and-advanced-techniques/creating-and-using-mocks) for comprehensive instruction on mocks.
+- Refer to [Mocking Reference](../docs/reference/mocking.md) for detailed API information.
+- Use [Mocking Cookbook](gmock_cook_book.md) for practical recipes and patterns.
+- See [Mocking FAQ](docs/gmock_faq.md) to resolve more specific questions.
+- Explore [Using Matchers](guides/core-testing-patterns/using-matchers) to effectively validate arguments.
+
+---
+
+<Tip>
+Always verify that expectations are set before exercising the mock and avoid over-constraining your tests to ensure maintainability and robustness.
+</Tip>
+
+<Note>
+If you face unusual errors, running tests with `--gmock_verbose=info` can provide crucial insights into how expectations and calls are matched.
+</Note>
