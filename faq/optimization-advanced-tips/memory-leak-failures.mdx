@@ -1,0 +1,205 @@
+---
+title: "Handling Memory Leaks and Test Isolation"
+description: "Helps users detect and address memory leaks or resource mismanagement in tests, including guidance on using provided tools, configuring death tests, and ensuring test isolation for reliable results."
+---
+
+# Handling Memory Leaks and Test Isolation
+
+This guide helps you detect and address memory leaks or resource mismanagement within your tests by leveraging GoogleTest's tools and patterns. It explains how to configure custom leak detectors using test event listeners, properly implement death tests to catch abnormal program termination, and ensure each test runs in an isolated environment for reliable, repeatable results.
+
+---
+
+## Why Detect Memory Leaks in Tests?
+
+Memory leaks during tests can cause flaky, unreliable results and hide other defects. Detecting leaks early improves test quality and ensures your code correctly manages resources.
+
+Using GoogleTest's event listener API, you can implement custom resource tracking to verify that no unexpected leaks occur within individual tests.
+
+---
+
+## Implementing Leak Checkers with Event Listeners
+
+GoogleTest provides the `EmptyTestEventListener` base class, which you can subclass to create listeners that check for leaks during tests. The typical flow is:
+
+1. **OnTestStart**: Capture the initial resource allocation state.
+2. **Test Execution**: Run the test normally.
+3. **OnTestEnd**: Compare the final state to detect leaks.
+
+### Example: Custom Leak Checker for a Resource
+
+Consider tracking the allocation of a custom class `Water`:
+
+```cpp
+class Water {
+ public:
+  // Tracks how many Water objects are allocated.
+  void* operator new(size_t size) {
+    allocated_++;
+    return malloc(size);
+  }
+
+  void operator delete(void* ptr, size_t /* size */) {
+    allocated_--;
+    free(ptr);
+  }
+
+  static int allocated() { return allocated_; }
+
+ private:
+  static int allocated_;
+};
+
+int Water::allocated_ = 0;
+```
+
+Create a listener that uses these counters:
+
+```cpp
+class LeakChecker : public ::testing::EmptyTestEventListener {
+ private:
+  void OnTestStart(const ::testing::TestInfo& /* test_info */) override {
+    initially_allocated_ = Water::allocated();
+  }
+
+  void OnTestEnd(const ::testing::TestInfo& /* test_info */) override {
+    int diff = Water::allocated() - initially_allocated_;
+    EXPECT_LE(diff, 0) << "Leaked " << diff << " Water objects!";
+  }
+
+  int initially_allocated_ = 0;
+};
+```
+
+Attach the checker in your `main()` when the `--check_for_leaks` flag is used:
+
+```cpp
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+
+  bool check_for_leaks = (argc > 1 && strcmp(argv[1], "--check_for_leaks") == 0);
+
+  if (check_for_leaks) {
+    auto& listeners = ::testing::UnitTest::GetInstance()->listeners();
+    listeners.Append(new LeakChecker);
+  } else {
+    printf("Run with --check_for_leaks to enable leak checking.\n");
+  }
+
+  return RUN_ALL_TESTS();
+}
+```
+
+This approach ensures any increase in the number of allocated `Water` objects is reported as a test failure, aiding early leak detection.
+
+---
+
+## Configuring and Running Death Tests for Resource Safety
+
+Death tests verify your code correctly terminates or crashes in error scenarios, including resource mismanagement that triggers fatal failures.
+
+Use macros like `ASSERT_DEATH()` and `EXPECT_DEATH()` to encapsulate code that is expected to exit or crash:
+
+```cpp
+TEST(MyDeathTest, CrashesOnNull) {
+  ASSERT_DEATH({
+    UsePointer(nullptr);  // This call should cause the program to terminate.
+  }, ".*null pointer.*");
+}
+```
+
+### Important Considerations for Death Tests
+
+- Death tests run in a separate process; side effects (like memory release) are not visible in the parent.
+- Avoid freeing resources in death test code or disable leak checks for death tests.
+- Always name test suites containing death tests with the `DeathTest` suffix for correct scheduling.
+
+---
+
+## Ensuring Test Isolation for Reliable Leak Detection
+
+Each test should execute independently to avoid false positives and achieve repeatable results.
+
+GoogleTest isolates tests by:
+
+- Creating a new test fixture instance for each test.
+- Running `SetUp()` before and `TearDown()` after every individual test.
+
+### Best Practices for Leak-Free Tests
+
+- Always release resources in the fixture's `TearDown()` or destructor.
+- Avoid static/global state that can accumulate resources across tests.
+- Use RAII patterns to manage resources safely within tests.
+
+### Example
+
+```cpp
+class ResourceTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    resource_ = new Resource;
+  }
+
+  void TearDown() override {
+    delete resource_;
+  }
+
+  Resource* resource_ = nullptr;
+};
+
+TEST_F(ResourceTest, DoesNotLeak) {
+  // Use resource_ in test
+}
+```
+
+If resource release logic is omitted or incomplete, leak checks like the earlier example will catch it.
+
+---
+
+## Troubleshooting Leaks and Test Failures
+
+<AccordionGroup title="Common Issues in Leak Checking and Test Isolation">
+<Accordion title="False Leak Reports Despite Proper Cleanup">
+Ensure that resources are cleaned up in the correct lifecycle methods (`TearDown()`, destructors).
+Remember that fatal assertion failures may cause early returns and skip cleanup; prefer non-fatal assertions if cleanup must run.
+</Accordion>
+<Accordion title="Leaks Detected Only When Running Tests in Sequence">
+Static or global objects retaining resources cause leaks that accumulate across multiple tests. Refactor such objects to limit their lifetime or reset state at the start/end of each test.
+</Accordion>
+<Accordion title="Memory Released in Death Tests Not Recognized">
+Since death tests run in a subprocess, memory freed there won't be released in parent process, potentially causing leak detection failures. Disable leak checks during death tests or avoid freeing memory in death test bodies.
+</Accordion>
+</AccordionGroup>
+
+---
+
+## Summary
+
+By combining custom event listeners like `LeakChecker`, careful death test construction, and strict test isolation, GoogleTest lets you confidently detect and manage memory leaks and resource misuse. This leads to more stable, maintainable test suites and improved code quality.
+
+
+---
+
+## Additional Resources
+
+- See the [GoogleTest Advanced Topics - Death Tests](../advanced.md#death-tests) for detailed death test usage.
+- Review the [GoogleTest Primer](primer.md) to understand test fixtures and lifecycles.
+- Learn about [Event Listeners](../advanced.md#extending-googletest-by-handling-test-events) to customize test reporting and resource tracking.
+- Consult the [Assertions Reference](reference/assertions.md) for macros like `EXPECT_DEATH` and `ASSERT_LE`.
+
+---
+
+## Related Documentation
+
+- [Handling Memory Leaks and Test Isolation](faq/optimization-advanced-tips/memory-leak-failures)
+- [Writing Custom Actions and Matchers](guides/advanced-practices/writing-custom-actions)
+- [Test Lifecycle and Execution Flow](concepts/core-architecture/test-lifecycle)
+
+---
+
+## Key Takeaways
+
+- Use event listeners to track and detect leaks during tests.
+- Properly manage resource setup and teardown within each test.
+- Name death test suites appropriately and handle resources with care.
+- Ensure tests are independent and isolated for accurate leak detection.
+- Utilize GoogleTest's rich assertion macros and event system to build robust leak sensitive tests.
