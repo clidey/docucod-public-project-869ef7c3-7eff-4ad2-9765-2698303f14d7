@@ -1,0 +1,238 @@
+---
+title: "Upgrade Paths and Best Practices"
+description: "Provides actionable step-by-step guides for upgrading from previous versions to the latest, including compatibility considerations, known gotchas, and verification tips. Users can follow this page to ensure smooth, safe transitions."
+---
+
+# Upgrade Paths and Best Practices
+
+This guide provides clear, actionable step-by-step instructions to help you smoothly upgrade your GoogleMock and GoogleTest usage from previous versions to the latest releases. It addresses essential compatibility considerations, common pitfalls during upgrades, and verification strategies to ensure your mock-based tests continue to function reliably.
+
+---
+
+## 1. Preparing for Upgrade
+
+Before starting your upgrade journey, ensure your environment meets the minimum requirements:
+
+- Use a C++11-compliant compiler (GCC, Clang, MSVC) as GoogleTest and GoogleMock now rely on C++11 features.
+- Verify platform compatibility with supported operating systems (Linux, Windows, macOS).
+- Check that your build system integration with CMake or Bazel is set up following the latest installation guides.
+
+If you encounter issues during setup, consult the [Prerequisites & Supported Platforms](../getting_started/essentials_setup/prerequisites.md) and [Installation & Build Integration](../getting_started/essentials_setup/installation.md) documentation for detailed guidance.
+
+---
+
+## 2. Migrating Mock Class Declarations
+
+### Transition to the `MOCK_METHOD` Macro
+
+If your tests use the older `MOCK_METHODn` family of macros (e.g., `MOCK_METHOD1`, `MOCK_CONST_METHOD2`), migration to the generic `MOCK_METHOD` macro is now strongly recommended:
+
+- **Old Syntax:**
+  ```cpp
+  MOCK_METHOD1(Foo, bool(int));
+  MOCK_CONST_METHOD2(Bar, void(int, double));
+  ```
+
+- **New Syntax:**
+  ```cpp
+  MOCK_METHOD(bool, Foo, (int));
+  MOCK_METHOD(void, Bar, (int, double), (const));
+  ```
+
+This newer syntax leverages variadic templates and supports method qualifiers directly, improving clarity and maintaining compatibility with advanced C++ features.
+
+**Tip:** When arguments or return types involve commas (e.g., `std::pair<int, int>`), wrap the type in parentheses or define a type alias to avoid parsing errors:
+
+```cpp
+MOCK_METHOD((std::pair<int, int>), GetPair, ());
+using PairType = std::pair<int, int>;
+MOCK_METHOD(PairType, GetPair, ());
+```
+
+### Mocking Overloads, Templates, and Qualifiers
+
+Ensure that your mocks correctly specify qualifiers like `const`, `override`, `noexcept`, or calling conventions using the fourth parameter of `MOCK_METHOD`. Examples:
+
+```cpp
+MOCK_METHOD(void, Func, (int), (const, override));
+MOCK_METHOD(int, Bar, (), (noexcept, override));
+MOCK_METHOD(bool, Foo, (double), (Calltype(STDMETHODCALLTYPE)));
+```
+
+When dealing with overloaded functions, disambiguate overloads using the `Const()` wrapper or explicit types in expectations.
+
+---
+
+## 3. Revising Expectations and Default Actions
+
+### Prefer Using `ON_CALL` for Default Behaviors
+
+Limit use of `EXPECT_CALL` to expectations you intend to verify (i.e., expecting that a specific method is called). For default behaviors where you don't care if the call happens, adopt `ON_CALL`, which sets the behavior without imposing call count constraints.
+
+Example:
+
+```cpp
+ON_CALL(mock, DoSomething(_)).WillByDefault(Return(true));
+EXPECT_CALL(mock, DoSomething(42));  // only verifies calls with 42
+```
+
+This approach reduces test brittleness by avoiding over-specification.
+
+### Handle Uninteresting Calls with Nice, Naggy, or Strict Mocks
+
+- `NaggyMock` (default) prints warnings for uninteresting calls.
+- `NiceMock` suppresses these warnings, making tests less noisy.
+- `StrictMock` treats uninteresting calls as errors, enforcing stricter expectations.
+
+Recommendation: use `NiceMock` most of the time, `NaggyMock` during debugging, and `StrictMock` only when necessary to enforce rigorous interface guarantees.
+
+Example usage:
+
+```cpp
+NiceMock<MockFoo> mock_foo;
+StrictMock<MockFoo> strict_mock;
+```
+
+### Expectation Clause Ordering
+
+Review your `EXPECT_CALL` statements to ensure the `.With()`, `.Times()`, `.InSequence()`, `.After()`, `.WillOnce()`, `.WillRepeatedly()` and `.RetiresOnSaturation()` clauses are used in proper order:
+
+```cpp
+EXPECT_CALL(mock, Foo(_))
+    .With(...)
+    .Times(...)
+    .InSequence(seq)
+    .After(prev_expectation)
+    .WillOnce(...)
+    .WillRepeatedly(...)
+    .RetiresOnSaturation();
+```
+
+This guarantees expectations are validated as intended and prevents runtime failures due to invalid ordering.
+
+---
+
+## 4. Handling Move-Only Types
+
+GoogleMock now fully supports mocking methods with move-only arguments or return types (`std::unique_ptr`, etc). Define your mocks as usual:
+
+```cpp
+MOCK_METHOD(std::unique_ptr<Buzz>, MakeBuzz, (StringPiece text), (override));
+MOCK_METHOD(bool, ShareBuzz, (std::unique_ptr<Buzz> buzz, int64_t timestamp), (override));
+```
+
+If your action involves returning move-only values, avoid `Return(std::move(...))` used repeatedly as this can cause runtime errors. Instead, use lambdas to generate new objects each call:
+
+```cpp
+EXPECT_CALL(mock, MakeBuzz(_))
+    .WillRepeatedly([](StringPiece text) {
+      return std::make_unique<Buzz>(AccessLevel::kInternal);
+    });
+```
+
+Legacy workarounds with delegating to non-move-only mock methods are no longer necessary.
+
+---
+
+## 5. Verification and Life Cycle Management
+
+### Forcing Verification Before Destruction
+
+If your mock objects may outlive your test scope or are managed externally, explicitly invoke:
+
+```cpp
+ASSERT_TRUE(Mock::VerifyAndClearExpectations(&mock_obj));
+```
+
+to verify expectations and clear them early, preventing false positives from leaked mocks.
+
+### Using `Mock::AllowLeak` When Intentionally Leaking
+
+If you intentionally let a mock object leak (e.g., ownership transferred elsewhere), suppress leak detection errors:
+
+```cpp
+Mock::AllowLeak(mock_ptr);
+```
+
+Use this sparingly, as leaked mocks skip verification.
+
+### Clearing Expectations and Default Actions
+
+To reset a mock's expectations and default actions (for reuse), call:
+
+```cpp
+Mock::VerifyAndClear(&mock_obj);
+```
+
+Note that setting new expectations on a mock after clearing and exercising it leads to undefined behavior.
+
+---
+
+## 6. Performance and Compilation Tips
+
+- Move mock class constructor and destructor definitions out of headers and into `.cc` files to reduce compilation times and prevent redundant code generation.
+- Structure tests to leverage default behaviors via `ON_CALL` to avoid verbose and slow expectation setups.
+
+---
+
+## 7. Common Gotchas and Verification Tips
+
+### Expectation Stickiness
+
+Remember that expectations are "sticky" by default — they remain active even after being saturated (unless `.RetiresOnSaturation()` is used or they belong to a sequence). Without retiring them, overshooting call counts will cause failures.
+
+Use `.RetiresOnSaturation()` when you want expectations to automatically deactivate after fulfilling their call count.
+
+### Controlling Verbosity
+
+Control gMock's diagnostic verbosity with the command line flag:
+
+```
+--gmock_verbose=info|warning|error
+```
+
+- Use `info` for full detailed traces for debugging.
+- Use `warning` (default) to see warnings on uninteresting calls.
+- Use `error` to restrict to errors only.
+
+---
+
+## 8. Summary Workflow for Safe Upgrade
+
+1. Confirm environment prerequisites and install latest GoogleTest and GoogleMock.
+2. Migrate all mock method declarations to use the generic `MOCK_METHOD` macro.
+3. Convert `MOCK_METHODn` and related deprecated macros.
+4. Audit and revise `EXPECT_CALL` usages to match proper clause ordering.
+5. Replace excessive default `EXPECT_CALL`s with `ON_CALL` where appropriate.
+6. Use `NiceMock`, `NaggyMock`, or `StrictMock` selections explicitly for uninteresting call control.
+7. Update handling of move-only types leveraging new support.
+8. Add explicit verifications or leak suppressions where mock lifetimes differ.
+9. Run tests with `--gmock_verbose=info` to validate expectation matches and diagnose failures.
+10. Refactor mock class constructor/destructor definitions into source files to improve build times.
+
+---
+
+## 9. Troubleshooting and Further Help
+
+- If expectations do not appear to be satisfied, run tests with `--gmock_verbose=info` to get detailed call and expectation traces.
+- For build or linking issues, verify your build integration matches the latest [Build System Integration](../guides/practical-integrations/build-system-integration.md) guide.
+- For behavioral confusion between uninteresting and unexpected calls, consult [Understanding Uninteresting vs Unexpected Calls](../docs/gmock_cook_book.md#uninteresting-vs-unexpected).
+- If you encounter deprecated mocking features, refer to the [Deprecations](../changelog-tab/upgrade-guidance/deprecations.md) and [Breaking Changes](../changelog-tab/upgrade-guidance/breaking-changes.md) documentation.
+
+---
+
+## References
+
+- [Mock Class and Method Declaration](../api-reference/mocking-apis/mock-classes.md)
+- [Defining Expectations and Call Sequences](../api-reference/mocking-apis/expectations-sequences.md)
+- [Mocking with GoogleMock Guide](../guides/advanced-testing/mocking-with-googlemock.md)
+- [gMock Cookbook](../docs/gmock_cook_book.md)
+- [Legacy gMock FAQ](../docs/gmock_faq.md)
+- [Version History and Key Features](../changelog-tab/release-highlights/version-history.md)
+- [Recent Improvements and Bug Fixes](../changelog-tab/release-highlights/recent-improvements.md)
+- [Deprecation Notices](../changelog-tab/upgrade-guidance/deprecations.md)
+- [Breaking Changes and Migration Notes](../changelog-tab/upgrade-guidance/breaking-changes.md)
+
+---
+
+We recommend following this guide carefully to ensure a smooth upgrade with minimal disruptions to your test infrastructure. If you need further assistance, joining the community channels or consulting more detailed guides is encouraged.

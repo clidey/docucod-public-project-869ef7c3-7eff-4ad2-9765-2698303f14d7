@@ -1,0 +1,230 @@
+---
+title: "Troubleshooting Common Issues"
+description: "Identify and resolve the most frequent setup and first-run problems, from linker errors to missing dependencies or environment misconfigurations. Clear diagnostics and tips help you get back on track quickly."
+---
+
+# Troubleshooting Common Issues in GoogleTest and GoogleMock
+
+This guide helps you rapidly diagnose and resolve frequent setup and runtime problems encountered when using GoogleTest and GoogleMock. Clear diagnostics, practical tips, and solutions cover build errors, misconfigurations, and common runtime pitfalls.
+
+---
+
+## 1. Linker Errors and Missing Symbols
+
+Linker errors such as unresolved external symbols or missing references often indicate missing GoogleTest/GoogleMock library linkage or incorrect build setup.
+
+### Common Causes
+- The GoogleTest and GoogleMock libraries are not linked to your test binary.
+- You forgot to add `gmock_main` or `gtest_main` when expecting to use the default entry point.
+- Mixing debug and release builds causes ABI incompatibility.
+
+### Solutions
+1. Make sure your build script links against the required libraries:
+   - For GoogleTest only: link with `gtest` and `gtest_main`.
+   - For GoogleMock: link with `gmock`, `gmock_main`, plus test dependencies.
+2. When using CMake, invoking `FetchContent` or `add_subdirectory` correctly handles linkage automatically.
+3. On Windows, ensure runtime library flags are consistent (i.e., both your tests and GoogleTest use the same runtime).
+4. Use `gmock_main` if you want GoogleMock's provided `main()` function, otherwise define your own.
+
+### Example CMake Snippet
+```cmake
+find_package(GTest REQUIRED)
+add_executable(my_test my_test.cc)
+target_link_libraries(my_test GTest::gmock_main)
+```
+
+<Tip>
+If you encounter linker errors referencing `InitGoogleMock` or `RUN_ALL_TESTS`, verify that you included `gmock_main` or provided your own `main()`.
+</Tip>
+
+## 2. Build and Compiler Issues
+
+### Unsupported Compiler or Compiler Version
+
+GoogleTest requires a C++11-compatible compiler:
+- GCC >= 4.8
+- Clang >= 3.3
+- MSVC >= Visual Studio 2015
+
+Older versions may cause compile errors.
+
+### Incomplete or Mismatched Headers
+- Always include `<gtest/gtest.h>` for core tests.
+- For mocking, include `<gmock/gmock.h>`.
+
+### Comma and Parentheses Issues in `MOCK_METHOD`
+- When mocking methods with template types or complex argument lists that contain commas, wrap the types in extra parentheses or use type aliases.
+
+Example:
+```cpp
+MOCK_METHOD((std::pair<int, int>), GetPair, ()); // Wrap return type in parentheses
+using IntPair = std::pair<int, int>;
+MOCK_METHOD(IntPair, GetPair, ()); // Or use type alias
+```
+
+### MSVC Warnings About `const` Parameters
+
+If you see warnings C4301 or C4373 when mocking methods with `const` parameters, it is a known MSVC bug with ignoring top-level `const` on parameters. Remove top-level `const` in parameters to work around it.
+
+<Note>
+The `const` for pointer or reference parameters remains meaningful and should be retained.
+</Note>
+
+## 3. Unexpected or Uninteresting Mock Calls
+
+### Understanding the Difference
+
+- **Uninteresting call:** A mock method called but no `EXPECT_CALL` set. By default, a warning is issued but the test passes.
+- **Unexpected call:** A mock method has one or more `EXPECT_CALL`s, but the actual call does not match any. Always a test failure.
+
+### Reducing Uninteresting Call Warnings
+- Use `ON_CALL` to specify default behavior for mock methods you want to allow but not verify.
+- Use `NiceMock<T>` wrapper to suppress warnings on uninteresting calls.
+- If you want to explicitly disallow calls, use `EXPECT_CALL(...).Times(0)`.
+
+### Setting Up `EXPECT_CALL`
+Ensure that all calls your code under test is expected to make to mocks have corresponding `EXPECT_CALL`s if you want to verify them. For calls you do not want to verify but allow, use `ON_CALL` and/or `NiceMock`.
+
+### Debugging Unexpected Calls
+- Run tests with `--gmock_verbose=info` to see detailed call matching logs and stack traces.
+- Verify argument matchers in your `EXPECT_CALL`s.
+- Use `SCOPED_TRACE` to add context to failures inside helper functions.
+
+## 4. Expectation Ordering and Stickiness Issues
+
+### Calls Out Of Order
+- By default, calls can occur in any order and match any expectation whose matchers fit.
+- To enforce call order, use `InSequence` or the `InSequence` clause on `EXPECT_CALL`.
+
+### Sticky Expectations
+- Expectations are sticky: a saturated expectation remains active until another later expectation in a sequence or order overrides it.
+- To retire an expectation after use, invoke `.RetiresOnSaturation()`.
+
+### Partial Order Misuse
+- When using `.After()` or `.InSequence()`, ensure the specified call order accurately models constraints.
+- Misordered or conflicting sequences cause expectation failures.
+
+<Tip>
+To debug complex ordering problems, dissect your test into smaller ordered sequences and use clear `EXPECT_CALL` clauses with `.RetiresOnSaturation()` where appropriate.
+</Tip>
+
+## 5. Default Actions and Return Values
+
+### Missing Default Actions on Non-void Methods
+- If a mock method returns a type without a default constructor, calling it without `ON_CALL` or `EXPECT_CALL` that specifies an action can cause crashes or undefined behavior.
+- Always set default actions for such methods using `ON_CALL(...).WillByDefault(...)` or supply explicit actions in `EXPECT_CALL`.
+
+### Return of Move-Only Types
+- Mocking methods returning move-only types requires explicit actions, e.g., return a `std::unique_ptr` from a lambda.
+
+Example:
+```cpp
+EXPECT_CALL(mock, MakeBuzz(_))
+  .WillRepeatedly([](const std::string&) {
+    return std::make_unique<Buzz>(AccessLevel::kInternal);
+  });
+```
+
+### Using `DefaultValue<T>`
+- You can globally specify default return values for types without default constructors.
+
+### Common Pitfall: Side Effects in `Return()`
+- `Return(expr)` evaluates `expr` at expectation set time, not call time.
+- Use lambdas for call-time evaluation.
+
+## 6. Test Crashes and Death Test Issues
+
+### Crashes in Tests Invoking Mocks
+- Check that mocked virtual methods have virtual destructors.
+- Confirm mock objects are properly instantiated and destroyed.
+
+### Death Tests
+- Use `Mock::AllowLeak()` on mocks to avoid false-positive leak errors during death tests.
+- Ensure mock expectations are set up before test execution and mocks live throughout.
+
+## 7. Slow or No Test Discovery
+
+### Causes
+- Incorrect naming conventions for test files or test macros.
+- Missing main entry point or improper `InitGoogleTest` calls.
+- Misconfigured build system or missing compiled test objects.
+
+### Solutions
+- Ensure test file names end with `_test.cc` or as configured.
+- Use `TEST()` or `TEST_F()` macros inside test files.
+- Link test binary with `gtest_main` or define your own `main()` invoking `InitGoogleTest()`.
+
+## 8. Build & Linking Advice
+
+- Avoid mixing GoogleTest versions or ABI incompatible compilers.
+- Keep compiled GoogleTest code and tests in the same C++ standard mode.
+- Use the integrated GoogleTest version provided in your build from official premises.
+
+## 9. Verbosity and Diagnostic Controls
+
+### Controlling Verbosity
+- Use command-line flag `--gmock_verbose=info|warning|error` to tune the verbosity of mock call logging and warnings.
+- Use `--gtest_stack_trace_depth` to control stack trace length in failure messages.
+
+### Using `SCOPED_TRACE`
+- Add contextual trace messages inside helper functions for improved debugging output.
+
+## 10. Additional Resources and Support
+
+For continued learning and deeper dives, consult:
+
+- [GoogleTest Primer](primer.md) for test basics
+- [Mocking Reference](reference/mocking.md) for complete mocking usage
+- [gMock Cookbook](gmock_cook_book.md) for advanced mocking scenarios
+- [Legacy gMock FAQ](gmock_faq.md) for historical issues and detailed Q&A
+
+<Tip>
+When in doubt, enable detailed logging via `--gmock_verbose=info` and review your mock expectations and call sequences carefully.
+</Tip>
+
+---
+
+## Quick Checklist
+
+- [ ] Are mock libraries properly linked?
+- [ ] Is your compiler and build configuration compatible?
+- [ ] Have you wrapped complex types in `MOCK_METHOD` correctly?
+- [ ] Are virtual destructors present?
+- [ ] Did you set default actions for non-trivial return types?
+- [ ] Are `EXPECT_CALL`s declared before mock invocations?
+- [ ] Are expectations ordered as intended?
+- [ ] Did you suppress or handle uninteresting calls appropriately?
+- [ ] Use `SCOPED_TRACE` and `--gmock_verbose=info` for hard-to-debug tests.
+
+---
+
+## Troubleshooting Links
+
+- [Installation & Build Integration](getting_started/essentials_setup/installation.md)
+- [Configuration Basics](getting_started/essentials_setup/configuration_basics.md)
+- [Your First Test Case](getting_started/first_steps_usage/your_first_test.md)
+- [Mocking Reference](docs/reference/mocking.md)
+- [Legacy gMock FAQ](docs/gmock_faq.md)
+
+
+---
+
+## Example: Diagnosing an Unexpected Call Warning
+
+```shell
+[ RUN      ] FooTest.Bar
+foo_test.cc:15: EXPECT_CALL(mock, DoSomething(42)) invoked
+Stack trace:
+...
+foo_test.cc:20: Mock function call matches EXPECT_CALL(mock, DoSomething(42))...
+  Function call: DoSomething(43)
+GMOCK WARNING: Uninteresting mock function call...
+Unexpected mock function call - returning default value.
+ Function call: DoSomething(43)
+```
+
+**Solution:** Check that the argument `43` should indeed be expected or add a catch-all `EXPECT_CALL(mock, DoSomething(_))` if the argument can vary. Use matcher syntax for flexible matching.
+
+---
+
+By following this guide, you will efficiently identify and fix the most common issues with GoogleTest and GoogleMock, ensuring smooth test runs and reliable test results.
