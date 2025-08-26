@@ -1,0 +1,318 @@
+---
+title: "Actions & Behavioral Specification"
+description: "Understand how actions define mock object responses, from return values to custom code execution, and how expectations determine call sequencing and result verification."
+---
+
+# Actions & Behavioral Specification
+
+GoogleMock’s flexibility hinges on two core concepts: **actions** and **expectations**. This guide demystifies how to specify the responses of mock functions using actions—from simple return values to complex custom behaviors—and how to set and control call expectations, including sequencing and verification.
+
+---
+
+## Understanding Actions: Defining What Mocks Do
+
+When your mock method is called, an **action** dictates what happens next. Actions control return values, side effects, invocation of user code, and more. Even if your mocked function is purely virtual with no implementation, you can explicitly or implicitly define its behavior through these actions.
+
+### Default Actions
+
+By default, mocked methods behave predictably based on their return type:
+
+- `void` functions return immediately.
+- Functions returning numeric types return `0`.
+- `bool` returns `false`.
+- Pointer-returning functions return `nullptr`/`NULL`.
+- In C++11 and beyond, if the return type is default-constructible, a default-constructed instance is returned.
+
+You can override defaults globally via `DefaultValue<T>::Set()` or per mock method using `ON_CALL()`.
+
+### Specifying Actions With `WillOnce` and `WillRepeatedly`
+
+You customize mock behavior through **actions clauses** chained to expectations:
+
+- `.WillOnce(action)` applies to the next matching call, one time only.
+- `.WillRepeatedly(action)` applies to all subsequent matching calls after exhausting `WillOnce` clauses.
+
+Example:
+
+```cpp
+using ::testing::Return;
+EXPECT_CALL(mock, GetSize())
+    .WillOnce(Return(100))    // Returns 100 on first call
+    .WillOnce(Return(200))    // Returns 200 on second call
+    .WillRepeatedly(Return(300)); // Always 300 thereafter
+```
+
+### Built-In Actions (Common Use Cases)
+
+| Action                 | Description                                                      |
+|-----------------------|------------------------------------------------------------------|
+| `Return(value)`        | Return a value immediately. `value` is converted at expectation set time, not every call. |
+| `ReturnRef(variable)`  | Return a reference to an existing variable. Useful for reference return types. |
+| `ReturnNull()`         | Return a null pointer (`nullptr`).                              |
+| `ReturnNew<T>(args...)`| Returns a new `T` object constructed with the arguments on every call. |
+| `SetArgPointee<N>(value)` | Assign `value` to the `N`-th pointer argument’s pointee. Useful for output params. |
+| `DoDefault()`          | Perform the built-in or `ON_CALL` default action.                |
+| `Invoke(func)`         | Call a function, functor, or lambda to dynamically perform logic. |
+| `DoAll(a1, a2, ..., an)` | Perform multiple actions; returns value of the last action.      |
+
+### Custom Actions and Lambdas
+
+If built-in actions don't fit your needs, you can use lambdas or functors as actions:
+
+```cpp
+EXPECT_CALL(mock, Process(_))
+    .WillOnce([](int x) {
+      // Custom behavior
+      return x * 2;
+    });
+```
+
+This flexibility allows embedding arbitrary executable code, capturing variables, performing complex side effects, or combining multiple actions.
+
+### Composite Actions
+
+Often, you want to perform multiple side effects in one call. Use `DoAll()` to sequence these actions, making sure the last action returns the expected return type:
+
+```cpp
+EXPECT_CALL(mock, Update(_))
+    .WillOnce(DoAll(SetArgPointee<0>(42), Return(true)));
+```
+
+### Handling Move-Only Types
+
+GoogleMock fully supports move-only return and argument types (like `std::unique_ptr`). Use special helpers like `ByMove()` within `Return()` to indicate moves:
+
+```cpp
+EXPECT_CALL(mock, CreateObject())
+    .WillOnce(Return(ByMove(std::make_unique<Object>())));
+```
+
+### Practical Tips for Actions
+
+- The expression inside `Return()` or other actions is evaluated **once** at expectation setup time, **not** every call.
+- Use lambdas for generating fresh objects or side effects on every call.
+- Use `ReturnRef()` when returning references to variables that change over time.
+- Avoid using `DoDefault()` inside composite actions; it causes runtime errors.
+
+---
+
+## Setting Expectations: Controlling Mock Call Behavior
+
+Expectations define **what calls are expected**, **how many times**, **in what order**, and **with what consequences**. Configuring expectations precisely ensures your tests check interaction correctness robustly.
+
+### Basic Syntax
+
+To expect a call and specify its behavior:
+
+```cpp
+EXPECT_CALL(mock_obj, Method(matchers...))
+    .Times(cardinality)
+    .WillOnce(action)
+    .WillRepeatedly(action)
+    .RetiresOnSaturation();
+```
+
+This macro creates an expectation that `Method` will be called on `mock_obj` with specific matching arguments.
+
+### Matching Arguments
+
+You can specify the expected arguments explicitly:
+
+```cpp
+EXPECT_CALL(turtle, Forward(100));  // Exactly 100
+EXPECT_CALL(turtle, GoTo(50, _));  // x=50, any y
+EXPECT_CALL(turtle, Paint).With(SomeMultiArgMatcher());
+EXPECT_CALL(turtle, Jump);          // Any arguments, if method not overloaded
+```
+
+Use matchers (e.g., `_`, `Eq()`, `Ge()`, custom matchers) for flexible argument demands.
+
+### Cardinalities: How Many Times?
+
+Use `.Times()` to specify how many times a call is expected:
+
+| Cardinality        | Meaning                                   |
+|--------------------|-------------------------------------------|
+| `AnyNumber()`      | Any number of calls allowed                 |
+| `AtLeast(n)`       | At least *n* times                          |
+| `AtMost(n)`        | At most *n* times                           |
+| `Between(m, n)`    | Between *m* and *n* times (inclusive)      |
+| `Exactly(n)` or `n`| Exactly *n* times; zero means never called  |
+
+If omitted, `.Times()` is inferred based on `.WillOnce()` and `.WillRepeatedly()` usage.
+
+### Call Order: Sequencing Expectations
+
+By default, expectations can be fulfilled in any order. To enforce strict or partial orders, use:
+
+- **`InSequence`**: Wrap expectations in an `InSequence` scope to require strict ordering.
+  ```cpp
+  {
+    InSequence seq;
+    EXPECT_CALL(mock, FirstCall());
+    EXPECT_CALL(mock, SecondCall());
+  }
+  ```
+
+- **`Sequence` objects with `.InSequence()`**: Assign expectations to `Sequence` objects to create partial orders.
+
+- **`.After()` clause**: Indicate that one expectation should occur after others.
+
+### Sticky Expectations and `RetiresOnSaturation()`
+
+Expectations remain **active** even after their upper bound is reached — this prevents later calls from erroneously matching earlier expectations and aids in test clarity.
+
+If you want an expectation to become inactive immediately after saturation (no longer matching calls), use `.RetiresOnSaturation()`:
+
+```cpp
+EXPECT_CALL(mock, SetNumber(7))
+    .Times(2)
+    .RetiresOnSaturation();
+```
+
+This enables more complex matching rules where less specific expectations catch calls after a specific expectation is satisfied.
+
+### Handling Uninteresting Calls
+
+Calls to mock methods without expectations (`EXPECT_CALL`) are titled **uninteresting calls**. By default, gMock will:
+
+- Perform a default action
+- Emit a warning (naggy behavior)
+
+Use `NiceMock<T>` to suppress such warnings or `StrictMock<T>` to treat uninteresting calls as errors.
+
+### Setting Default Behaviors with `ON_CALL()`
+
+To define a default behavior **without requiring calls**, use `ON_CALL()`:
+
+```cpp
+ON_CALL(mock, SomeMethod(_))
+    .WillByDefault(Return(some_value));
+```
+
+This configures what happens when no explicit `EXPECT_CALL()` matches.
+
+---
+
+## How Actions and Expectations Work Together
+
+- `EXPECT_CALL()` establishes _expected calls_ and their order, frequency, and behaviors via chaining.
+- `ON_CALL()` sets default behaviors for calls regardless of expectations.
+- When a mock method is invoked, gMock searches expectations in **reverse definition order**, matching the last fitting expectation.
+- If no expectation matches, and `ON_CALL` behavior exists, that is executed.
+- Otherwise, the built-in default action is used.
+
+---
+
+## Advanced Concepts and Best Practices
+
+### Finer Control of Call Sequence
+
+Use multiple sequences or `.After()` calls when partial or complex call ordering is needed.
+
+Example of partial order with two sequences:
+
+```cpp
+using ::testing::Sequence;
+Sequence s1, s2;
+EXPECT_CALL(mock, Init()).InSequence(s1, s2);
+EXPECT_CALL(mock, Step1()).InSequence(s1);
+EXPECT_CALL(mock, Step2()).InSequence(s2);
+```
+
+### Combining Multiple Actions
+
+Actions can be composed using `DoAll()` to apply side effects and then return a value, allowing e.g. modifying an argument and returning a result:
+
+```cpp
+EXPECT_CALL(mock, Compute(_))
+    .WillOnce(DoAll(SetArgPointee<0>(5), Return(true)));
+```
+
+### Using Functions or Lambdas as Actions
+
+You can invoke existing callable objects as actions, including global functions or member methods:
+
+```cpp
+EXPECT_CALL(mock, Process(_))
+    .WillOnce(Invoke(&some_function));
+EXPECT_CALL(mock, Configure(_))
+    .WillOnce(Invoke(&object, &Class::Method));
+```
+
+Use `InvokeWithoutArgs()` when you want to call a callable ignoring mock parameters.
+
+### Using Arguments of Mock Function as Part of Actions
+
+With `WithArg<N>()`, `WithArgs<N1, N2,...>()`, or `InvokeArgument<N>()`, you can select which mock function argument(s) to forward to an action:
+
+```cpp
+EXPECT_CALL(mock, Run(_, _))
+    .WillOnce(WithArg<1>(Invoke(&some_function)));
+EXPECT_CALL(mock, Run(_))
+    .WillOnce(InvokeArgument<0>(5));
+```
+
+### Avoiding Side Effects in Action Expression
+
+Remember the expression inside `.WillOnce(Return(expr))` is evaluated once at setup time, not on every invocation. To ensure dynamic values, use lambdas or `Invoke()` actions.
+
+---
+
+## Troubleshooting Common Issues
+
+- **Uninteresting call warnings:** Use `NiceMock` or add a catch-all `EXPECT_CALL` with `Times(AnyNumber())`.
+- **Ordering errors:** Use `InSequence` or `.After()` to fix call order violations.
+- **Excessive calls:** Ensure `.Times()` cardinality matches call count.
+- **Missing returns lead to undefined behavior:** Specify `Return()` or other actions as needed.
+- **Move-only types:** Use `ByMove()` in return actions or lambdas.
+
+---
+
+## Summary
+
+Understanding how to specify **actions** and set **expectations** is key to unlocking GoogleMock’s full power for robust, expressive C++ mocking. Start simple by setting return values and gradually incorporate sequencing, argument matching, and custom behaviors to match your testing goals.
+
+For hands-on examples and the full list of built-in actions and expectation clauses, explore the API references and cookbooks linked below.
+
+---
+
+## Relevant Documentation
+
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html) — Beginner-friendly introduction
+- [Mocking Reference](https://google.github.io/googletest/reference/mocking.md) — Full details of `EXPECT_CALL`, `ON_CALL`, and related macros
+- [Actions Reference](https://google.github.io/googletest/reference/actions.md) — Exhaustive list of built-in actions
+- [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html) — Quick syntax and usage guide
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) — Recipes and best practices
+
+---
+
+## Code Example: Combining Expectations with Actions
+
+```cpp
+using ::testing::Return;
+using ::testing::_;  // wildcard matcher
+using ::testing::DoAll;
+using ::testing::SetArgPointee;
+
+class MockFoo {
+ public:
+  MOCK_METHOD(int, Compute, (int* output), ());
+};
+
+TEST(MockFooTest, ReturnsValueAndSetsOutput) {
+  MockFoo mock;
+
+  EXPECT_CALL(mock, Compute(_))
+      .WillOnce(DoAll(SetArgPointee<0>(42), Return(0)));
+
+  int output = 0;
+  int ret = mock.Compute(&output);
+  EXPECT_EQ(ret, 0);
+  EXPECT_EQ(output, 42);
+}
+```
+
+This test expects `Compute` to be called once; it sets the integer pointed to by the argument to 42 and returns 0.
+
+---
