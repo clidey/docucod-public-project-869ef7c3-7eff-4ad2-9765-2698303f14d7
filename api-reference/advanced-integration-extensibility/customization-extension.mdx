@@ -1,0 +1,204 @@
+---
+title: "Customization and Extending the API"
+description: "Guidance for extending framework behavior—writing custom matchers/printers, integrating with platform abstractions, and leveraging testing hooks. Includes pointers on where and how to inject custom logic."
+---
+
+# Customization and Extending the API
+
+This guide provides authoritative and practical directions for extending and customizing the behavior of the GoogleMock (gMock) framework. It covers how to write custom matchers and printers, integrate with platform-specific abstractions, and leverage testing hooks to inject your own logic into tests. By following these best practices and examples, you can significantly tailor gMock to meet complex or unique testing scenarios.
+
+---
+
+## Overview of Customization Points
+
+GoogleMock is designed to be extensible through clearly defined customization points. These allow you to adapt the framework's capabilities to your particular domain and requirements without modifying the core library.
+
+Typical customization scenarios include:
+
+- **Creating custom matchers and matcher classes** to assert more complex or domain-specific conditions on mock method arguments.
+- **Defining custom printing behaviors** so that your user-defined types show up clearly and informatively in test failure messages.
+- **Integrating with platform-specific features** through custom macros and hooks.
+- **Extending mocking behaviors by leveraging actions and lifecycle hooks.**
+
+You inject your custom logic primarily by writing new matcher classes, defining macros, or leveraging gMock functions designed for extension.
+
+---
+
+## Writing Custom Matchers
+
+Custom matchers enable rich semantic validation of mock arguments beyond the built-in matchers.
+
+### Quick Creation Using MATCHER Macros
+
+The `MATCHER`, `MATCHER_P`, and related macros let you define matchers concisely:
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  return (arg % 7) == 0;
+}
+```
+
+Usage example:
+
+```cpp
+EXPECT_CALL(mock_obj, SomeMethod(IsDivisibleBy7()));
+```
+
+These macros support adding descriptive messages and can stream detailed failure explanations.
+
+### Writing Matcher Classes
+
+For heavyweight or reusable matchers, implement a matcher class:
+
+```cpp
+class BarPlusBazEqMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  explicit BarPlusBazEqMatcher(int expected_sum) : expected_sum_(expected_sum) {}
+
+  bool MatchAndExplain(const Foo& foo, std::ostream* os) const {
+    int sum = foo.bar() + foo.baz();
+    if (sum == expected_sum_) return true;
+    if (os != nullptr) *os << "sum is " << sum;
+    return false;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "bar() + baz() equals " << expected_sum_;
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "bar() + baz() does not equal " << expected_sum_;
+  }
+
+ private:
+  int expected_sum_;
+};
+
+::testing::Matcher<const Foo&> BarPlusBazEq(int expected_sum) {
+  return ::testing::MakeMatcher(new BarPlusBazEqMatcher(expected_sum));
+}
+```
+
+Use it like:
+
+```cpp
+EXPECT_THAT(foo, BarPlusBazEq(5));
+```
+
+---
+
+## Defining Custom Printers
+
+GoogleMock prints argument values in assertion failures using the googletest printing system. By default, it supports built-in and STL types and those supporting `operator<<`.
+
+To customize printing for your own types, define either:
+
+- A free function `void PrintTo(const YourType& obj, std::ostream* os);`
+- Or an overloaded streaming operator `std::ostream& operator<<(std::ostream& os, const YourType& obj);`
+
+Example:
+
+```cpp
+void PrintTo(const MyType& value, std::ostream* os) {
+  *os << "MyType(" << value.field1 << ", " << value.field2 << ")";
+}
+```
+
+This method provides clear, domain-appropriate diagnostics when expectations fail.
+
+---
+
+## Integrating Custom Logic Using Hooks and Extensions
+
+GoogleMock allows injection of customizations beyond matchers and printers:
+
+- The `custom` directory in the source tree is provided to add custom flags and macros by defining symbols such as `GMOCK_DECLARE_bool_(name)` or overriding printing behaviors with macros in `gmock-port.h`.
+
+- You can create mock methods for functions not directly mockable by wrapping them via interfaces or adapter patterns.
+
+- Use the `MockFunction` template class to mock `std::function` objects with callable signatures.
+
+These extension points enable smooth integration with platform-specific or project-specific needs.
+
+---
+
+## Best Practices and Common Pitfalls
+
+- Always keep matchers functionally pure: do not have matchers produce side effects or depend on external mutable state.
+- Write clear, maintainable custom matcher descriptions to improve test diagnostics.
+- Avoid over-specifying expectations—use `ON_CALL` for common default behaviors and reserve `EXPECT_CALL` for specific interaction verification.
+- If matching against overloads, disambiguate explicitly with `Const()` or by specifying matcher types.
+- When mocking types with complex template arguments, to avoid parsing errors, wrap return or argument types in parentheses or use type aliases.
+- Use the delegation techniques outlined in the gMock Cookbook to combine mocks with fakes or real implementations, preserving test correctness while minimizing duplication.
+
+---
+
+## Example: Creating a Custom Matcher to Verify Sum of Fields
+
+```cpp
+class SumEqualsMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  explicit SumEqualsMatcher(int expected) : expected_(expected) {}
+
+  bool MatchAndExplain(const Foo& foo, ::std::ostream* os) const {
+    int actual = foo.bar() + foo.baz();
+    if (actual == expected_) return true;
+    if (os) *os << "sum was " << actual;
+    return false;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "bar() + baz() equals " << expected_;
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "bar() + baz() does not equal " << expected_;
+  }
+
+ private:
+  int expected_;
+};
+
+::testing::Matcher<const Foo&> HasSum(int expected) {
+  return ::testing::MakeMatcher(new SumEqualsMatcher(expected));
+}
+
+// In tests:
+EXPECT_CALL(mock_obj, DoSomething(HasSum(10)));
+```
+
+## When to Use Strict, Nice, or Default Mocks
+
+- Use **StrictMock** when you want to catch any unexpected calls and treat them as test failures.
+- Use **NiceMock** to suppress warnings about uninteresting calls for mocks that you don't want to verify explicitly.
+- The default mock type (`NaggyMock`) warns on uninteresting calls but allows them.
+
+Choose the strictness level that best fits the test intent to balance diagnostic details and test maintenance costs.
+
+---
+
+## Troubleshooting Customization Issues
+
+- If a matcher fails unexpectedly or provides poor diagnostics, verify your `DescribeTo` and `MatchAndExplain` implementations.
+- If custom printers do not output as expected, confirm your `PrintTo` overload is in the same namespace as your type or is findable by ADL.
+- Parsing errors using `MOCK_METHOD` with complex template types require wrapping in parentheses or defining explicit type aliases.
+- Unexpected behavior with overloaded methods may be resolved by explicit disambiguation using `Const()` or type matchers.
+- Control gMock verbosity with the `--gmock_verbose` flag (`info`, `warning`, `error`) to adjust feedback verbosity for successful test runs or debugging.
+
+---
+
+## Additional Resources
+
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) - Recipes for advanced mocking, including delegating to fakes or reals.
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html) - Beginner-friendly guide to mocking.
+- [Mocking Reference](../reference/mocking.md) - Details on macros, classes, and expectations.
+- [Matchers and Actions](../gmock-mocking-apis/matchers-and-actions.md) - Reference for matchers and behavior control.
+- Source path for customization macros: `googlemock/include/gmock/internal/custom/` and `googletest/include/gtest/internal/custom/`
+
+---
+
+This guide empowers you to extend GoogleMock’s capabilities thoughtfully and effectively, unlocking powerful and expressive unit testing tailored to your codebase needs.
