@@ -1,0 +1,260 @@
+---
+title: "Extending and Customizing Behavior"
+description: "A roadmap to advanced extensibility: how to write custom matchers, actions, or integrate with external tools. Discusses patterns for composition, extension, and interoperability with other testing frameworks."
+---
+
+# Extending and Customizing Behavior
+
+This guide provides a comprehensive roadmap to advanced extensibility within GoogleMock, focusing specifically on how to write custom matchers, actions, and integrate them with external tools or testing frameworks. It explores patterns for composition, extension, and interoperability, empowering users to tailor GoogleMock to their domain-specific testing needs.
+
+---
+
+## Understanding the Extensibility Landscape
+
+GoogleMock is designed to be flexible and extensible, allowing you to push beyond the out-of-the-box capabilities by crafting your own matchers and actions. This extensibility unlocks the power to express complex testing scenarios precisely, to integrate seamlessly with other frameworks, and to compose behaviors for better reuse and maintainability.
+
+Extensibility in GoogleMock primarily revolves around three pillars:
+
+1. **Custom Matchers:** Define your own predicates to match arguments in ways native matchers cannot.
+2. **Custom Actions:** Implement specific behaviors or side effects when mock methods are called.
+3. **Integration Patterns:** Compose and interoperate with other test tools and frameworks.
+
+By mastering these, you gain full control over mocking semantics tailored to your project’s domain.
+
+---
+
+## Writing Custom Matchers
+
+### Why Create Custom Matchers?
+
+Built-in matchers cover many common scenarios, but often you'll encounter domain-specific needs such as validating complex objects by certain invariants, or checking subtle constraints across multiple method arguments.
+
+Custom matchers
+- Help keep tests readable by encapsulating complex logic into descriptive matchers.
+- Provide rich failure messages describing exactly why a match failed.
+- Enable reusability across tests for consistent verification.
+
+### Approaches to Create Custom Matchers
+
+#### 1. Simple Matchers via Macros
+
+Use the `MATCHER`, `MATCHER_P`, and `MATCHER_Pk` macros for quick matcher definitions:
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  return (arg % 7) == 0;
+}
+
+MATCHER_P(InClosedRange, range, "") {
+  return range.first <= arg && arg <= range.second;
+}
+```
+
+These macros enable concise predicate definitions referencing the matched argument as `arg`.
+
+#### 2. Full Matcher Classes
+
+For more control, implement matcher classes with:
+
+- `MatchAndExplain()` method to perform matching and optionally explain results to users.
+- `DescribeTo()` and `DescribeNegationTo()` to provide user-friendly descriptions.
+
+Example:
+
+```cpp
+class DivisibleBy7Matcher {
+ public:
+  using is_gtest_matcher = void;
+
+  bool MatchAndExplain(int n, std::ostream* os) const {
+    if (n % 7 != 0 && os) {
+      *os << "remainder: " << n % 7;
+    }
+    return (n % 7) == 0;
+  }
+
+  void DescribeTo(std::ostream* os) const { *os << "is divisible by 7"; }
+  void DescribeNegationTo(std::ostream* os) const { *os << "isn't divisible by 7"; }
+};
+
+::testing::Matcher<int> DivisibleBy7() {
+  return ::testing::MakeMatcher(new DivisibleBy7Matcher());
+}
+```
+
+### Best Practices and Tips
+
+- Always provide clear failure descriptions.
+- Keep matchers pure and side-effect free.
+- Use parameterized matchers (`MATCHER_P*`) to generalize reuse.
+- Compose matchers using built-in combinators like `AllOf()`, `AnyOf()`, and `Not()`.
+
+---
+
+## Writing Custom Actions
+
+### Overview
+
+Actions in GoogleMock define what a mock method should do when called. While Google's built-in actions cover common patterns (like `Return()`, `SetArgPointee()`, `Invoke()`), many scenarios call for custom behaviors.
+
+### How to Define Custom Actions
+
+#### Lambda or Functor Based Actions
+
+Simplest way is to provide a callable with a signature compatible with the mock method:
+
+```cpp
+EXPECT_CALL(mock, Foo())
+    .WillOnce([] { return 42; });
+```
+
+This suffices for many cases and supports stateful and move-only action objects.
+
+#### Implementing ActionInterface
+
+For more advanced, reusable actions, implement `ActionInterface`:
+
+```cpp
+template <typename F> // F is signature of mocked function
+class MyAction : public ::testing::ActionInterface<F> {
+ public:
+  Result Perform(const ArgumentTuple& args) override {
+    auto arg0 = std::get<0>(args);
+    // implement action logic
+    return ...;
+  }
+};
+
+::testing::Action<F> MakeMyAction() {
+  return ::testing::MakeAction(new MyAction<F>());
+}
+```
+
+This lets your action work polymorphically for specific mock signatures.
+
+#### Polymorphic Actions
+
+Use `MakePolymorphicAction()` when you want one action to work across multiple mock method signatures:
+
+```cpp
+class ReturnSecondArgAction {
+ public:
+  template <typename Result, typename Args>
+  Result Perform(const Args& args) const {
+    return std::get<1>(args);
+  }
+};
+
+auto ReturnSecondArg() {
+  return ::testing::MakePolymorphicAction(ReturnSecondArgAction());
+}
+```
+
+This can apply uniformly whenever you want to return the second argument.
+
+### Useful Patterns
+
+- **Composing multiple actions:** Combine with `DoAll(action1, action2, ..., actionN)`.
+- **Modifying output parameters:** Use `SetArgPointee<N>(val)`.
+- **Invoking callbacks passed as arguments:** Use `InvokeArgument<N>(...)`.
+- **Ignoring action results when required:** Use `IgnoreResult()`.
+
+### Tips
+
+- Actions must be compatible with the mock method signature.
+- `WillOnce()` can accept move-only callables.
+- Avoid side effects that confuse test results.
+- Define actions clearly documenting what they do.
+
+---
+
+## Patterns for Composition and Extension
+
+### Delegating to Fakes or Real Implementations
+
+Sometimes you want your mocks to preserve real behavior but still monitor interactions:
+
+- **Delegating to fake:** Provide the fake class as a member, route default actions to it.
+
+  ```cpp
+  ON_CALL(*this, Foo(_)).WillByDefault([this](int x){ return fake_.Foo(x); });
+  ```
+
+- **Delegating to real:** Use the real implementation internally to preserve semantics in tests.
+
+### Simplifying Complex Interfaces
+
+If a mock method has a complex signature, create wrapper mock methods with simpler signatures and delegate the calls.
+
+Example:
+
+```cpp
+class ScopedMockLog : public LogSink {
+public:
+  void send(...) override {
+    Log(severity, filename, std::string(message, length));
+  }
+  MOCK_METHOD(void, Log, (LogSeverity, const std::string&, const std::string&));
+};
+```
+
+This approach makes mock usage cleaner without breaking the original interface.
+
+### Managing Mock Behavior Across Multiple Expectations
+
+- Use sequences (`Sequence` and `InSequence`) for ordered calls.
+- Use `After()` clauses for expressing partial orderings.
+- Use `.RetiresOnSaturation()` when you want expectations to retire after being met.
+
+---
+
+## Integrating with External Tools and Other Frameworks
+
+### Concepts for Integration
+
+- **Custom Output Formats:** Use gTest’s XML or JSON outputs to connect with CI tools.
+- **Test Runner Extensions:** Use GoogleMock’s hooks and verbosity flags to feed external runners detailed call-level insights.
+- **Interoperability Techniques:** Wrap or adapt GoogleMock mocks for interfacing with other test frameworks or language bindings.
+
+### Best Practices
+
+- Maintain clear boundaries between mock code and integration glue code.
+- Use GoogleMock’s flexibility to adapt matcher and action semantics to the target environment.
+- Leverage flags like `--gmock_verbose` to adjust logging for external analysis.
+
+---
+
+## Troubleshooting Common Pitfalls
+
+- **Expectations Must Precede Calls:** Always set `EXPECT_CALL` before exercising the mock method.
+- **Beware of Sticky Expectations:** Use `.RetiresOnSaturation()` to automatically retire expectations that are met.
+- **Order of Expectations Matters:** More specific expectations should be declared after more general ones due to gMock’s reverse lookup.
+- **Mock Methods Must Be Virtual:** Non-virtual methods cannot be mocked unless using advanced dependency injection.
+- **Control Uninteresting Calls:** Use `NiceMock` or explicit `EXPECT_CALL(...).Times(AnyNumber())` for methods you want to ignore warnings on.
+
+---
+
+## Practical Tips for Advanced Extensibility
+
+- Always document your custom matchers and actions clearly to improve test readability.
+- Encapsulate common mocking patterns into reusable helper functions or fixtures.
+- Regularly profile compilation times for mocks; move constructors and destructors out-of-line if necessary.
+- Use the comprehensive [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) and official API documentation to explore advanced recipes.
+
+---
+
+## Summary
+
+Extending GoogleMock with custom matchers and actions significantly enhances your ability to craft precise, expressive, and maintainable tests. Combined with powerful composition patterns and thoughtful integration techniques, this guide equips you to push GoogleMock beyond its defaults, adapting it to your project’s unique requirements.
+
+---
+
+## Additional Resources
+
+- [GoogleMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html) — Quick reference on mocking syntax and macros.
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) — Practical example-driven recipes.
+- [Matchers Reference](https://google.github.io/googletest/reference/matchers.html) — Details of built-in and custom matcher design.
+- [Actions Reference](https://google.github.io/googletest/reference/actions.html) — Comprehensive overview of actions and behaviors.
+- [Legacy gMock FAQ](https://google.github.io/googletest/gmock_faq.html) — Common questions with detailed answers.
+
+Explore these to deepen your command of GoogleMock’s extensibility to create robust tests tailored to your needs.

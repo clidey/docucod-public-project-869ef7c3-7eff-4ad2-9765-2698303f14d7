@@ -1,0 +1,295 @@
+---
+title: "Test Discovery & Execution"
+description: "Reference for test and test suite registration, automatic discovery, and runtime execution. Covers main entry points, metadata APIs, and running tests with the bundled test runner."
+---
+
+# Test Discovery & Execution
+
+This reference page details the mechanisms behind test and test suite registration, automatic discovery, and runtime execution in GoogleTest. It describes the main entry points for running tests programmatically, the metadata APIs that allow querying test information at runtime, and how tests are executed using the bundled test runner.
+
+---
+
+## Overview
+
+GoogleTest structures tests into *test suites* (previously called *test cases*) containing multiple *tests*. It leverages automatic test registration during program initialization, so users do not need to enumerate tests manually.
+
+Key features covered on this page:
+- How `TEST()` and `TEST_F()` macros register tests
+- Using `RUN_ALL_TESTS()` as the main entry point to execute all registered tests
+- Accessing metadata about tests and suites at runtime via API
+- Filtering, listing, and running subsets of tests
+- Test disabling and skipping
+
+This API reference empowers you to understand and control test discovery and execution programmatically within your C++ test binaries.
+
+---
+
+## Test Registration Mechanisms
+
+### Automatic Registration with TEST and TEST_F
+
+When you define a test with either `TEST()` or `TEST_F()`, GoogleTest automatically registers that test in a global registry during static initialization. This means you do not need to maintain a manual list of tests; all tests linked into your binary become discoverable and runnable.
+
+- `TEST(TestSuiteName, TestName)`: Defines a simple test function belonging to a test suite.
+- `TEST_F(TestFixtureName, TestName)`: Defines a test using a test fixture class, allowing reuse of common setup and teardown.
+
+This registration enables GoogleTest to locate tests dynamically when `RUN_ALL_TESTS()` is invoked.
+
+<Callout>
+  <Tip>
+  Always ensure your test suite and test names follow naming conventions (avoid underscores) to prevent internal registration conflicts. For more details, see the FAQ on naming: [Why should test suite names and test names not contain underscore?](../../faq/getting-started-faq#why-should-test-suite-names-and-test-names-not-contain-underscore)
+  </Tip>
+</Callout>
+
+### Programmatic Registration
+
+For advanced scenarios requiring dynamic test registration at runtime, GoogleTest supplies the `RegisterTest` API:
+
+```c++
+template <typename Factory>
+TestInfo* RegisterTest(const char* test_suite_name, const char* test_name,
+                       const char* type_param, const char* value_param,
+                       const char* file, int line, Factory factory);
+```
+
+This lets you register tests with custom factories during program initialization before running the tests. Use this only when the macros cannot satisfy your needs.
+
+Example usage:
+
+```c++
+class MyFixture : public testing::Test {
+  // Optional setup/teardown
+};
+
+class MyTest : public MyFixture {
+ public:
+  explicit MyTest(int data) : data_(data) {}
+  void TestBody() override {
+    // Test implementation
+  }
+ private:
+  int data_;
+};
+
+void RegisterMyTests(const std::vector<int>& values) {
+  for (int v : values) {
+    testing::RegisterTest(
+        "MyFixture", ("Test" + std::to_string(v)).c_str(), nullptr,
+        std::to_string(v).c_str(),
+        __FILE__, __LINE__,
+        [=]() -> MyFixture* { return new MyTest(v); });
+  }
+}
+
+int main(int argc, char** argv) {
+  testing::InitGoogleTest(&argc, argv);
+  RegisterMyTests({1, 2, 3});
+  return RUN_ALL_TESTS();
+}
+```
+
+Use this API very carefully and ensure consistency with test suite names and fixtures.
+
+---
+
+## Test Discovery at Runtime
+
+### Accessing Registered Tests
+
+GoogleTest offers APIs to query test information at runtime, useful for dynamically listing or filtering tests.
+
+- `UnitTest::GetInstance()` returns the singleton test controller.
+- From this, call `total_test_suite_count()` to find the number of suites.
+- Use `GetTestSuite(index)` to access a suite and then iterate over tests:
+  - `test_suite->test_to_run_count()` - number of enabled tests
+  - `test_suite->GetTestInfo(index)` for a specific test
+
+Example snippet:
+
+```c++
+auto* unit_test = ::testing::UnitTest::GetInstance();
+int suite_count = unit_test->total_test_suite_count();
+for (int i = 0; i < suite_count; ++i) {
+  const ::testing::TestSuite* suite = unit_test->GetTestSuite(i);
+  printf("Test Suite: %s\n", suite->name());
+  int test_count = suite->total_test_count();
+  for (int j = 0; j < test_count; ++j) {
+    const ::testing::TestInfo* test_info = suite->GetTestInfo(j);
+    printf("  Test: %s (status: %d)\n", test_info->name(), test_info->result()->Passed());
+  }
+}
+```
+
+### Listing Tests Using Command-Line
+
+You can list all tests programmatically by running your test binary with the flag:
+
+```shell
+./your_test_binary --gtest_list_tests
+```
+
+This outputs all test suites and their tests without running any.
+
+### Filtering and Selecting Tests
+
+Control which tests to execute using the test filter:
+
+```shell
+./your_test_binary --gtest_filter=PositivePatterns[-NegativePatterns]
+```
+
+- Positive patterns select tests to run
+- Negative patterns exclude tests
+
+Patterns support wildcards `*` and `?`. Multiple patterns can be separated by `:`.
+
+Example:
+
+- `--gtest_filter=FooTest.*` runs all tests in `FooTest` suite.
+- `--gtest_filter=*Null*:*Constructor*` runs all tests matching either substring.
+- `--gtest_filter=-*DeathTest.*` excludes death tests.
+
+For detailed filtering, see the [Advanced GoogleTest guide](docs/advanced.md#selecting-tests).
+
+---
+
+## Executing Tests
+
+### Main Entry Point: RUN_ALL_TESTS()
+
+Once tests are registered, `RUN_ALL_TESTS()` executes them:
+
+- Runs all discovered tests matching filters
+- Initializes each test fixture instance
+- Calls SetUp/TearDown hooks
+- Reports success/failure status
+
+A minimal `main` looks like:
+
+```c++
+int main(int argc, char **argv) {
+  testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
+}
+```
+
+Use `testing::InitGoogleTest` before running tests, which parses flags and prepares runtime.
+
+### Using gtest_main
+
+GoogleTest provides `gtest_main` library that defines `main()` for you. Linking with `gtest_main` removes the need to write your own `main` function.
+
+### Skipping Tests
+
+- Use `DISABLED_` prefix in a test or suite name to exclude from execution but still compile.
+- Use `GTEST_SKIP()` macro in tests or fixtures to skip at runtime with an optional message.
+
+Example:
+
+```c++
+TEST(FooTest, DISABLED_BrokenTest) { /* won't run */ }
+
+TEST(FooTest, MaybeSkip) {
+  if (!EnvironmentIsReady()) {
+    GTEST_SKIP() << "Skipping due to incomplete environment";
+  }
+  // continue test
+}
+```
+
+---
+
+## API Reference Summary
+
+### Initialization and Running
+
+| Function                      | Description                             |
+|-------------------------------|-------------------------------------|
+| `InitGoogleTest(int*, char**)` | Parse flags and initialize framework |
+| `RUN_ALL_TESTS()`              | Runs all registered tests              |
+
+### Test Metadata APIs
+
+| Method                          | Purpose                            |
+|---------------------------------|----------------------------------|
+| `UnitTest::GetInstance()`       | Access test registry singleton     |
+| `UnitTest::total_test_suite_count()` | Number of test suites           |
+| `UnitTest::GetTestSuite(int)`  | Access test suite by index         |
+| `TestSuite::total_test_count()`| Number of tests in suite           |
+| `TestSuite::GetTestInfo(int)`  | Access test info                   |
+| `TestInfo::name()`              | Name of test                      |
+| `TestInfo::result()`            | Access result and status          |
+
+### Test Registration
+
+- `TEST()` and `TEST_F()` macros
+- `RegisterTest()` for dynamic registration
+
+---
+
+## Practical Tips
+
+- Always return the value of `RUN_ALL_TESTS()` from `main()` to correctly report test status.
+- Use `--gtest_list_tests` to discover available tests.
+- To run a specific test, use `--gtest_filter=SuiteName.TestName`.
+- Use `DISABLED_` prefix for temporarily disabling flaky/broken tests.
+- For dynamic test suites, use `RegisterTest()` carefully.
+
+---
+
+## Troubleshooting
+
+### Tests Not Running?
+
+- Verify tests are linked into your binary.
+- Run with `--gtest_list_tests` to confirm tests are discovered.
+- Ensure no naming conflicts or use of invalid characters.
+
+### Ignoring RUN_ALL_TESTS() Return Value
+
+- Causes test runners to misinterpret failures; always use `return RUN_ALL_TESTS();`.
+
+### Filtering Doesn't Work?
+
+- Check your filter patterns syntax.
+- Remember disabled tests (`DISABLED_`) are not run unless overridden.
+
+### Multiple Definitions of Tests with Same Name
+
+- Avoid underscores in test and suite names to prevent macro conflicts.
+
+---
+
+## Diagram: Test Discovery and Execution Flow
+
+```mermaid
+flowchart TD
+  Start([Start Test Program]) --> Init[Call testing::InitGoogleTest()]
+  Init --> RegisterTests[Static Initialization Registers Tests]
+  RegisterTests --> Filter[Apply Filters (--gtest_filter)]
+  Filter --> List?[--gtest_list_tests?]
+  List? -->|Yes| Output[List All Tests and Exit]
+  List? -->|No| RunTests[Run All Filtered Tests via RUN_ALL_TESTS()]
+  RunTests --> ForEachTest{For Each Test}
+  ForEachTest --> CreateFixture[Test Fixture Created]
+  CreateFixture --> Setup[Test Fixture SetUp()]
+  Setup --> Run[TestBody Executed]
+  Run --> TearDown[Test Fixture TearDown()]
+  TearDown --> DestroyFixture[Test Fixture Destroyed]
+  DestroyFixture --> NextTest{More Tests?}
+  NextTest -->|Yes| ForEachTest
+  NextTest -->|No| Report[Output Summary and Exit]
+  Report --> End([Test Program Finished])
+```
+
+---
+
+## See Also
+
+- [GoogleTest Primer](../../overview/introduction_and_value/welcome_to_googletest) for an introduction to tests, suites, and fixtures.
+- [Assertions and Test Macros](../gtest-core-apis/test-assertions) for writing test conditions.
+- [Basic Configuration Guide](../../getting-started/setup-usage-validation/basic-configuration) for integrating GoogleTest into projects.
+- [Test Runner Integration & CI](../../guides/advanced-usage-and-integration/test-runner-integration-and-ci) for continuous integration usage.
+- [Advanced Topics](../../docs/advanced.md) for in-depth command-line options and advanced test program control.
+
+---
