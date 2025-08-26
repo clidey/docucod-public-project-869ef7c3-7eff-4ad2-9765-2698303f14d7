@@ -1,0 +1,212 @@
+---
+title: "Troubleshooting Common Mock Failures"
+description: "Guides users through common root causes for test failures involving mocks: uninteresting calls, strictness configuration, cardinality mismatches, and action/expectation errors. Shows how to interpret diagnostic output and tune mock behaviors."
+---
+
+# Troubleshooting Common Mock Failures
+
+This page guides you through common root causes of test failures involving mock objects in GoogleMock. Specifically, it helps you understand failures related to uninteresting calls, strictness configurations (NiceMock, NaggyMock, StrictMock), cardinality mismatches in `EXPECT_CALL()`, and errors concerning actions and expectations. By understanding diagnostic output and tuning mock behaviors, you can write more robust and maintainable tests.
+
+---
+
+## 1. Understanding Uninteresting vs Unexpected Calls
+
+**Uninteresting calls** happen when a mock method without any explicit `EXPECT_CALL` specification gets invoked. By default, GoogleMock will:
+
+- In *Naggy* mode (default), print **warnings**, alerting you that the call was unexpected.
+- In *Nice* mode, silently allow these calls without warnings.
+- In *Strict* mode, treat uninteresting calls as **test failures**.
+
+**Unexpected calls** occur when there *are* some `EXPECT_CALL`s on a method, but none matches the call's arguments. These always result in **errors** regardless of mock strictness.
+
+<Info>
+Use appropriate strictness wrappers to balance verbosity and test strictness:
+
+- `NiceMock<MyMock>`: suppresses uninteresting call warnings.
+- `NaggyMock<MyMock>`: warns on uninteresting calls (default behavior).
+- `StrictMock<MyMock>`: fails on uninteresting calls.
+
+If you want to ignore uninteresting calls on certain methods, explicitly add a catch-all expectation:
+
+```cpp
+EXPECT_CALL(mock, Foo(_)).Times(AnyNumber());
+```
+
+This clarifies that calls to `Foo` with any arguments are expected and allowed.
+</Info>
+
+## 2. Diagnosing Cardinality Mismatches in Expectations
+
+When setting expectations with `EXPECT_CALL`, specifying the expected number of calls (cardinality) properly is critical. Key points:
+
+- If you omit `.Times()`, GoogleMock infers it from the number of `.WillOnce()` and `.WillRepeatedly()` clauses:
+  - No `WillOnce` or `WillRepeatedly`: inferred as `.Times(1)`.
+  - `n` `WillOnce` clauses, no `WillRepeatedly`: inferred as `.Times(n)`.
+  - `n` `WillOnce` clauses plus `WillRepeatedly`: inferred as `.Times(AtLeast(n))`.
+
+- Cardinality constraint failures occur in two ways:
+  - **Too few calls:** The actual call count is less than the lower bound.
+  - **Too many calls:** The actual call count exceeds the upper bound or saturates without retirement.
+
+- Use `.RetiresOnSaturation()` in `EXPECT_CALL` to make expectations retire immediately after being satisfied. This avoids upper-bound violation errors when calls exceed the expectation.
+
+### Common Diagnostic Output Examples
+
+When there are too many actions or too few actions specified compared to the cardinality, GoogleMock emits warnings:
+
+```
+Too many actions specified in EXPECT_CALL(mock, Method())...
+Expected to be called at most once, but has 2 WillOnce()s.
+```
+
+When the number of calls violates the expectation:
+
+```
+Actual function call count doesn't match EXPECT_CALL(mock, Method())...
+Expected: to be called twice
+Actual: called once - unsatisfied and active
+```
+
+## 3. Interpreting Diagnostic Messages Related to Argument Matching
+
+When an unexpected or unmatched call occurs, GoogleMock prints detailed diagnostic messages indicating:
+
+- The function call and its arguments.
+- The `EXPECT_CALL` entries it tried and why they didn't match, including argument mismatch details.
+- Whether expectations are saturated, unsatisfied, retired, or have unsatisfied pre-requisites.
+
+These messages help pinpoint what exactly failed and why, e.g., a call to `Method(3)` failed because expected was `Method(5)` or... arguments didn't satisfy matchers.
+
+<Tip>
+Run your tests with `--gmock_verbose=info` to see detailed trace logs that show which expectations matched which calls and when mock calls occur. This is invaluable for debugging complex mock failures.
+</Tip>
+
+## 4. Navigating Strictness Configurations: NiceMock, NaggyMock, StrictMock
+
+- **NaggyMock** (default): Warns on uninteresting calls but does not fail. Useful during test development when you want notifications of unexpected behavior.
+
+- **NiceMock**: Silences warnings on uninteresting calls, making it ideal for tests where the mock methods are expected to be called but not under strict scrutiny.
+
+- **StrictMock**: Causes failures on uninteresting calls, enforcing strict test correctness.
+
+Examples:
+
+```cpp
+using ::testing::NiceMock;
+using ::testing::StrictMock;
+
+NiceMock<MockFoo> nice_mock;        // Warnings on uninteresting calls suppressed
+StrictMock<MockFoo> strict_mock;    // Test fails if uninteresting calls occur
+```
+
+<Warning>
+`NiceMock` and `StrictMock` only affect **uninteresting calls**. Unexpected calls (calls that do not match any `EXPECT_CALL`) are always failures.
+
+These wrappers only work for mock methods defined directly with `MOCK_METHOD` in the mock class. Mock methods inherited from base classes may not be affected.
+
+Nesting strictness wrappers, like `NiceMock<StrictMock<MockFoo>>`, is not supported.
+</Warning>
+
+## 5. Handling Action and Expectation Errors
+
+- **Too many actions specified:** This happens when the number of `.WillOnce()` clauses exceeds the upper bound specified by `.Times()`. GoogleMock warns and applies the default action afterward.
+  
+- **Too few actions:** When `.WillOnce()` clauses are fewer than the lower bound and there is no `.WillRepeatedly()`. GoogleMock warns that not enough actions are specified.
+
+- When the mock function runs out of `.WillOnce()` actions but has no `.WillRepeatedly()`, it performs the built-in default action, which may be a zero or default constructed value.
+
+- **Excessive calls** (calls beyond the upper bound) are handled with a failure message, but the default action will be used afterward.
+
+- When a void function is called excessively, the failure message includes the exact arguments received to aid debugging.
+
+<Tip>
+Use `.RetiresOnSaturation()` to have expectations retire as soon as they become saturated. This avoids errors on calls exceeding the expected count.
+</Tip>
+
+## 6. Practical Tips and Best Practices for Success
+
+- **Always set expectations before calling mock methods.** Setting `EXPECT_CALL` after calls leads to undefined behavior.
+
+- If you don't want to care about certain calls, use `NiceMock` or add catch-all `EXPECT_CALL` with `.Times(AnyNumber())`.
+
+- For mock classes with non-default constructors, you can instantiate `NiceMock<MockClass>` or others with constructor arguments.
+
+- To control strictness globally, use the command-line flag `--gmock_default_mock_behavior` or per instance strictness wrappers.
+
+- To understand failures, increase verbosity with the flag `--gmock_verbose=info`.
+
+- Remember that using `NaggyMock` (default) generates warnings that can clutter output. Prefer `NiceMock` in stable tests for maintainability.
+
+## 7. How to Verify and Reset Mock Expectations
+
+You can explicitly verify that all expectations have been met before a mock object is destroyed:
+
+```cpp
+bool success = Mock::VerifyAndClearExpectations(&mock_obj);
+```
+
+This will generate failures if any expectations are unsatisfied.
+
+To clear expectations and default actions simultaneously:
+
+```cpp
+bool success = Mock::VerifyAndClear(&mock_obj);
+```
+
+Avoid setting new expectations after verification.
+
+## 8. Troubleshooting Common Scenarios
+
+<AccordionGroup title="Common Failure Scenarios">
+<Accordion title="Uninteresting Call Warning or Failure">
+
+This happens when a mock method is called without a matching `EXPECT_CALL`.
+
+**How to Fix:**
+- If the call is expected but unimportant, wrap the mock in `NiceMock` to suppress warnings.
+- If the call should be allowed any number of times, add an explicit catch-all `EXPECT_CALL(mock, Method(_)).Times(AnyNumber());`.
+</Accordion>
+<Accordion title="Unexpected Call Failure">
+The mock method has some `EXPECT_CALL`s but none match the call.
+
+**How to Fix:**
+- Check expected arguments carefully.
+- Use verbose logging to see which expectations matched.
+- Add expected calls for missing argument combinations or fix argument matchers.
+</Accordion>
+<Accordion title="Calls Exceed Expected Cardinality (Too Many Calls) Failure">
+When calls to a mocked function exceed the expected `.Times()` upper bound.
+
+**How to Fix:**
+- Ensure your test calls the mock method the right number of times.
+- Use `.RetiresOnSaturation()` to retire expectations after they are satisfied.
+- Use `.Times(AnyNumber())` if exact call count doesn’t matter.
+</Accordion>
+<Accordion title="Too Few Calls"
+>
+The mock method was called fewer times than expected.
+
+**How to Fix:**
+- Verify that the code under test exercises the mock method the required number of times.
+- Use `AtLeast()` or `AtMost()` cardinalities if call count can vary.
+</Accordion>
+<Accordion title="Mismatch Between Number of WillOnce and Times">
+When the number of `.WillOnce()` clauses does not match `.Times()` and there is no `.WillRepeatedly()`.
+
+**How to Fix:**
+- Add `.WillRepeatedly()` to your expectation to specify behavior beyond `.WillOnce()` calls.
+- Adjust `.Times()` to match `.WillOnce()` count if there’s no `.WillRepeatedly()`.
+</Accordion>
+</AccordionGroup>
+
+## 9. Additional Resources
+
+- [Mocking Reference](../reference/mocking.md) — Detailed docs on `MOCK_METHOD`, `EXPECT_CALL`, `ON_CALL`, and mock manipulation.
+- [gMock for Dummies](../gmock_for_dummies.md) — Beginner-friendly guide to using GoogleMock.
+- [gMock Cookbook](../gmock_cook_book.md) — Practical recipes covering advanced mocking scenarios.
+- [Mock Configuration Wrappers (NiceMock, NaggyMock, StrictMock)](../api-reference/mock-configuration-behavior/nice-naggy-strict-mocks.md) — Guidance on controlling mock strictness.
+- [Cardinalities Reference](../api-reference/mock-configuration-behavior/cardinalities-reference.md) — Full list of supported call count matchers.
+
+---
+
+By mastering these troubleshooting steps and understanding diagnostic messages, you will significantly reduce time spent debugging mock failures and increase test reliability and clarity.
