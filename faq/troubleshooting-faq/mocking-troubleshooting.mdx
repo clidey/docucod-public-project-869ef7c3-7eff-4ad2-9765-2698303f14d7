@@ -1,0 +1,255 @@
+---
+title: "Troubleshooting Mocking Issues"
+description: "Addresses frequent mistakes and confusion around mock behaviors, ON_CALL and EXPECT_CALL usage, mock object lifetimes, and strict/nice/naggy mock settings. Guides users to clarify and fix problems in their test doubles."
+---
+
+# Troubleshooting Mocking Issues
+
+This page addresses common mistakes and confusion around GoogleMock's mock behaviors, the proper use of `ON_CALL` and `EXPECT_CALL`, mock object lifetimes, and strictness levels with `NiceMock`, `NaggyMock`, and `StrictMock`. It is designed to guide you toward clearer understanding and effective solutions for common troubles when working with mocks.
+
+---
+
+## 1. Understanding Mock Behavior: ON_CALL vs EXPECT_CALL
+
+A fundamental source of confusion is the different purposes of `ON_CALL` and `EXPECT_CALL`.
+
+- `ON_CALL` sets the **default behavior** of a mock method when it is called with matching arguments. It does **not** imply any expectation or verification that the method must actually be called.
+- `EXPECT_CALL` not only sets behavior but also **declares an expectation** that the method will be called a certain number of times with specified arguments. It enforces verification at test teardown or explicit verification.
+
+### Best Practice
+
+- Use `ON_CALL` to configure how your mocks respond by default.
+- Use `EXPECT_CALL` only when you want to verify the method's invocation.
+
+### Example
+
+```cpp
+using ::testing::Return;
+
+MockFoo mock;
+
+// Default behavior: GetValue returns 42 when called with any argument.
+ON_CALL(mock, GetValue(_)).WillByDefault(Return(42));
+
+// Expect GetValue to be called exactly once with argument 5, returning 100.
+EXPECT_CALL(mock, GetValue(5)).WillOnce(Return(100));
+
+// Actual code under test.
+int value = mock.GetValue(5);  // Returns 100, verified.
+int default_value = mock.GetValue(7);  // Returns 42, no verification.
+```
+
+---
+
+## 2. Avoid Over-Specifying Expectations
+
+While asserting correctness is critical, excessive or overly strict expectations can make tests brittle and a maintenance burden. Common pitfalls include:
+
+- Using many `EXPECT_CALL`s for methods you don't actually need to verify.
+- Setting strict argument matchers where simple wildcards (`_`) would suffice.
+- Missing the fact that later `EXPECT_CALL`s override earlier ones for the same method.
+
+### Guidance
+
+- Keep expectations focused on contract properties your test truly cares about.
+- Use wildcard matchers (`_`) to ignore unimportant arguments.
+- For methods where you don't care about call details, avoid `EXPECT_CALL` and rely on `ON_CALL` defaults.
+
+<Tip>
+If your test reports "Uninteresting mock function call" warnings excessively, prefer switching to `NiceMock` for less verbose output rather than blindly adding `EXPECT_CALL`s.
+</Tip>
+
+---
+
+## 3. Handling Uninteresting Calls and Mock Strictness
+
+By default, GoogleMock prints warnings for calls to mock methods that have no expectations (`EXPECT_CALL`) — these are called **uninteresting calls**.
+
+### Mock Strictness Wrappers
+
+GoogleMock provides three wrapper templates to control this behavior:
+
+- `NiceMock<MockType>`: Suppresses warnings for uninteresting calls.
+- `NaggyMock<MockType>` (default behavior): Prints warnings for uninteresting calls.
+- `StrictMock<MockType>`: Treats uninteresting calls as test failures.
+
+### Usage Example
+
+```cpp
+using ::testing::NiceMock;
+using ::testing::StrictMock;
+
+NiceMock<MockFoo> nice_mock;
+StrictMock<MockFoo> strict_mock;
+
+EXPECT_CALL(nice_mock, DoThing());  // Only verifies DoThing call.
+strict_mock.DoOtherThing();         // Fails test: uninteresting call.
+```
+
+### Caveats
+
+- These wrappers only affect mock methods declared directly within the mock class using `MOCK_METHOD`.
+- Nesting multiple wrappers like `NiceMock<StrictMock<MockType>>` is not supported.
+- Your mock class destructor should be virtual for strictness to work correctly.
+
+<Tip>
+Prefer `NiceMock` during normal test development to keep tests maintainable and less brittle. Use `StrictMock` only when you want strict contract adherence.
+</Tip>
+
+---
+
+## 4. Common Errors and Their Causes
+
+### a. Real Object Method Invoked Instead of Mock Method
+
+**Cause:** The method you're trying to mock is not virtual.
+
+**Solution:** Make sure to mock only virtual methods. For non-virtual methods, consider design alternatives such as interface segregation or templated dependency injection.
+
+### b. "Uninteresting Function Call" Warnings Despite Using `ON_CALL`
+
+**Cause:** `ON_CALL` defines default behavior but does not suppress uninteresting call warnings.
+
+**Solution:** Use `NiceMock` wrapper if you want to suppress warnings for uninteresting calls, or explicitly add `EXPECT_CALL(mock, Method(...)).Times(AnyNumber())` for those methods.
+
+### c. Test Fails with Unexpected Calls
+
+**Cause:** The code calls mock methods with arguments that do not match any `EXPECT_CALL`.
+
+**Solution:** Examine your expectations carefully. Use wildcard matchers or add catch-all expectations to cover other expected argument patterns.
+
+### d. Over-Saturation Errors (More Calls than Expected)
+
+**Cause:** The mock method is called more times than specified by `Times()` or inferred cardinality.
+
+**Solution:** Adjust your expected call count or use `Times(AnyNumber())` if you expect calls with no limit.
+
+### e. Unexpected Failures on Mock Object Destruction
+
+**Cause:** Mock object not deleted, or `EXPECT_CALL`s set after object is destroyed.
+
+**Solution:** Ensure mock lifetimes encompass usage, and set all expectations before passing mocks to code under test.
+
+---
+
+## 5. Mock Object Lifetime and Verification
+
+GoogleMock automatically verifies mock expectations when a mock object is destroyed.
+
+**Key points:**
+
+- Set all `EXPECT_CALL`s before passing the mock to the code that exercises it.
+- If a mock is allocated on the heap and ownership is transferred, verify it is deleted.
+- If you want to verify expectations explicitly before destruction, use:
+
+```cpp
+bool success = ::testing::Mock::VerifyAndClearExpectations(&mock);
+ASSERT_TRUE(success);
+```
+
+- Do **not** set new expectations after verifying or after the mock is destroyed; this causes undefined behavior.
+
+<Tip>
+For heap-allocated mocks owned outside your test, consider using `Mock::AllowLeak()` to suppress leak warnings if deletion is not feasible.
+</Tip>
+
+---
+
+## 6. Tips for Diagnosing Mock Issues
+
+- Run your tests with `--gmock_verbose=info` to see detailed logs of all mock calls, matches against expectations, and warnings.
+- Use wildcard matchers (`_`) to simplify expectations during diagnosis.
+- Check for proper ordering of `EXPECT_CALL`s, especially if using sequences.
+- Distinguish between uninteresting calls (no expectation at all) and unexpected calls (expectation exists but call arguments mismatch).
+- Enable heap checking and verify mock deletion to avoid tests silently passing despite leaks or missing verifications.
+
+---
+
+## 7. Useful Code Patterns and Examples
+
+### Suppress Warnings for Uninteresting Calls
+
+```cpp
+using ::testing::NiceMock;
+
+NiceMock<MockFoo> mock;
+// no warnings on calls without expectations
+```
+
+### Expect a Method Never to Be Called
+
+```cpp
+EXPECT_CALL(mock, Method(_)).Times(0);  // Fails if called
+```
+
+### Set Catch-All Expectation with Any Arguments
+
+```cpp
+EXPECT_CALL(mock, Method(_)).Times(AnyNumber());
+```
+
+### Use ON_CALL to Set Default Behavior
+
+```cpp
+ON_CALL(mock, Method(_)).WillByDefault(Return(42));
+```
+
+### Expect Ordered Calls
+
+```cpp
+using ::testing::InSequence;
+{
+  InSequence seq;
+  EXPECT_CALL(mock, FirstMethod());
+  EXPECT_CALL(mock, SecondMethod());
+}
+```
+
+### Force Verification Before Mock Destruction
+
+```cpp
+ASSERT_TRUE(::testing::Mock::VerifyAndClearExpectations(&mock));
+```
+
+---
+
+## 8. Further Resources
+
+- [GoogleMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) — For detailed patterns, tips, and examples.
+- [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html) — Quick reference for mock syntax.
+- [Mocking Reference](../../docs/reference/mocking.md) — Detailed API and usage.
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html) — Beginner-friendly guide.
+
+---
+
+For complex or persistent issues, join the GoogleTest community forums and GitHub issue tracker to get support from developers and other users.
+
+---
+
+# Summary
+
+This page clarifies common mocking issues related to GoogleMock’s methods for setting behavior (`ON_CALL`) versus expectations (`EXPECT_CALL`), controlling output via `NiceMock`, `NaggyMock`, and `StrictMock`, and managing mock lifetime and verification. Readers will find best practices for writing maintainable expectations, handling uninteresting and unexpected calls, and practical tips for troubleshooting verification failures. Key sections include mock behavior distinctions, strictness settings, common errors with precise solutions, lifetime management guidance, and diagnostics.
+
+**Key Sections:**
+- Understanding `ON_CALL` vs. `EXPECT_CALL`
+- Managing Uninteresting Calls and Mock Strictness
+- Common Mocking Errors and Fixes
+- Mock Object Lifetime and Verification
+- Diagnostic Tips and Code Examples
+
+**Important Links:**
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html)
+- [Mocking Reference](../../docs/reference/mocking.md)
+- [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html)
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html)
+
+**Cross-References:**
+- [Troubleshooting Common Setup Issues](/getting-started/troubleshooting/common-errors)
+- [Mock Methods & Macros Reference](/api-reference/mocking-api/mock-methods)
+- [Setting Expectations](/api-reference/mocking-api/setting-expectations)
+
+**Next Steps:**
+- Review best practices for writing `EXPECT_CALL`s
+- Use `NiceMock` to reduce noise from uninteresting calls
+- Explore advanced ordering and sequencing features if needed
+- Verify mock lifetimes and explicit verification in tests
