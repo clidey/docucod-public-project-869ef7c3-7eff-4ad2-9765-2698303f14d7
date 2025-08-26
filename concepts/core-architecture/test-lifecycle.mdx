@@ -1,274 +1,245 @@
 ---
-title: "Test Lifecycle and Execution Flow"
-description: "Understand the journey of a test from definition through registration, execution, and result reporting. This page details the phases of setup, assertion, teardown, and how test outcomes propagate through the framework, including event listeners and result aggregation."
+title: "Test Lifecycle and Environment Setup"
+description: "Delve into the stages of the GoogleTest execution lifecycle—from environment setup to teardown. Learn about test fixtures, global test environments, and how resource management is handled to optimize repeatability and isolation in test runs."
 ---
 
-# Test Lifecycle and Execution Flow
+# Test Lifecycle and Environment Setup
 
-GoogleTest orchestrates the journey of a test from its definition through execution to result reporting with a carefully structured lifecycle. Understanding this flow helps users grasp how tests are set up, executed, and torn down, and how outcomes propagate through the framework's event-based notification system.
-
----
-
-## Overview of Test Execution Journey
-
-Every test in GoogleTest follows a consistent lifecycle that ensures isolation, reliability, and extensibility. This lifecycle encompasses:
-
-- **Test Definition and Registration:** Declaring tests informs the framework about what will run.
-- **Test Setup:** Preparing the environment before executing test logic.
-- **Test Execution:** Running the assertions and test code.
-- **Test Teardown:** Cleaning up resources post-test.
-- **Result Reporting:** Collecting and broadcasting the outcome.
-
-This sequence is carefully managed to provide fine-grained control, accurate reporting, and hooks for custom behaviors via event listeners.
+Understanding the lifecycle of tests and environment setup in GoogleTest is crucial to writing reliable and maintainable tests. This guide explores the various stages in the execution of your tests, how GoogleTest manages test fixtures and global test environments, and the best practices for resource management to ensure test isolation and repeatability.
 
 ---
 
-## 1. Test Registration and Discovery
+## Table of Contents
 
-### What Happens When You Define a Test
+- [Overview of Test Lifecycle](#overview-of-test-lifecycle)
+- [Test Fixtures](#test-fixtures)
+- [Global Test Environments](#global-test-environments)
+- [Test Setup and Teardown](#test-setup-and-teardown)
+- [Resource Management Strategies](#resource-management-strategies)
+- [Best Practices for Isolation and Repeatability](#best-practices-for-isolation-and-repeatability)
+- [Troubleshooting Common Issues](#troubleshooting-common-issues)
 
-When you write a test with macros like `TEST()`, `TEST_F()`, or register tests dynamically with `RegisterTest()`, GoogleTest internally creates metadata objects:
+---
 
-- A `TestInfo` instance representing the individual test.
-- A corresponding test fixture and test suite association.
+## Overview of Test Lifecycle
 
-The framework collects these in a registry before execution begins, enabling automatic test discovery without manual enumeration.
+GoogleTest runs tests following a well-defined lifecycle that ensures each test is executed in an isolated environment and cleans up properly after running:
 
-### Dynamic Registration
+1. **Test Environment Setup:** Before any tests run, global test environments are created and their `SetUp()` methods are called. This allows preparing resources shared by all tests.
 
-Tests can be registered programmatically using the `RegisterTest()` API, supporting dynamic creation based on runtime data. This allows constructing parameterized test suites or adapting to external configurations.
+2. **Test Fixture Construction:** For each individual test, a fresh test fixture object is created. This provides a clean slate for tests, avoiding side effects across tests.
 
-<code-group>
+3. **Test Setup:** The test fixture's `SetUp()` method is invoked to initialize test-specific resources or state.
+
+4. **Test Execution:** The test body itself runs.
+
+5. **Test Teardown:** The test fixture's `TearDown()` method is called to clean up test-specific resources.
+
+6. **Fixture Destruction:** The test fixture object is destroyed.
+
+7. **Test Environment Teardown:** After all tests have finished, the global test environments have their `TearDown()` methods called to clean up shared resources.
+
+This lifecycle provides a robust framework to build tests that are independent and safe from resource leakage.
+
+---
+
+## Test Fixtures
+
+Test fixtures are classes deriving from `testing::Test` that provide the context for tests. They allow you to:
+
+- Reuse setup and teardown code across multiple tests.
+- Encapsulate test-specific member variables and helper functions.
+
+**Key Characteristics:**
+
+- **Fresh instance per test:** GoogleTest creates a new fixture object for every test case, guaranteeing no state leaks occur between tests.
+- **SetUp and TearDown methods:** Override these to initialize and clean up resources needed by each test.
+
+### Example Test Fixture
+
 ```cpp
-void RegisterMyTests(const std::vector<int>& values) {
-  for (int v : values) {
-    testing::RegisterTest(
-        "MyFixture", ("Test" + std::to_string(v)).c_str(), nullptr,
-        std::to_string(v).c_str(), __FILE__, __LINE__,
-        [=]() -> MyFixture* { return new MyTest(v); });
+#include <gtest/gtest.h>
+
+class DatabaseTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    // Initialize database connection
   }
+
+  void TearDown() override {
+    // Clean up database connection
+  }
+
+  // Test-specific helper
+  bool IsConnected() const { return connected_; }
+
+  bool connected_ = false;
+};
+
+TEST_F(DatabaseTest, QueryReturnsExpectedResult) {
+  ASSERT_TRUE(IsConnected());
+  // Test query logic here
 }
 ```
-</code-group>
 
-<Note>
-Programmatic test registration must occur before `RUN_ALL_TESTS()` is called to avoid undefined behavior.
-</Note>
+### When to Use Constructors vs SetUp
 
----
-
-## 2. Setup Phase
-
-Before the individual test body runs, GoogleTest prepares the environment at multiple levels to ensure consistent initial conditions:
-
-- **Global Environment Setup:** Runs any global environment objects' `SetUp()` methods.
-- **Test Suite Setup:** Calls the static method `SetUpTestSuite()` for shared setup across tests in the suite.
-- **Test Fixture Setup:** Constructs test fixture objects and invokes `SetUp()` for per-test setup.
-
-For each test:
-
-<Steps>
-<Step title="Test Fixture Object Creation">
-A fresh test fixture object is created to guarantee test independence.
-</Step>
-<Step title="TestSuite SetUpTestSuite() Call">
-Runs once before any tests in the suite, setting up shared resources.
-</Step>
-<Step title="Test Fixture SetUp() Call">
-Prepares the fixture object for the individual test.
-</Step>
-</Steps>
-
-<Tip>
-Test fixture objects are recreated for each test to prevent state leakage, promoting reliable and repeatable tests.
-</Tip>
+- **Constructor and Destructor:** Use to initialize and clean up non-failing setup. You can make fixture members `const` if initialized in the constructor.
+- **SetUp and TearDown:** Use for setup or teardown that can fail (e.g., that may throw or cause test failure). GoogleTest expects that fatal failures happen in these so that failures are reported properly.
 
 ---
 
-## 3. Execution Phase
+## Global Test Environments
 
-During execution, GoogleTest runs the `TestBody()` method which contains the test logic, typically consisting of assertions:
+Sometimes you need to manage resources that are shared by the entire test suite, such as database servers, logging frameworks, or external processes. For this, GoogleTest provides the concept of global test environments represented by classes derived from `testing::Environment`.
 
-- **Assertion Evaluation:** Assertions (`EXPECT_*`, `ASSERT_*`) check conditions and record failures.
-- **Control Flow on Fatal Failures:** `ASSERT_*` macros abort the current function but not the entire test process.
-- **Trace and Logs:** Trace points and logging information can be included for debugging.
+### Lifecycle of a Global Environment
 
-Failures are recorded but do not immediately stop execution unless fatal and uncaught.
+- **Registration:** Call `AddGlobalTestEnvironment()` at program initialization to register environment objects.
+- **Setup:** GoogleTest calls `Environment::SetUp()` once before any tests run.
+- **Teardown:** GoogleTest calls `Environment::TearDown()` once after all tests have finished.
 
-<Tip>
-Use `EXPECT_*` assertions to allow continued testing after failures, and `ASSERT_*` when further execution makes no sense (e.g., dereferencing null pointers).
-</Tip>
+### Defining a Global Environment
 
-<Warning>
-Fatal assertions inside helper functions abort *only* those functions, not the test overall. To propagate fatal failures, check `HasFatalFailure()` after subroutine calls or use exception-based mechanisms.
-</Warning>
+```cpp
+#include <gtest/gtest.h>
 
----
+class MyGlobalEnvironment : public ::testing::Environment {
+ public:
+  void SetUp() override {
+    // Initialize global resources
+  }
 
-## 4. Teardown Phase
+  void TearDown() override {
+    // Clean up global resources
+  }
+};
 
-After the test body completes, cleanup occurs to maintain isolation:
-
-- The fixture's `TearDown()` method runs to release per-test resources.
-- A per-suite `TearDownTestSuite()` static method can clean up shared resources.
-- Global environment objects execute their `TearDown()` methods.
-- The fixture object is destructed.
-
-This guarantees resetting of state and resource management regardless of test success or failure.
-
-<Note>
-`TearDown()` is preferred over destructors when it might throw exceptions or invoke assertions, which are unsafe in destructors.
-</Note>
-
----
-
-## 5. Result Reporting and Event Propagation
-
-GoogleTest maintains and broadcasts detailed information about test outcomes using an event-driven model:
-
-### Result Aggregation
-
-- **Per-Test Results:** Stored in `TestResult` objects, including pass/fail status, failure causes, and timing.
-- **Per-Suite and Global Aggregates:** Summaries accumulated for suites and the entire run.
-
-### Event Listeners
-
-GoogleTest exposes a `TestEventListener` interface with callbacks at key milestones:
-
-- Start and end of tests, test suites, and the entire program.
-- Failed assertions and successes.
-- Setup and teardown phases.
-
-Users can implement custom listeners to integrate with external systems (e.g., GUI dashboards, logging frameworks) or augment output.
-
-<Steps>
-<Step title="Event Trigger Sequence">
-`OnTestProgramStart` → `OnTestIterationStart` → `OnEnvironmentsSetUpStart` → ...
-</Step>
-<Step title="Test Suite and Test Events">
-`OnTestSuiteStart` → `OnTestStart` → `OnTestPartResult` (fail/succeed) → `OnTestEnd` → `OnTestSuiteEnd`
-</Step>
-<Step title="Program Completion">
-`OnEnvironmentsTearDownStart` → `OnEnvironmentsTearDownEnd` → `OnTestIterationEnd` → `OnTestProgramEnd`
-</Step>
-</Steps>
-
-<Tip>
-Listeners receive events in order, allowing layered handling such as collecting results first, then customizing output.
-</Tip>
-
----
-
-## Practical User Flow
-
-1. **Write Test Code** using `TEST()`, `TEST_F()`, or register tests programmatically.
-2. **Initialize GoogleTest** with `InitGoogleTest(argc, argv);` to process flags.
-3. **Run Tests** by calling `RUN_ALL_TESTS()`. The framework then:
-   - Sets up global environments.
-   - Sets up test suites.
-   - Runs each test fixture's setup, executes the test logic, tears down.
-   - Cleans up test suites and environments.
-   - Aggregates and reports results.
-4. **Inspect Results** from console, XML or JSON reports, or via custom listeners.
-
-<Note>
-Always return or use the return value of `RUN_ALL_TESTS()` to correctly report test outcomes to external systems.
-</Note>
-
----
-
-## Common Pitfalls and Best Practices
-
-- **Do Not Assume Test Order:** Tests run in an undefined order; design fixtures and state accordingly.
-- **Avoid Shared Mutable State Between Tests:** Use static members only with care and clean them appropriately.
-- **SetUp and TearDown Are Safer Than Constructors/Destructors for Fixtures:** Because assertions and exceptions behave oddly in constructors and destructors.
-- **Use Event Listeners to Extend Behavior:** For custom reporting or integration, do not modify the internals.
-- **Handle Fatal Failures Properly in Subroutines:** Use `HasFatalFailure()` or exceptions with listeners for early abort.
-
----
-
-## Summary Diagram of Test Lifecycle
-
-```mermaid
-sequenceDiagram
-  participant P as Test Program
-  participant U as UnitTest Singleton
-  participant E as TestEventListeners
-  participant S as TestSuite
-  participant T as Test (TestInfo)
-
-  P->>U: Register Tests (static & dynamic)
-  Note right of U: Builds TestSuites & TestInfos
-
-  P->>U: InitGoogleTest (parse flags)
-
-  U->>E: OnTestProgramStart
-  loop Test Iterations (runs)
-    E->>E: OnTestIterationStart
-    E->>E: OnEnvironmentsSetUpStart
-    E->>E: OnEnvironmentsSetUpEnd
-
-    loop For each TestSuite
-      E->>S: OnTestSuiteStart
-      S->>S: Call SetUpTestSuite
-
-      loop For each Test in Suite
-        E->>T: OnTestStart
-        T->>T: Create Fixture + SetUp
-        T->>T: Run TestBody (execute assertions)
-        alt Failures
-          T->>E: OnTestPartResult (fail/succeed)
-        end
-        T->>T: TearDown + Destroy Fixture
-        E->>T: OnTestEnd
-      end
-
-      S->>S: Call TearDownTestSuite
-      E->>S: OnTestSuiteEnd
-    end
-
-    E->>E: OnEnvironmentsTearDownStart
-    E->>E: OnEnvironmentsTearDownEnd
-    E->>E: OnTestIterationEnd
-  end
-  E->>U: OnTestProgramEnd
-  U->>P: Return Test Result
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  ::testing::AddGlobalTestEnvironment(new MyGlobalEnvironment);
+  return RUN_ALL_TESTS();
+}
 ```
 
----
+### Best Practices
 
-## Troubleshooting
-
-### Common Issues
-
-- **Skipping Tests:** Using `GTEST_SKIP()` halts a test or suite gracefully.
-- **Unhandled Fatal Failures:** May continue unexpectedly if `HasFatalFailure()` not checked after subroutines.
-- **Test Fixture Misuse:** Using underscores in test suite or test names can cause naming conflicts—avoid them.
-- **Failure to Register Tests:** Programmatic registration after `RUN_ALL_TESTS()` leads to tests never executing.
-
-### Tips
-
-- Print current test info via `UnitTest::GetInstance()->current_test_info()` inside `SetUp()` to trace running tests.
-- Use event listeners for advanced debugging and monitoring.
-
-<Info>
-Refer to [GoogleTest FAQ](faq.md#why-should-test-suite-names-and-test-names-not-contain-underscore) for naming conventions.
-</Info>
+- Use global environments for expensive setup/teardown operations.
+- Minimize shared mutable state in global environments to avoid flaky tests.
 
 ---
 
-## Additional Resources
+## Test Setup and Teardown
 
-- GoogleTest Primer for fundamental test writing [primer.md].
-- Testing Reference for API details [reference/testing.md].
-- Advanced GoogleTest Topics for deep dive on lifecycle & assertions [advanced.md].
-- Event Listener API for custom reporting integration [reference/testing.md#TestEventListener].
-- Sample Test Cases showcasing test definitions and lifecycle [samples.md].
+For test-specific initialization and cleanup, override the `SetUp()` and `TearDown()` methods in your test fixture:
+
+- `SetUp()` is called **immediately before** the test starts running.
+- `TearDown()` is called **immediately after** the test is finished.
+
+### Example
+
+```cpp
+class FileSystemTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    // Prepare file system
+  }
+
+  void TearDown() override {
+    // Clean up file system
+  }
+};
+
+TEST_F(FileSystemTest, CanReadFile) {
+  // Test reading a file
+}
+```
+
+Both `SetUp()` and `TearDown()` must complete even if they encounter a failure so the test runner can correctly report test status.
+
+### Common Pitfalls
+
+- Don't perform expensive global setup here; use global environments.
+- Avoid changing state that other tests depend upon.
 
 ---
 
-This page focuses exclusively on the concepts around the test lifecycle and execution flow within GoogleTest and complements related pages about assertions, parameterized tests, mocking, and API references.
+## Resource Management Strategies
+
+GoogleTest encourages you to keep each test independent by avoiding shared mutable state and cleaning resources properly.
+
+- Leverage RAII principles in fixture members.
+- Use `SetUpTestSuite()` and `TearDownTestSuite()` static methods for setup/cleanup that applies to all tests in a fixture.
+- Use smart pointers or scoped resource wrappers to ensure automatic cleanup.
+
+### Static Setup and Teardown for Test Suites
+
+```cpp
+class NetworkTest : public ::testing::Test {
+ public:
+  static void SetUpTestSuite() {
+    // Runs once before all tests in this test suite
+  }
+
+  static void TearDownTestSuite() {
+    // Runs once after all tests in this test suite
+  }
+
+  void SetUp() override {
+    // Runs before each test
+  }
+
+  void TearDown() override {
+    // Runs after each test
+  }
+};
+```
+
+`SetUpTestSuite()` and `TearDownTestSuite()` are ideal for expensive setup operations needed for multiple tests.
 
 ---
 
-<footer>© GoogleTest Documentation</footer>
+## Best Practices for Isolation and Repeatability
+
+To maximize the effectiveness of your tests:
+
+- **Avoid sharing writable global state**: Each test should be able to run independently of others.
+- **Keep fixtures lightweight**: Avoid expensive setup on every test, balance with `SetUpTestSuite` and global environments.
+- **Ensure proper cleanup**: Use teardown methods and RAII patterns to release resources.
+- **Minimize dependencies on external resources**: Mock external dependencies or use test doubles where possible.
+
+---
+
+## Troubleshooting Common Issues
+
+### Test Not Invoking SetUp()/TearDown()
+- Verify your test fixture properly inherits from `testing::Test`.
+- Ensure your overrides are correctly spelled `SetUp()` and `TearDown()`.
+
+### Tests Interfering With Each Other
+- Check for shared static or global variables.
+- Use `ScopedTrace` to help identify test interactions.
+
+### Memory Leaks or Resource Exhaustion
+- Use smart pointers in fixtures.
+- Verify `TearDown()` always releases resources.
+
+### Global Environment Not Running
+- Confirm `AddGlobalTestEnvironment()` is called before `RUN_ALL_TESTS()`.
+
+---
+
+## Related Documentation
+
+- [GoogleTest Primer](../getting-started/primer-basics.md): Get started with writing tests and fixtures.
+- [Test Discovery and Execution Model](../core-architecture/test-discovery-execution-model.md): Understand how tests are discovered and run.
+- [Writing and Using Assertions](../../guides/core-testing-workflows/writing-assertions.md): Improve test assertions.
+- [Mocking Primer and Reference](../getting-started/mocking-primer.md), (../reference/mocking.md): Learn about mocking and expectations.
+
+---
+
+## Summary
+
+Mastering the test lifecycle and environment management in GoogleTest is key to building robust, maintainable C++ test suites. From global environment setup to per-test fixtures and teardown, understanding and properly utilizing these stages ensure repeatability and isolation of tests, leading to reliable outcomes.
+
+
