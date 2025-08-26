@@ -1,0 +1,192 @@
+---
+title: "Why aren’t my mocks working as expected?"
+description: "Answers for issues related to unexpected mock behaviors, such as uncalled expectations, call count mismatches, or struggles with the ON_CALL/EXPECT_CALL macros. Provides tips on debug logging, proper macro usage, and best practice reminders."
+---
+
+# Why Aren’t My Mocks Working as Expected?
+
+This FAQ addresses common challenges when using mocks with GoogleMock, particularly issues like uncalled expectations, call count mismatches, and difficulties with `ON_CALL` / `EXPECT_CALL` macros. It provides targeted tips on proper macro usage, enabling debug logging for insight, and best practices for resolving unexpected mock behaviors.
+
+---
+
+## Understanding Mock Behavior
+
+Mocks simulate interfaces by specifying expectations about which methods will be called, how often, with what arguments, and what actions should be performed. If mocks don't work as expected, it is often due to a mismatch or absence of these expectations or misuse of mocking macros.
+
+The *key principle* is that expectations must be set before exercising the code under test. GoogleMock assumes that `EXPECT_CALL()` prepares a future behavior, not that a call has already occurred.
+
+## Common Reasons for Unexpected Mock Behavior
+
+### 1. Expectations Not Set Before Calls
+
+- **Issue:** Calling a mocked method before its `EXPECT_CALL()` is set causes undefined behavior.
+- **Solution:** Always arrange your test so that all `EXPECT_CALL()` and `ON_CALL()` statements occur **before** invoking the mock methods.
+
+### 2. Uncalled or Overcalled Expectations
+
+- If an expected call is never made, GoogleMock reports a failure.
+- If a mock method is called more times than expected, an error is raised.
+- To allow variable call counts, use cardinalities like `Times(AnyNumber())`.
+
+### 3. Argument Mismatches
+
+- When the actual call arguments do not match any specified expectation (using matchers), it is treated as an unexpected call.
+- Use flexible matchers such as `_` (wildcard) or custom matchers to avoid overly strict argument constraints.
+
+### 4. Confusion Between `ON_CALL` and `EXPECT_CALL`
+
+- `ON_CALL` only sets the **default behavior**, it does **not** enforce that the method must be called.
+- `EXPECT_CALL` sets both the behavior and the **expectation** that the method will be called.
+- If a method is called without an `EXPECT_CALL`, a warning about an "uninteresting call" may be emitted.
+
+### 5. Expectations Shadowed by Later Definitions
+
+- GoogleMock matches calls against expectations in **reverse order** of their declaration.
+- Later expectations override earlier ones.
+- To avoid surprises, declare more general expectations first and more specific ones later.
+
+### 6. Sticky Expectations and Saturation
+
+- By default, an expectation remains **active** (sticky) even after reaching its specified call count.
+- To retire an expectation after it saturates (so another matching expectation can be used), use `.RetiresOnSaturation()`.
+
+### 7. Using Strict, Nice, or Naggy Mocks
+
+- **NaggyMock** (default) warns on uninteresting calls.
+- **NiceMock** suppresses warnings on uninteresting calls.
+- **StrictMock** treats uninteresting calls as test failures.
+- Choose the strictness level based on your test requirements.
+
+### 8. Mock Class and Virtual Destructors
+
+- Ensure interfaces you mock have **virtual destructors** to avoid undefined behavior and detection issues.
+
+---
+
+## Diagnostic Tips and Troubleshooting
+
+### Enable Verbose Logging
+
+Run your tests with `--gmock_verbose=info` to see detailed tracing of all expectations and mock calls, including stack traces and argument values. This helps identify why expectations are not met or calls do not match.
+
+```shell
+./your_test_binary --gmock_verbose=info
+```
+
+### Verifying and Clearing Expectations Early
+
+If unsure whether a mock object will be destroyed (and thus verified), force verification with:
+
+```cpp
+ASSERT_TRUE(Mock::VerifyAndClearExpectations(&mock_object));
+```
+
+This provides earlier diagnostic errors if expectations are unsatisfied.
+
+### Avoid Mixing `EXPECT_CALL` and Real Calls
+
+Do not call the methods before setting corresponding `EXPECT_CALL` statements, as gMock's behavior is undefined in this scenario.
+
+### Use Catch-All Expectations to Prevent Unexpected Call Failures
+
+If certain calls are *allowed* but not verified, add a catch-all expectation:
+
+```cpp
+EXPECT_CALL(mock, Method(_)).Times(AnyNumber());
+```
+
+This suppresses unexpected call errors for those argument patterns.
+
+### Check for Overlapping or Conflicting Expectations
+
+Because “newer overrides older,” watch out for expectations with overlapping matchers where order matters.
+
+### Confirm the Mocked Methods Are Virtual
+
+If the real implementation method is called instead of the mock, verify that methods are properly marked `virtual`. Non-virtual methods cannot be mocked directly.
+
+---
+
+## Best Practices for Reliable Mocks
+
+- **Set expectations in test setup before exercising code.**
+- **Use matchers thoughtfully:** prefer `_` for arguments you don't care about.
+- **Manage expected call counts:** use cardinalities (`Exactly`, `AtLeast`, `AnyNumber`) for flexible call counts.
+- **Use sequences (`InSequence`) when call order matters.**
+- **Consider `.RetiresOnSaturation()` for multiple overlapping expectations.**
+- **Choose mock strictness (`NiceMock`, `NaggyMock`, `StrictMock`) to match test rigor.**
+- **Give mock objects virtual destructors for heap checkers and verification to work.**
+- **Delegate to fakes or real objects if complex behavior is needed (using `ON_CALL` and delegation).**
+
+---
+
+## Illustrative Examples
+
+### Example: Correct Use of `EXPECT_CALL` Ordering
+
+```cpp
+using ::testing::Return;
+using ::testing::_; 
+
+TEST(FooTest, Example) {
+  MockFoo foo;
+
+  // General expectation first
+  EXPECT_CALL(foo, Bar(_)).Times(AnyNumber()).WillRepeatedly(Return(false));
+
+  // More specific expectation later
+  EXPECT_CALL(foo, Bar(5)).Times(2).WillRepeatedly(Return(true));
+
+  // Calls
+  EXPECT_TRUE(foo.Bar(5));
+  EXPECT_TRUE(foo.Bar(5));
+  EXPECT_FALSE(foo.Bar(10)); // Matches catch-all
+}
+```
+
+### Example: Using `.RetiresOnSaturation()` to Enable Overlapping Expectations
+
+```cpp
+EXPECT_CALL(mock, SetValue(7))
+    .Times(2)
+    .RetiresOnSaturation();
+EXPECT_CALL(mock, SetValue(_))
+    .Times(AnyNumber());
+
+mock.SetValue(7);
+mock.SetValue(7);
+mock.SetValue(7);  // Passed to the catch-all expectation
+```
+
+### Example: Suppressing Uninteresting Call Warnings with `NiceMock`
+
+```cpp
+using ::testing::NiceMock;
+
+NiceMock<MockFoo> mock;
+EXPECT_CALL(mock, ImportantMethod());
+// Calls to other mock methods cause no warnings.
+```
+
+---
+
+## Summary
+
+Issues with mocks usually stem from improper ordering or setting of expectations, misunderstandings between `EXPECT_CALL` and `ON_CALL`, argument mismatches, and strictness mode choices. Turning on verbose logging (`--gmock_verbose=info`) is essential to debug these problems effectively.
+
+For complex mock behaviors, consider delegation to fakes or real objects, and use sequences or `RetiresOnSaturation` to manage call ordering and expectation lifetimes.
+
+Finally, always ensure your interfaces have virtual destructors to maintain proper mock object lifecycles.
+
+---
+
+## Additional Resources
+
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html): Beginner-friendly introduction to mocking.
+- [Legacy gMock FAQ](https://google.github.io/googletest/gmock_faq.html): Common gotchas and technical Q&A.
+- [Mocking Reference](https://google.github.io/googletest/reference/mocking.html): Detailed API description.
+- [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html): Quick syntax and tips.
+- [Creating and Using Mocks Guide](/guides/mocking-and-advanced-techniques/creating-and-using-mocks.md): Step-by-step instructions and best practices.
+- [Understanding Uninteresting vs Unexpected Calls](https://google.github.io/googletest/gmock_cook_book.html#uninteresting-vs-unexpected): Explanation of mock call categories.
+
+For help with integration or build issues, see the [Installation and Setup FAQ](/faq/general-usage/installation-issues) and [Common Errors FAQ](/faq/general-usage/common-errors).
