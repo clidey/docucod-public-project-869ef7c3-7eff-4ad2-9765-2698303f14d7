@@ -1,0 +1,240 @@
+---
+title: "Common Usage Issues"
+description: "Addresses the most frequent user challenges, including linking errors, test detection problems, and unexpected test behavior. Provides clear troubleshooting steps to help users quickly identify and resolve core problems that may arise during day-to-day test development."
+---
+
+# Common Usage Issues
+
+This page addresses the most frequent challenges users encounter when using GoogleMock, including linking errors, test detection problems, and unexpected test behaviors. By following these clear troubleshooting steps and practical tips, users can quickly identify and resolve the core problems that may arise during day-to-day test development.
+
+---
+
+## 1. Linking Errors
+
+### Problem
+Users often face linker errors such as *undefined reference* to GoogleMock symbols or failure to link mock functions.
+
+### Causes
+- Missing linkage to GoogleMock libraries (`-lgmock` or equivalent).
+- Forgetting to link the `gmock_main` or `gtest_main` library when using default main()
+- Template instantiations missing in mock class implementation files.
+
+### Solutions & Best Practices
+<Steps>
+<Step title="Ensure Proper Library Linkage">
+Make sure your build system includes the GoogleMock libraries in the link step. For example, with CMake:
+
+```cmake
+find_package(GTest REQUIRED)
+add_executable(my_tests test_file.cc)
+target_link_libraries(my_tests PRIVATE gmock gmock_main GTest::GTest GTest::Main)
+```
+
+Linking `gmock_main` provides a ready main() for tests, simplifying setup.
+</Step>
+<Step title="Define Mock Class Constructors/Destructors in .cc Files">
+To speed up compilation and prevent linker errors, move mock class constructor and destructor definitions out of header files into source files. For example:
+
+In `mock_foo.h`:
+
+```cpp
+class MockFoo {
+ public:
+  MockFoo();
+  virtual ~MockFoo();
+  MOCK_METHOD(int, DoSomething, (), (override));
+};
+```
+
+In `mock_foo.cc`:
+
+```cpp
+#include "mock_foo.h"
+MockFoo::MockFoo() {}
+MockFoo::~MockFoo() {}
+```
+
+This avoids multiple instantiations causing linker issues.
+</Step>
+<Step title="Avoid Mocking Non-Virtual Methods Unless Using Advanced Techniques">
+Only virtual methods can be mocked directly with GoogleMock. For non-virtual methods, either use template mocking or redesign interfaces to be mockable. See [Mocking Non-Virtual Methods](https://github.com/google/googletest/blob/main/docs/gmock_cook_book.md#MockingNonVirtualMethods) for guidance.
+</Step>
+</Steps>
+
+---
+
+## 2. Test Detection Problems
+
+### Problem
+Tests don't run or are not detected by the test executable.
+
+### Causes
+- Incorrect or missing test registration macros (e.g., missing `TEST()` or `TEST_F()` macros).
+- Not calling `RUN_ALL_TESTS()` in the `main()` function.
+- Linking against `gmock_main` or `gtest_main` improperly.
+
+### Solutions & Best Practices
+
+- Verify test files contain TEST or TEST_F macros properly.
+- Ensure the test executable calls `RUN_ALL_TESTS()` to trigger test execution.
+- If using `gmock_main` or `gtest_main` libraries, no need to write your own main function.
+- Run test executable with `--gtest_list_tests` to verify test discovery.
+
+```bash
+./my_tests --gtest_list_tests
+```
+
+- Ensure build system correctly includes test source files.
+
+---
+
+## 3. Unexpected Test Behavior
+
+### Scenario A: "Uninteresting function call encountered" Warning
+
+Received warnings about uninteresting calls even though you've set default behaviors using `ON_CALL()`.
+
+### Explanation
+GoogleMock distinguishes between *uninteresting* and *unexpected* calls:
+- **Uninteresting call**: No `EXPECT_CALL` set for this method; it's allowed but warned by default.
+- **Unexpected call**: No matching `EXPECT_CALL` for a call, considered an error.
+
+Warning appears because by default mock objects are “naggy," warning on uninteresting calls.
+
+### Recommendations
+- Use `NiceMock<T>` to suppress these warnings on uninteresting calls when they are expected to occur but not explicitly checked.
+- Use `EXPECT_CALL(...).Times(AnyNumber())` to explicitly allow any number of calls to a mocked method.
+
+Example:
+
+```cpp
+#include <gmock/gmock.h>
+using ::testing::NiceMock;
+
+NiceMock<MockFoo> mock_foo;
+ON_CALL(mock_foo, SomeMethod()).WillByDefault(Return(42));
+EXPECT_CALL(mock_foo, SomeMethod()).Times(testing::AnyNumber());
+```
+
+### Scenario B: Tests Fail Due to Ordering or Cardinality Expectations
+
+If tests fail unexpectedly because of call count or order:
+
+- Ensure all expectations are set *before* exercising the mock objects.
+- Use sequences (`InSequence`) or `.After()` clauses for ordering constraints.
+- Avoid overly strict `EXPECT_CALL` constraints that may fail upon harmless code refactoring.
+
+### Scenario C: Default Action Not Executed
+
+If no action is specified for a mock method and the return type has no sensible default, calls may crash or throw exceptions.
+
+- Define default actions with `ON_CALL()`.
+- Or set default values for return types with `DefaultValue<T>::Set()`.
+
+---
+
+## 4. Common Gotchas
+
+### Issue: Mock Method Definition Location
+
+Always define `MOCK_METHOD` macros in the `public:` section of your mock class, regardless of the base method's access level.
+
+Example:
+
+```cpp
+class MockFoo : public Foo {
+public:
+  MOCK_METHOD(void, ProtectedMethod, (), (override));  // Even if originally protected
+  MOCK_METHOD(int, PrivateMethod, (), (override));   // Even if originally private
+};
+```
+
+### Issue: Mocking Overloaded Methods
+
+If you mock only a subset of overloads for an overloaded method, compiler warnings about hidden overloads will appear.
+Resolve it by using `using` to bring the base class overloads into scope.
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  using Foo::Add;  // Brings in other overloads.
+  MOCK_METHOD(int, Add, (int x), (override));
+};
+```
+
+### Issue: Comma in Return or Argument Types
+
+When mocking methods with return types or arguments containing commas (e.g. `std::pair<bool, int>`), wrap the type in extra parentheses or define an alias:
+
+```cpp
+using BoolIntPair = std::pair<bool, int>;
+MOCK_METHOD(BoolIntPair, GetPair, ());
+```
+
+### Issue: Virtual Destructors
+
+Mocked interfaces or base classes *must* have virtual destructors to avoid heap errors and leaks. This is essential for proper mock object lifecycle management.
+
+### Issue: Mixing Strictness Wrappers
+
+Do not nest `NiceMock`, `NaggyMock`, and `StrictMock` wrappers; this is unsupported.
+
+---
+
+## 5. Verification and Reset
+
+### When Are Expectations Verified?
+
+GoogleMock automatically verifies expectations when mock objects are destructed.
+
+### Forcing Early Verification
+
+Use `Mock::VerifyAndClearExpectations(&mock_obj)` to force verification before destruction.
+
+### Allowing Leaks
+
+If manual deletion is impossible or object will leak, use `Mock::AllowLeak(&mock_obj)` to suppress leaks warnings.
+
+---
+
+## 6. Useful Debugging Practices
+
+- Run tests with `--gmock_verbose=info` to get detailed traces on mock calls and expectation matches.
+- Use `--gtest_list_tests` to confirm that tests are discovered properly.
+- Regularly check warnings about uninteresting calls to avoid latent bugs.
+
+---
+
+## 7. Additional Resources
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html): Practical recipes and tips.
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html): Beginner-friendly tutorial.
+- [Legacy gMock FAQ](https://google.github.io/googletest/gmock_faq.html): Frequently asked questions with detailed answers.
+- [Mocking Reference](https://google.github.io/googletest/reference/mocking.html): Comprehensive API reference.
+
+---
+
+## Sample User Flow to Resolve Common Issues
+
+<Steps>
+<Step title="Encounter Linking Error">
+Check build settings and ensure linking against `gmock` and `gmock_main` if using default main(). Move constructor/destructor of mocks to source files.
+</Step>
+<Step title="Tests Are Not Running">
+Verify that tests use `TEST` or `TEST_F`, call `RUN_ALL_TESTS()`, or link with `gmock_main`. Use `--gtest_list_tests` to see test discovery.
+</Step>
+<Step title="Unexpected Call or Warning On Uninteresting Calls">
+Review your `EXPECT_CALL` and `ON_CALL` setup. Use `NiceMock` to suppress uninteresting call warnings if they are expected.
+</Step>
+<Step title="Test Fails on Call Counts or Ordering">
+Use `InSequence`, `After`, or adjust `.Times()` clauses. Verify expectations are set before exercising mocks.
+</Step>
+<Step title="Still Stuck?">
+Run tests with `--gmock_verbose=info` for detailed diagnostics and consult the resources above.
+</Step>
+</Steps>
+
+---
+
+<Note>
+If you encounter problems not covered here, refer to the [Getting Help and Support](https://google.github.io/googletest/faq/integration-support-community/getting-more-help) page for official channels and community resources.
+</Note>
