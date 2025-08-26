@@ -1,0 +1,265 @@
+---
+title: "Parameterized & Typed Tests: Common Hurdles"
+description: "Troubleshooting advice for parameterized and type-parameterized tests, including tips to ensure test instantiation, correct registration, and compatibility with different compilers. Helps users unlock advanced test reuse patterns without common roadblocks."
+---
+
+# Parameterized & Typed Tests: Common Hurdles
+
+Parameterized and typed tests unlock powerful test reuse and thorough coverage across types and input variations. However, setting them up involves specific requirements and subtleties that can trip up both new and experienced users. This FAQ provides targeted troubleshooting advice and best practices to help you avoid common pitfalls and confidently leverage these advanced GoogleTest features.
+
+---
+
+## Frequently Asked Questions
+
+### Why are my `TEST_P` or `TYPED_TEST` test cases not running?
+
+If your parameterized or typed tests do not appear in the test runner or you see warnings like "no tests defined" or "tests are not instantiated", it's usually because:
+
+- You declared the parameterized tests using `TEST_P` or typed tests with `TYPED_TEST`, but **did not instantiate** the test suite.
+- `INSTANTIATE_TEST_SUITE_P` or `INSTANTIATE_TYPED_TEST_SUITE_P` is missing or incorrectly specified.
+
+**How to fix:**
+
+- For **value-parameterized tests**, after defining your tests with `TEST_P(Fixture, TestName)`, you **must** call `INSTANTIATE_TEST_SUITE_P()` with a unique instantiation name and a parameter generator such as `Values(...)`, `Range(...)`, `Combine(...)`, or `ValuesIn(...)`.
+  
+  ```cpp
+  INSTANTIATE_TEST_SUITE_P(MyInst, MyTestSuite, Values(1, 2, 3));
+  ```
+
+- For **typed tests**, after defining tests with `TYPED_TEST()`, ensure you call `TYPED_TEST_SUITE(Fixture, TypeList);`.
+
+- For **type-parameterized tests**, after using `TYPED_TEST_P()` and `REGISTER_TYPED_TEST_SUITE_P()`, you **must explicitly instantiate** the tests with `INSTANTIATE_TYPED_TEST_SUITE_P()`.
+
+If you want to suppress warnings/errors about uninstantiated tests (e.g., in header-only libraries or optional test sets), use:
+
+```cpp
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(FixtureName);
+```
+
+### My instantiation name prefixes show up in the test names, making them complicated. Can I avoid it?
+
+GoogleTest prefixes the test suite name with the **instantiation name** you provide in `INSTANTIATE_TEST_SUITE_P` and `INSTANTIATE_TYPED_TEST_SUITE_P`. This allows distinguishing multiple instantiations of the same parameterized test.
+
+If you want the tests to have no additional prefix, pass an empty string (`""`) as the prefix argument:
+
+```cpp
+INSTANTIATE_TEST_SUITE_P(
+  , MyTestSuite, Values(1, 2, 3));  // Instantiates without prefix
+```
+
+Remember that providing a meaningful prefix is good practice when you have more than one instantiation to aid test reporting clarity.
+
+### My custom parameter names in `INSTANTIATE_TEST_SUITE_P` are not showing or cause errors.
+
+The last optional argument to `INSTANTIATE_TEST_SUITE_P` is a function or functor that generates custom test name suffixes based on parameter values.
+
+- It must accept a `testing::TestParamInfo<T>` and return a `std::string`.
+- The generated suffix must be **non-empty**, **unique**, and contain **only ASCII alphanumeric characters** and underscores `_`.
+
+Failure to meet these conditions causes name conflicts or compilation errors.
+
+If you do not provide this argument, GoogleTest uses the default name generator which calls `PrintToString` on the parameter but does not work well with `std::string` or C string parameters.
+
+To fix naming with string parameters, provide a custom generator:
+
+```cpp
+INSTANTIATE_TEST_SUITE_P(
+  StringTests, FooTest,
+  Values("a", "b"),
+  [](const testing::TestParamInfo<std::string>& info) {
+    std::string name = info.param;
+    std::replace_if(name.begin(), name.end(),
+                    [](char c) { return !std::isalnum(c); }, '_');
+    return name;
+  });
+```
+
+### Why do I get a link or compiler error saying `no matching constructor for TestFixture` or `cannot instantiate TestWithParam`?
+
+Common reasons:
+
+- Your test fixture class does not have a **default constructor**.
+- You defined non-default constructors but forgot to define or declare a default constructor.
+- You have const data members in your fixture that are not initialized.
+
+**Resolution:**
+
+- Ensure your fixture can be default-constructed.
+- Add or explicitly define a default constructor and initialize all members.
+
+### Why do I get runtime errors about mixed fixtures or inconsistent `TEST`/`TEST_F` usage?
+
+All tests in the same test suite must use the same test fixture class. This means:
+
+- Don't mix `TEST()` and `TEST_F()` macros in the same test suite.
+- Don't have different test fixture class definitions with the same test suite name across translation units or namespaces.
+
+**Tip:**
+
+Use unique test suite and fixture names per test suite and avoid reusing fixture names in different namespaces unless you isolate the test suites.
+
+### Can I instantiate parameterized tests with parameter types that are not directly convertible to the fixture's parameter type?
+
+Yes, you can use `ConvertGenerator<T>` to cast the generated parameters before passing them to the fixture:
+
+```cpp
+INSTANTIATE_TEST_SUITE_P(
+  MyConvInst, MyTestSuite,
+  ConvertGenerator<std::tuple<int, bool>>(Combine(Values(1, 2), Bool())));
+```
+
+You can also provide a callable converter:
+
+```cpp
+INSTANTIATE_TEST_SUITE_P(
+  MyConvInst2, MyTestSuite,
+  ConvertGenerator(Combine(Values(1, 2), Bool()),
+    [](const std::tuple<int, bool>& t) {
+      return MyParam(std::get<0>(t), std::get<1>(t));
+    }));
+```
+
+Remember that the converter's input type deduced by the compiler must match the underlying generator's element type to avoid dangling references.
+
+### Why do my typed tests (using `TYPED_TEST`) fail to compile or link?
+
+- For typed tests, you **must declare and define** the type list with `Types<...>`.
+- Use `TYPED_TEST_SUITE()` before defining your tests.
+- Declare typed tests with `TYPED_TEST` only after the type list is declared and attached.
+
+Example:
+
+```cpp
+template <typename T> class FooTest : public testing::Test {};
+using MyTypes = ::testing::Types<int, char, double>;
+TYPED_TEST_SUITE(FooTest, MyTypes);
+
+TYPED_TEST(FooTest, DoesSomething) {
+  TypeParam value = static_cast<TypeParam>(0);
+  EXPECT_EQ(0, value);
+}
+```
+
+### What if I don't want to instantiate some `TEST_P` or `TYPED_TEST` suites right away?
+
+GoogleTest will normally emit failures if you define parameterized tests but do not instantiate them. To suppress such warnings, you can declare:
+
+```cpp
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(FixtureName);
+```
+
+Use this sparingly for test libraries or conditional test scenarios.
+
+### How to troubleshoot flaky or failing parameterized / typed tests?
+
+- Check that your parameters cover valid input space.
+- Confirm proper cleanup in fixtures to avoid cross-test interference.
+- Use unique test names or name generators to identify failing parameters easily.
+- Validate that shared test suite resources are correctly set up and torn down.
+
+### What are the differences between typed tests, type-parameterized tests, and value-parameterized tests?
+
+- **Typed tests** run the same test logic over a fixed list of types defined at compile time.
+- **Type-parameterized tests** are abstract test patterns instantiated at different points with type lists.
+- **Value-parameterized tests** run the same logic over different input values passed as parameters.
+
+Choosing between these depends on whether you want to test different types or different data values.
+
+
+## Common Issues & How to Fix Them
+
+<AccordionGroup title="Test Registration and Instantiation Issues">
+<Accordion title="Parameterized Tests Not Running">
+Check if you have missing or incorrectly called `INSTANTIATE_TEST_SUITE_P`. Without this, tests defined with `TEST_P` won’t run.
+
+Also verify that your parameter generator produces parameters at run time (post-`InitGoogleTest()`), not at static initialization time.
+</Accordion>
+<Accordion title="Typed Tests Compilation or Link Failures">
+Confirm that your type list is properly declared with `using MyTypes = ::testing::Types<...>`.
+Verify that `TYPED_TEST_SUITE` is called before defining the `TYPED_TEST`s.
+
+If using `REGISTER_TYPED_TEST_SUITE_P`, ensure you also call `INSTANTIATE_TYPED_TEST_SUITE_P`.
+</Accordion>
+<Accordion title="Mixing TEST and TEST_F in Same Test Suite">
+All tests in the same test suite must use the same fixture. Mixing `TEST` (non-fixture) and `TEST_F` (fixture-using) in one suite leads to runtime errors.
+
+Solution: Separate tests into distinct suites or convert `TEST` to `TEST_F`.
+</Accordion>
+</AccordionGroup>
+
+<AccordionGroup title="Naming and Parameterization Pitfalls">
+<Accordion title="Invalid Characters in Test or Parameter Names">
+Avoid underscores in test suite and test names, especially at the start or end, to prevent naming conflicts and reserved identifier errors. Also, parameter suffix functions must produce only alphanumeric or underscore characters.
+</Accordion>
+<Accordion title="Confusing Test Names Due to Instantiation Prefixes">
+The instantiation name becomes a prefix in test names by default. To remove it, use an empty prefix string in the instantiation.
+</Accordion>
+<Accordion title="Dangling References in Type Conversion Lambda">
+When using a lambda for type conversion in `ConvertGenerator`, ensure it does not take parameters by `string_view` referencing temporary strings that might be destroyed before usage.
+Use explicit types or `const std::string&` to avoid this.
+</Accordion>
+</AccordionGroup>
+
+<AccordionGroup title="Fixture and Test Construction Problems">
+<Accordion title="Missing Default Constructor in Fixture">
+GoogleTest requires a public default constructor for test fixtures. Add one if you declared other constructors.
+</Accordion>
+<Accordion title="Const Data Members Not Initialized">
+If your fixture has `const` members, initialize them properly in the constructor initializer list.
+</Accordion>
+<Accordion title="Fatal Assertion in Non-void Functions or Constructors/Destructors">
+`ASSERT_*` macros generating fatal failures can only be used in `void`-returning functions, not constructors/destructors.
+Use `SetUp()`/`TearDown()` or `EXPECT_*` macros in those cases.
+</Accordion>
+</AccordionGroup>
+
+
+## Error Messages & Debugging Tips
+
+### Common Error: "Parameterized test suite is defined but never instantiated"
+
+- Add `INSTANTIATE_TEST_SUITE_P` call with appropriate parameters.
+- If you intentionally do not instantiate, annotate with `GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(Fixture)`.
+
+### Common Error: "All tests in the same test suite must use the same test fixture"
+
+- Check for fixture name collisions across namespaces.
+- Avoid mixing macros `TEST()` and `TEST_F()` in the same suite.
+
+### Debugging Instantiation and Naming
+
+- Use GoogleTest's built-in test listing (`--gtest_list_tests`) to see all registered tests.
+- Use distinct instantiation names to differentiate parameterized test cases.
+- Implement custom parameter name generators to clarify logs.
+
+
+## Best Practices & Tips
+
+- Always instantiate your parameterized test suites.
+- Use `GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST` sparingly for edge cases.
+- Prefer typed tests when checking interface compliance over multiple types.
+- Use value-parameterized tests for testing various input values.
+- Apply custom parameter name generators for clarity in automated test reports.
+- When converting types in parameter generators, avoid dangling references by choosing correct types or copy semantics.
+
+
+## Additional Resources
+
+- [GoogleTest Primer](primer.md) — foundational concepts
+- [Advanced GoogleTest Topics](advanced.md) — detailed guides on advanced test types
+- [Testing Reference: TEST_P and INSTANTIATE_TEST_SUITE_P](reference/testing.md#TEST_P)
+- [FAQ on Parameterized & Typed Tests](faq.md#I-need-to-test-that-different-implementations-of-an-interface-satisfy-some-common-requirements)
+
+---
+
+<Tip>
+For robust and maintainable testing, always ensure your parameterized and typed tests are properly instantiated, named, and avoid mixing test macros or fixtures within one suite.
+</Tip>
+
+<Tip>
+When encountering failures or missing tests, start by running your test binary with `--gtest_list_tests` and verify that tests and instantiations appear as expected.
+</Tip>
+
+<Tip>
+Use `GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST` only when you are certain tests aren't meant to run in some translation units, otherwise tests will silently not run.
+</Tip>
