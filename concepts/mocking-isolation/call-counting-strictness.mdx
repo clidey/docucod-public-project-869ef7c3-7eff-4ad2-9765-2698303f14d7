@@ -1,0 +1,206 @@
+---
+title: "Call Expectations, Cardinality, and Strictness"
+description: "Explore how to specify the allowed number of mock method calls using cardinalities, and how strictness modes (Nice, Naggy, Strict) affect test failure reporting and enforcement."
+---
+
+# Call Expectations, Cardinality, and Strictness
+
+Explore how to specify the allowed number of mock method calls using cardinalities, and how strictness modes (Nice, Naggy, Strict) affect test failure reporting and enforcement.
+
+---
+
+## Understanding Call Expectations in GoogleMock
+
+When working with mock objects in GoogleMock, it’s crucial to tell the framework **how many times** each mock method is expected to be called. This is achieved by specifying **cardinalities**, which define the allowed number of calls. Additionally, GoogleMock provides **strictness modes** to control how uninteresting or unexpected calls are handled — influencing whether warnings are printed or test failures triggered.
+
+This guide breaks down these concepts, illustrating how to precisely express call expectations and manage call failures effectively.
+
+---
+
+## Cardinalities: Specifying How Many Times
+
+Cardinalities control the expected frequency of mock method invocations. They are used in the `.Times()` clause of `EXPECT_CALL()`. GoogleMock offers a rich set of built-in cardinalities, with flexible semantics:
+
+| Cardinality         | Meaning                                              |
+| ------------------- | ----------------------------------------------------|
+| `AnyNumber()`       | The method may be called any number of times (including zero). |
+| `AtLeast(n)`        | The method must be called at least *n* times.        |
+| `AtMost(n)`         | The method can be called at most *n* times.          |
+| `Between(m, n)`     | The method must be called between *m* and *n* times, inclusive. |
+| `Exactly(n)` or `n` | The method must be called exactly *n* times. Calling it more or less is a failure. If *n* is 0, the call should never happen. |
+
+
+### Examples of Cardinalities
+
+```cpp
+using ::testing::AtLeast;
+using ::testing::Exactly;
+using ::testing::AnyNumber;
+
+EXPECT_CALL(mock, Foo())
+    .Times(AnyNumber());  // Call any number of times
+
+EXPECT_CALL(mock, Bar())
+    .Times(AtLeast(3));   // At least 3 times
+
+EXPECT_CALL(mock, Baz())
+    .Times(Exactly(2));   // Exactly twice
+
+EXPECT_CALL(mock, Qux())
+    .Times(5);           // Equivalent to Exactly(5)
+```
+
+### Inferencing Cardinalities
+
+If `.Times()` is omitted, GoogleMock infers the expected call count based on the actions:
+
+- If neither `.WillOnce()` nor `.WillRepeatedly()` is specified, `.Times(1)` is assumed.
+- If there are *n* `.WillOnce()` calls and no `.WillRepeatedly()`, `.Times(n)` is assumed.
+- If there are *n* `.WillOnce()` calls and one `.WillRepeatedly()`, `.Times(AtLeast(n))` is assumed.
+
+This smart inference simplifies common cases and encourages clarity.
+
+### Cardinality Behavior
+
+- GoogleMock tracks how many times each expectation is matched.
+- Expectations become **saturated** once their upper bound is reached.
+- Expectations become **satisfied** once their cardinality is fulfilled.
+- Expectations become **over-saturated** if calls exceed the upper bound, leading to immediate test failures.
+
+---
+
+## Controlling Expectation Strictness
+
+### Uninteresting Calls: What Happens When a Mock Method Is Called Without an Expectation?
+
+A mock method call with **no matching `EXPECT_CALL()`** is called an *uninteresting call*. By default, GoogleMock still allows the call but:
+
+- Prints a **warning** message to alert the user
+- Performs the mock’s default action (e.g., returns default values or does nothing)
+
+Sometimes you want to change this behavior. GoogleMock offers three strictness modes for a mock object:
+
+| Strictness Mode | Behavior on Uninteresting Calls                    |
+|-----------------|----------------------------------------------------|
+| **NiceMock**    | Suppresses warnings on uninteresting calls. Allowed silently. |
+| **NaggyMock**   | Default behavior: warns about uninteresting calls but allows them. |
+| **StrictMock**  | Treats uninteresting calls as test failures; they cause immediate errors. |
+
+
+### How to Use Strictness Wrappers
+
+```cpp
+using ::testing::NiceMock;
+using ::testing::NaggyMock;
+using ::testing::StrictMock;
+
+NiceMock<MockFoo> nice_mock;    // Ignores uninteresting call warnings
+NaggyMock<MockFoo> naggy_mock;  // Default mock, warns about them
+StrictMock<MockFoo> strict_mock; // Fails on uninteresting calls
+```
+
+### Important Notes
+
+- Strictness wrapper classes **inherit** from the original mock class, so they can be used anywhere the mock is accepted.
+- They only affect **uninteresting calls** (methods with no expectations).
+- **Unexpected calls** (calls that do match expectations but have either wrong arguments or occur out of order) always result in failures regardless of strictness.
+- The **mock's destructor must be virtual** for these wrappers to work reliably.
+
+---
+
+## Managing Multiple Expectations and Ordering
+
+### Sticky Expectations
+
+By default, expectations in GoogleMock are "sticky": they remain active even after their expected number of calls is reached (unless `RetiresOnSaturation()` is used or they belong to a sequence). This design helps catch unintended extra calls.
+
+If you want an expectation to become inactive immediately after its upper bound is reached, apply:
+
+```cpp
+EXPECT_CALL(mock, Foo())
+    .Times(2)
+    .RetiresOnSaturation();
+```
+
+This will allow later expectations (including catch-all "any number" expectations) to handle further calls.
+
+### Ordered Calls
+
+You can enforce call order with sequences:
+
+```cpp
+using ::testing::InSequence;
+
+{
+  InSequence s;
+
+  EXPECT_CALL(mock, Foo(1));
+  EXPECT_CALL(mock, Foo(2));
+}
+```
+
+This requires `Foo(1)` to be called before `Foo(2)`. Unordered calls outside the sequence order cause failures.
+
+### Partial Orders with `After()`
+
+You can specify complex partial ordering using the `.After()` clause, indicating an expectation occurs after one or more others. For example:
+
+```cpp
+Expectation foo_called = EXPECT_CALL(mock, Foo());
+EXPECT_CALL(mock, Bar()).After(foo_called);
+```
+
+Enforces that `Bar()` calls happen only after `Foo()` is called.
+
+---
+
+## Common Pitfalls and Best Practices
+
+### Setting Expectations Before Calls
+
+Always set expectations (with `EXPECT_CALL()`) **before** invoking the mock methods, otherwise the behavior is undefined and difficult to debug.
+
+### Overlapping Expectations Order
+
+Expectations are matched in **reverse order** of declaration, meaning newer expectations override older ones for matching calls. This supports general catch-all expectations being overridden by more specific ones declared later.
+
+### Use `RetiresOnSaturation()` for Sequential Expectations
+
+Use `.RetiresOnSaturation()` when setting multiple expectations on the same method that are intended to be used sequentially to avoid upper-bound violations.
+
+### Control Strictness Wisely
+
+Avoid making all mocks strict unless necessary, as strict mocks can make refactoring harder. Use `NiceMock` for routine tests and `StrictMock` when you want to catch all uninteresting calls precisely.
+
+### Verify and Clear Expectations If Needed
+
+Sometimes you want to explicitly verify and clear expectations before the mock’s destruction using:
+
+```cpp
+Mock::VerifyAndClearExpectations(&mock_object);
+```
+
+But avoid setting new expectations after this.
+
+---
+
+## Summary of Key API Components
+
+- `.Times(cardinality)` — Specifies allowed call counts.
+- `.RetiresOnSaturation()` — Retire expectation after reaching upper call bound.
+- `NiceMock<T>` — Suppresses uninteresting call warnings (default is naggy).
+- `NaggyMock<T>` — Warns on uninteresting calls (default behavior).
+- `StrictMock<T>` — Fails on uninteresting calls.
+
+---
+
+## Additional Resources
+
+- [GoogleMock Cookbook: The Nice, the Strict, and the Naggy](https://github.com/google/googletest/blob/main/docs/gmock_cook_book.md#NiceStrictNaggy)
+- [GoogleMock Mocking Reference (EXPECT_CALL)](https://github.com/google/googletest/blob/main/docs/reference/mocking.md#EXPECT_CALL)
+- [GoogleMock Cardinalities Reference](https://github.com/google/googletest/blob/main/docs/gmock_cheat_sheet.md#CardinalityList)
+- [Understanding Expectations and Sequences](https://github.com/google/googletest/blob/main/docs/gmock_for_dummies.md#expecting-ordered-calls)
+
+---
+
+By mastering cardinalities and strictness settings, you gain powerful control over your tests' precision and robustness, ensuring your mocks precisely reflect intended behaviors and guard against subtle bugs early in the test lifecycle.
