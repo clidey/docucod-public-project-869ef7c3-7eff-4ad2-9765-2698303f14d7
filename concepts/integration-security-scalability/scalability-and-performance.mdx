@@ -1,0 +1,203 @@
+---
+title: "Scalability and Performance Considerations"
+description: "Learn about the framework’s strategies for scalable test execution, parallelization patterns, performance pitfalls, and how to optimize mock usage for large projects."
+---
+
+# Scalability and Performance Considerations
+
+GoogleMock is designed to support a wide range of testing scenarios, from small unit tests to large, complex codebases with many simultaneous mocks and tests running in parallel. To help you write efficient, robust, and maintainable tests at scale, this guide explains the framework’s strategies for scalable test execution, parallelization patterns, common performance pitfalls, and how to optimize mock usage in large projects.
+
+---
+
+## 1. Scalable Test Execution Strategies
+
+### Leveraging Parallelism in Tests
+
+GoogleTest and GoogleMock support running tests in parallel threads or processes to minimize overall test suite runtime. You can safely execute tests concurrently, but it’s crucial to understand the thread-safety guarantees and patterns:
+
+- **Isolate Tests:** Each test should be independent to avoid data races. GoogleTest creates a new fixture object per test, ensuring isolation.
+- **Mock Object Thread-Safety:** gMock mocks can be used concurrently by multiple threads for invocations, but setting up expectations or destroying mocks must be done from a single thread.
+- **Test Parallelization Modes:** Use your build system or test runner to run multiple test binaries in parallel or leverage environment variables like `GTEST_TOTAL_SHARDS` and `GTEST_SHARD_INDEX` for sharded test execution across machines.
+
+### Example: Running Multiple Tests Concurrently
+
+```bash
+# Run tests in parallel shards
+export GTEST_TOTAL_SHARDS=4
+export GTEST_SHARD_INDEX=0
+./my_tests # Runs subset of tests on shard 0
+
+export GTEST_SHARD_INDEX=1
+./my_tests # Runs subset of tests on shard 1
+# ... and so forth for shards 2 and 3
+```
+
+### Best Practices
+
+- Avoid setting or modifying mock expectations from multiple threads simultaneously.
+- Use thread synchronization primitives within actions if your mocks are exercised across threads and shared state must be protected.
+- Keep tests independent to maximize parallel efficiency.
+
+---
+
+## 2. Parallelization Patterns in gMock
+
+GoogleMock allows you to exercise mocks safely in multi-threaded tests, supporting the following patterns:
+
+### Concurrent Mock Object Usage
+
+Each thread may use its own mock objects independently. This is the simplest concurrency model, where each mock instance is confined to a thread.
+
+### Shared Mock Object with Concurrent Calls
+
+Multiple threads may invoke mock methods on the same mock object concurrently. gMock ensures thread-safe execution of mock methods, but **modifications to expectations** (e.g., setting `EXPECT_CALL`s) must not happen while other threads invoke mock methods.
+
+#### Example Multi-threaded Usage
+
+In the `googlemock/test/gmock_stress_test.cc` test code, different scenarios are demonstrated:
+
+- **TestConcurrentMockObjects:** Separate mock objects used by different threads in parallel safely.
+- **TestConcurrentCallsOnSameObject:** Multiple threads calling methods on the same mock object concurrently, demonstrating potential failures if expectations are exceeded.
+- **TestPartiallyOrderedExpectationsWithThreads:** Demonstrates partial ordering of expectations across threads with sequences.
+
+### Tips
+
+- Use synchronization in your test logic or within action implementations to avoid race conditions.
+- Use `.RetiresOnSaturation()` to retire expectations after their invocation count is met, avoiding sticky expectations causing performance issues or spurious failures.
+
+---
+
+## 3. Performance Pitfalls and Common Challenges
+
+Even though GoogleMock is designed to perform efficiently, large-scale test suites may encounter these common performance issues:
+
+### Slow Compilation Time
+
+- Mock classes with many mocked methods can cause long compile times due to heavy template instantiations.
+- **Remedy:** Declare mock class constructors and destructors in `.cc` files separately to reduce redundant compiler work.
+
+### Excessive Mock Setup Overhead
+
+- Excessive, fine-grained expectations can slow test setup.
+- Overuse of `EXPECT_CALL` where `ON_CALL` or default mock behaviors suffice leads to overly constrained tests, increased maintenance, and overhead.
+- **Best practice:** Use `ON_CALL` to define default behaviors and reserve `EXPECT_CALL` for setting actual call expectations.
+
+### Thread Contention in Tests
+
+- If multiple threads contend for the same mock’s synchronization locks during frequent method calls, this can cause slowdowns.
+- Design tests to minimize shared mock access or ensure coarse-grained synchronization.
+
+### Overly Verbose or Redundant Expectations
+
+- Setting expectations on uninteresting calls or calls that do not affect test outcomes produces warnings and potentially slows down test execution.
+- Use `NiceMock` or configure uninteresting call behavior appropriately.
+
+---
+
+## 4. Optimizing Mock Usage for Large Projects
+
+### Organizing Mocks Efficiently
+
+- Define mocks in centralized locations where appropriate to avoid duplication.
+- Use interfaces (abstract classes) to decouple ownership and ease mocking.
+
+### Use `NiceMock` and `StrictMock` Wisely
+
+- `NiceMock<T>` suppresses warnings on uninteresting calls, minimizing noise in large test suites.
+- `StrictMock<T>` treats all unexpected and uninteresting calls as failures, which can enforce rigor but increase test fragility and execution time.
+- Balance between strictness and flexibility for your project goals.
+
+### Minimizing Mock Object Lifetime
+
+- Limit mock object lifetime to test duration to allow verification on destruction.
+- Explicitly verify expectations early if mocks live longer to detect failures promptly.
+
+### Controlling Output Verbosity
+
+- Excessive gMock verbose logging (`--gmock_verbose=info`) can slow tests.
+- Use `warning` or `error` levels in continuous integration environments.
+
+### Using `RetiresOnSaturation()` to Reduce Sticky Expectations
+
+By default, expectations remain active after being saturated. In large suites, this can compound overhead and cause confusing failure reports.
+
+```cpp
+EXPECT_CALL(mock, Foo())
+    .Times(3)
+    .RetiresOnSaturation();
+```
+
+After three calls, this expectation will retire and no longer be considered.
+
+### Parallel Test Execution Tips
+
+- Use per-test fixtures holding isolated mocks.
+- Avoid expectation changes in background threads.
+
+### Example: Parallel Stress Test Pattern
+
+The `gmock_stress_test.cc` executes multiple test routines in threads:
+
+```cpp
+void (*test_routines[])(Dummy dummy) = {
+    &TestConcurrentMockObjects,
+    &TestConcurrentCallsOnSameObject,
+    &TestPartiallyOrderedExpectationsWithThreads,
+};
+
+const int kTestThreads = 50;
+ThreadWithParam<Dummy>* threads[kTestThreads];
+for (int i = 0; i < kTestThreads; i++) {
+  threads[i] = new ThreadWithParam<Dummy>(test_routines[i % 3], Dummy(), nullptr);
+}
+
+for (int i = 0; i < kTestThreads; i++) {
+  threads[i]->Join();
+  delete threads[i];
+}
+```
+
+This pattern ensures many parallel accesses with different expectations.
+
+---
+
+## 5. Troubleshooting Scalability Issues
+
+### Detecting Leaked Mocks
+
+- GoogleMock will warn about leaked mocks at test program exit, often indicating missing deletion and unsatisfied expectations.
+
+### Common Failures under Concurrency
+
+- Setting expectations during concurrent access causes undefined behavior. Always set expectations before launching test threads.
+- Unsynchronized shared mock usage can cause deadlocks or crashes.
+
+### Effective Debugging
+
+- Run tests with `--gmock_verbose=info` to get detailed call matching logs but balance verbosity with performance.
+- Use `SCOPED_TRACE()` and `Test::RecordProperty()` for tracing in multithreaded tests.
+
+
+---
+
+## 6. Summary of Recommendations
+
+- **Set expectations before concurrent execution.**
+- **Use `ON_CALL` for defaults, `EXPECT_CALL` to verify important behavior.**
+- **Apply `.RetiresOnSaturation()` when multiple discrete calls are expected.**
+- **Design mocks to be thread-safe by confining expectation setting to a single thread and synchronizing any shared state.**
+- **Leverage test sharding and parallel test runners to scale test execution.**
+- **Keep mock lifetimes constrained for automatic verification.**
+- **Control gMock verbosity to avoid excessive performance impact.**
+
+---
+
+For more in-depth information, consult the following documentation pages:
+
+- [Mocking Reference](https://google.github.io/googletest/reference/mocking.html)
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html)
+- [gmock_stress_test.cc source](https://github.com/google/googletest/blob/main/googlemock/test/gmock_stress_test.cc)
+- [GoogleTest Primer](https://google.github.io/googletest/primer.html)
+- [Using Threads with gMock](https://google.github.io/googletest/gmock_cook_book.html#UsingThreads)
+
+---
