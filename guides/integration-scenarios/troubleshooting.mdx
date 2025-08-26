@@ -1,0 +1,271 @@
+---
+title: "Troubleshooting and Common Pitfalls"
+description: "Lists and resolves frequently encountered issues during test authoring and integration, including platform-specific quirks, linking errors, and environment setup challenges."
+---
+
+# Troubleshooting and Common Pitfalls
+
+GoogleTest and GoogleMock are powerful tools for rigorous C++ unit testing, but like any advanced framework, certain issues and pitfalls can slow your progress or cause confusion. This guide addresses the most frequently encountered challenges when authoring tests and integrating GoogleTest/GoogleMock into your development environment. It covers platform-specific quirks, linking errors, setup complications, and common pitfalls related to mocking and expectations.
+
+---
+
+## 1. Workflow Overview
+
+### What This Guide Helps You Achieve
+This guide empowers you to quickly identify and resolve common problems that crop up during GoogleTest and GoogleMock usage—particularly in test authoring and build integration. It acts as your quick reference to overcome blockers, ensuring smoother test creation and reliable mock setup.
+
+### Prerequisites
+- Basic familiarity with GoogleTest and GoogleMock's test creation and mock expectations (see the [GoogleTest Primer](../guides/getting-started/primer-basics) and [gMock for Dummies](../docs/gmock_for_dummies.md)).
+- Your development environment configured with GoogleTest and GoogleMock sources (see [Project Setup & Configuration](../getting-started/configuration-first-use/project-setup)).
+
+### Expected Outcomes
+- Rapid resolution of compilation, linking, and runtime test errors.
+- Improved mock object usage, preventing confusing mock method behavior.
+- Clear understanding of how to control mock strictness and warnings.
+
+### Time Estimate
+Plan for 10–20 minutes for consulting this guide as issues arise.
+
+### Difficulty Level
+Intermediate. Suits developers who have basic usage down and want to avoid or fix common issues.
+
+---
+
+## 2. Common Issues and How to Fix Them
+
+### 2.1 Mock Methods Invoke Real Implementations
+
+**Problem:** When calling a mock method, the real method executes instead.
+
+**Cause:** The method is not declared `virtual` in the base class.
+
+**Solution:**
+- Confirm that the method you want to mock is marked `virtual` in the interface or base class.
+- Use `MOCK_METHOD` only to mock virtual methods.
+
+```cpp
+// Correct example
+class Foo {
+ public:
+  virtual void Bar() = 0;
+};
+
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(void, Bar, (), (override));
+};
+```
+
+### 2.2 Compilation Errors When Using `MOCK_METHOD` with Types Involving Commas
+
+**Problem:** Errors when mocking methods with argument or return types containing commas (like `std::pair` or `std::map`).
+
+**Cause:** Commas confuse macro parsing.
+
+**Solution:**
+- Wrap types with commas inside parentheses.
+- Alternatively, define a type alias and use it within the macro.
+
+```cpp
+class MyMock {
+ public:
+  // Wrap complex types in parentheses
+  MOCK_METHOD((std::pair<int, int>), GetPair, (), ());
+
+  // Or use a type alias
+  using PairInt = std::pair<int, int>;
+  MOCK_METHOD(PairInt, GetPair, ());
+};
+```
+
+### 2.3 Warnings About Overriding Virtual Functions With const Parameters (MSVC Specific)
+
+**Problem:** MSVC warnings such as C4301 or C4373 about parameter qualifiers.
+
+**Cause:** MSVC considers top-level `const` on parameters in method declarations to be insignificant but inconsistent with method defintions.
+
+**Solution:**
+- Remove top-level `const` from parameter declarations in both base and mock classes.
+- Retain `const` for pointer or reference parameters to keep semantic correctness.
+
+### 2.4 "Uninteresting Function Call" Warnings
+
+**Problem:** You see warnings about uninteresting (unexpected) mock method calls.
+
+**Cause:** Mock methods called without the associated `EXPECT_CALL` expectation.
+
+**Solution:**
+- Use `NiceMock` to suppress these warnings when you don't care about certain calls.
+- Explicitly add `EXPECT_CALL(...).Times(AnyNumber())` for methods where you want to silence warnings.
+- Avoid adding extraneous `EXPECT_CALL` just to silence warnings, as this makes tests harder to maintain.
+
+Example of using `NiceMock`:
+
+```cpp
+using ::testing::NiceMock;
+
+NiceMock<MockFoo> nice_foo;
+EXPECT_CALL(nice_foo, DoThis());
+...
+```
+
+### 2.5 Mock Objects Aren't Verified Before Program Exit
+
+**Problem:** Your mocks are leaked or their expectations are never verified, causing no failure when they should.
+
+**Cause:** Mocks created on the heap aren't deleted; GoogleMock verifies mock expectations only on mock destruction.
+
+**Solution:**
+- Enable GoogleMock's leak detection with the flag `--gmock_catch_leaked_mocks=1` (enabled by default).
+- Delete mock objects manually or transfer ownership properly.
+- Use `Mock::AllowLeak(mock_ptr)` if you deliberately want to leak a mock and suppress verification.
+- Optionally, call `Mock::VerifyAndClearExpectations(&mock_obj)` to verify explicitly before destruction.
+
+```cpp
+MockFoo* foo = new MockFoo;
+EXPECT_CALL(*foo, DoSomething());
+// ... test code ...
+Mock::VerifyAndClearExpectations(foo);
+delete foo;
+```
+
+### 2.6 Failure Messages Are Unclear or Tests Segfault After `ASSERT_*`
+
+**Problem:** `ASSERT_*` failures in helper functions don't stop tests, leading to use of invalid data and crashes.
+
+**Cause:** `ASSERT_*` aborts only the current function, not the entire test.
+
+**Solution:**
+- Use `ASSERT_NO_FATAL_FAILURE(helper_function());` to ensure failures propagate.
+- Alternatively, check `HasFatalFailure()` after calls and return early.
+
+Example:
+
+```cpp
+void Helper() {
+  ASSERT_EQ(1, 2);  // aborts only this function
+  // rest of Helper code not executed
+}
+
+TEST(MyTest, Foo) {
+  Helper();
+  if (HasFatalFailure()) return;  // Abort on helper failure
+  // safe to continue
+}
+```
+
+### 2.7 Mock Method Called Too Many Times or Too Few Times
+
+**Problem:** Test fails with message about mock method call count mismatch.
+
+**Cause:** Specified cardinality (e.g., `Times(2)`) doesn't match actual calls.
+
+**Solution:**
+- Double-check the expected call count in `EXPECT_CALL`.
+- Use `.RetiresOnSaturation()` with expectations that should deactivate once satisfied to avoid sticky expectations.
+- Use sequences (`InSequence`) to specify call order and avoid mismatches.
+
+### 2.8 Linker Errors on GoogleTest Symbols
+
+**Problem:** Undefined symbols or unresolved externals when linking test binaries.
+
+**Cause:** Improper linking of GoogleTest and GoogleMock libraries or source files.
+
+**Solution:**
+- Make sure to link both GoogleTest and GoogleMock libraries or sources.
+- When using CMake, add `gtest` and `gmock` targets or compile their source files.
+- Verify that your compiler supports at least C++17.
+- Confirm that macros like `GTEST_HAS_PTHREAD` are configured correctly for your platform.
+
+### 2.9 Platform-Specific Environment Setup Issues
+
+**Problem:** Build or run failures related to missing pthreads, threading features, or compiler incompatibility.
+
+**Cause:** Environment or toolchain not meeting GoogleTest requirements.
+
+**Solution:**
+- Confirm your compiler supports C++17.
+- On Windows, ensure correct platform detection macros and threading libraries.
+- Consult the [System Requirements guide](../getting-started/prerequisites-installation/system-requirements) for details.
+
+### 2.10 Problems With Mocking Move-Only Types in Methods
+
+**Problem:** Compilation errors or unexpected runtime behavior when mocking methods that accept or return move-only types like `std::unique_ptr`.
+
+**Solution:**
+- Use standard `MOCK_METHOD` syntax without extra qualifiers.
+- Use lambdas or custom callable objects for behaviors needing move semantics.
+- Avoid using actions that require copying non-copyable objects (e.g., `DoAll` may not support move-only types).
+- For return values, avoid `Return(std::move(...))` with `WillRepeatedly`; instead prefer a lambda factory.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, MakeBuzz("hello"))
+    .WillOnce(Return(std::make_unique<Buzz>()));
+
+EXPECT_CALL(mock, MakeBuzz(_))
+    .WillRepeatedly([](StringPiece) { return std::make_unique<Buzz>(); });
+```
+
+---
+
+## 3. Best Practices and Tips
+
+- **Use `ON_CALL` Sparingly for Default Behavior:** Define default mock method behavior in your test fixture or constructor with `ON_CALL` to minimize verbosity and brittleness.
+- **Only Use `EXPECT_CALL` When Verifying Calls:** Set expectations for calls you actually want to verify.
+- **Employ `NiceMock` to Suppress Uninteresting Call Noise:** When you don’t want warnings on unexpected calls.
+- **Utilize `RetiresOnSaturation()` to Make Expectations Non-Sticky:** Prevents an expectation from matching further calls after saturation.
+- **Leverage Sequences (`InSequence`) for Ordered Calls:** When call order matters, sequences make expectations less fragile and clearer.
+- **Avoid Over-Specifying Mock Arguments:** Use wildcards (`_`) and matchers to reduce unnecessary test failures.
+- **Use `SCOPED_TRACE` to Debug Complex Call Chains:** When an assertion fails inside a helper, `SCOPED_TRACE` supplies useful context traces.
+
+---
+
+## 4. Troubleshooting Checklist
+
+| Symptom                                      | Suggested Action                                 |
+|----------------------------------------------|-------------------------------------------------|
+| Mock methods call real implementations        | Check method `virtual` keyword in base class     |
+| Macro argument parsing errors with commas     | Wrap types in parentheses or use type aliases    |
+| MSVC compiler warnings about const parameters | Remove top-level `const` from parameters         |
+| Excessive `Uninteresting Function Call` warnings | Use `NiceMock` or add catch-all `EXPECT_CALL`    |
+| No verification on mock destruction            | Ensure mocks are deleted or use `VerifyAndClear` |
+| Runtime crash after `ASSERT_*` failure in subroutines | Use `ASSERT_NO_FATAL_FAILURE` or check `HasFatalFailure()` |
+| Cardinality mismatch failures                  | Use `.RetiresOnSaturation()` or sequences         |
+| Linker errors on GoogleTest symbols            | Confirm linking of GoogleTest and GoogleMock      |
+| Environment setup/build fails                   | Validate system requirements and compiler flags  |
+| Move-only types mock compilation fail          | Use lambdas for actions; avoid copying non-copyable types |
+
+---
+
+## 5. Additional Resources
+
+- [GoogleTest Primer: Authoring Your First Test](../guides/getting-started/primer-basics)
+- [gMock Cookbook](../docs/gmock_cook_book.md)—recipes for advanced mocking and test patterns
+- [Mocking Reference](../docs/reference/mocking.md)—detailed API reference on mock objects
+- [Troubleshooting Common Issues](../getting-started/troubleshooting-help/common-issues)
+- [System Requirements](../getting-started/prerequisites-installation/system-requirements)
+- [Project Setup & Configuration](../getting-started/configuration-first-use/project-setup)
+
+---
+
+## 6. Summary
+
+This guide has covered frequent challenges encountered when authoring GoogleTest and GoogleMock-based tests, including method call redirection, macro quirks, mock call warnings, verification issues, and environment pitfalls. By following the resolution steps and best practices outlined here, you can build robust, maintainable tests and streamline your GoogleTest integration.
+
+<Tip>
+For detailed debugging of mock method call flows, increase verbosity with the flag `--gmock_verbose=info` to gain insight into mock function invocation and expectation matching.
+</Tip>
+
+<Warning>
+Beware that expectations are "sticky" by default in gMock; use `.RetiresOnSaturation()` or sequences to avoid unexpected test failures when methods are called more times than expected.
+</Warning>
+
+<Note>
+Pay close attention to compiler messages and platform-specific requirements; these often provide the best clues to addressing setup and linking errors.
+</Note>
+
+---
+
+<span style="font-style: italic;">This concludes the Troubleshooting and Common Pitfalls guide for the GoogleTest framework.</span>

@@ -1,0 +1,283 @@
+---
+title: "Troubleshooting Actions and Matchers"
+description: "Resolves common challenges with advanced actions (such as InvokeArgument and custom actions) and complex matcher definitions, including template errors and compiler messages."
+---
+
+# Troubleshooting Actions and Matchers
+
+This page addresses common challenges and questions related to writing and troubleshooting **advanced actions** (such as `InvokeArgument` and custom actions) and **complex matcher definitions** in GoogleMock. It includes help with interpreting template errors, compiler messages, and understanding the correct usage patterns for `ON_CALL` and `EXPECT_CALL` macros, matcher syntax, and action clauses.
+
+---
+
+## 1. Understanding ON_CALL and EXPECT_CALL Syntax
+
+GoogleMock provides two primary macros for controlling the behavior of mock methods:
+
+- `ON_CALL(mock_object, Method(matchers))`: Defines the **default action** for a method when called with arguments that match the given matchers. It does **not** set an expectation that the method will be called.
+- `EXPECT_CALL(mock_object, Method(matchers))`: Sets an **expectation** that the method will be called with matching arguments, optionally specifying how many times, in which order, and with what side effects.
+
+Both support a rich progressive clause syntax, including `.With()`, `.Times()`, `.InSequence()`, `.After()`, `.WillOnce()`, `.WillRepeatedly()`, and `.RetiresOnSaturation()`.
+
+<AccordionGroup title="Common Syntax Errors and Their Causes">
+<Accordion title="Error: '.With() cannot appear more than once'">
+Repeated `.With()` calls on the same `ON_CALL` or `EXPECT_CALL` are disallowed. Ensure `.With()` is specified at most once and comes first in the clause chain.
+</Accordion>
+<Accordion title="Error: '.WillByDefault() must appear exactly once in an ON_CALL()'">
+Every `ON_CALL` statement must specify exactly one `.WillByDefault()` clause. Omitting this clause or adding multiple will cause compilation or runtime errors.
+</Accordion>
+<Accordion title="Error: Incorrect order of clauses">
+Clause order matters. For example, `.With()` must be the very first in an `EXPECT_CALL` or `ON_CALL`, `.Times()` must precede `.InSequence()`, `.WillOnce()` must appear before `.WillRepeatedly()`, and `.RetiresOnSaturation()` must be last if used.
+</Accordion>
+</AccordionGroup>
+
+<Info>
+Always check and follow the documented clause order to avoid confusing compiler or runtime failures.
+</Info>
+
+---
+
+## 2. Troubleshooting Common Action Issues
+
+### 2.1 Using `InvokeArgument<N>`
+
+`InvokeArgument<N>(args...)` invokes the N-th (0-based) argument of the mock function, which should be a callable (function, functor, lambda, callback), with the provided arguments.
+
+#### Tips:
+- Wrap arguments passed by reference in `std::ref()` to ensure the reference semantics are preserved.
+- Ensure that the argument at position N is actually callable; otherwise, you will get compilation errors.
+
+Example:
+```cpp
+EXPECT_CALL(mock, DoThis(_, _))
+    .WillOnce(InvokeArgument<1>(5, std::ref(helper)));
+```
+
+### 2.2 Returning Move-Only Types
+
+- You can mock methods with move-only return types (like `std::unique_ptr`) using `MOCK_METHOD` normally.
+- When returning move-only types, prefer using lambdas or callables with `.WillOnce()` or `.WillRepeatedly()` to generate new objects for each call rather than `Return(std::move(...))`, which is valid for one call only.
+
+Example:
+```cpp
+EXPECT_CALL(mock, MakeBuzz("hello"))
+    .WillOnce([](StringPiece text) {
+      return std::make_unique<Buzz>(AccessLevel::kInternal);
+    });
+```
+
+### 2.3 Combining Actions
+
+Use `DoAll()` to perform multiple actions where only the last action's return value is used.
+
+Example:
+```cpp
+EXPECT_CALL(mock, SomeMethod(_))
+    .WillOnce(DoAll(SetArgPointee<0>(5), Return(true)));
+```
+
+#### Common Pitfall:
+- `SetArgPointee()` does not specify the return value; you must chain it with a `Return()` action using `DoAll()`.
+
+---
+
+## 3. Common Matcher Troubles and Suggestions
+
+### 3.1 Matching All Arguments as a Whole
+
+The `.With()` clause allows applying a matcher against all arguments as tuple, e.g., enforcing an invariant across multiple parameters:
+
+```cpp
+EXPECT_CALL(mock, Method(_, _))
+    .With(Lt());  // for example, first argument < second argument
+```
+
+If you want to match multiple selected arguments, use `Args<...>(matcher)`.
+
+### 3.2 Dealing with Overloaded Methods
+
+- Ambiguous overloads require specifying the argument matchers carefully.
+- Use `Const(mock)` to disambiguate const and non-const overloads.
+- You can use `TypedEq<T>` or `Matcher<T>()` to specify exact matcher types.
+
+Example:
+```cpp
+EXPECT_CALL(mock, Overloaded(TypedEq<int>(5))).WillOnce(Return(9));
+EXPECT_CALL(Const(mock), Overloaded(5)).WillOnce(Return(11));
+```
+
+### 3.3 Matching Non-Copyable or Complex Arguments
+
+- For complex or non-copyable arguments, use matchers like `Truly()`, or pass references with `std::ref()` inside matchers.
+- To check specific object members, use `Field(&Class::member, matcher)` or `Property(&Class::method, matcher)`.
+
+### 3.4 Having Too Many or Too Few Actions
+
+- If the number of `.WillOnce()` clauses does not match the expected call cardinality (declared with `.Times()`), GoogleMock will warn.
+- Using `.RetiresOnSaturation()` can help to avoid over-saturation errors by retiring expectations after they have been fulfilled.
+
+---
+
+## 4. Diagnosing Uninteresting and Unexpected Calls
+
+- **Uninteresting calls**: Calls to mock methods with *no* matching `EXPECT_CALL` set up. By default, they produce warnings unless suppressed by using `NiceMock` or setting verbosity levels.
+- **Unexpected calls**: Calls that do not match any *active* expectation; always treated as errors.
+
+### How to suppress uninteresting warnings?
+
+- Use `NiceMock<MockClass>` to suppress the warnings.
+- Add a catch-all `EXPECT_CALL(mock, Method(_)).Times(AnyNumber());` to declare that any call is acceptable.
+- Adjust `--gmock_verbose=error` to suppress warnings globally.
+
+### What do warnings/errors contain?
+
+- Function name and arguments values.
+- Source locations of the matching expectations.
+- State of each expectation (e.g., call count, active/retired).
+- Stack traces if verbosity is `info`.
+
+---
+
+## 5. Verifying and Resetting Mocks Explicitly
+
+- By default, mock expectations are verified at mock object destruction.
+- You can proactively verify and clear expectations (and optionally clear default actions) using:
+
+```cpp
+Mock::VerifyAndClearExpectations(&mock_obj); // Verifies expectations only
+Mock::VerifyAndClear(&mock_obj); // Verifies expectations and clears default actions
+```
+
+- Avoid setting expectations after verification as that leads to undefined behavior.
+- `Mock::AllowLeak(&mock_obj);` disables leak detection and verification for the given mock.
+
+---
+
+## 6. Advanced Troubleshooting Tips
+
+### 6.1 Order of Specification
+
+Expectations specified later override earlier ones. This enables setting default expectations early and more specific ones later.
+
+### 6.2 Sequences and Partial Orders
+
+- Use `InSequence` or `Sequence` objects combined with `.InSequence()` and `.After()` clauses to enforce call ordering.
+- Advanced ordering can be modeled as DAGs using multiple sequences or `After()` clauses.
+
+### 6.3 Handling Expired Mocks in Actions
+
+Be cautious when deleting mocks from within actions. You may use `Delete` actions safely in `WillOnce` clauses to delete mocks within their expected lifecycle.
+
+### 6.4 Verbosity and Logging
+
+- Use `--gmock_verbose=info` to get detailed logs of mock invocation, expectations matching, warnings, and errors.
+- `warning` mode is the default, showing warnings and errors, but not detailed stacks.
+- `error` level suppresses warnings.
+
+---
+
+## 7. Working Around Common Compiler Issues
+
+### MSVC Const Parameter Warning
+
+- MSVC may emit warnings about mocked method parameters with `const` qualifier.
+- Since top-level `const` on parameters is ignored by C++ function signatures, remove `const` on parameters in mock declarations to suppress warnings.
+
+### Variadic Functions
+
+- gMock does **not** support mocking variadic functions directly. Consider wrapping variadic behavior in overloads or interfaces to mock.
+
+### Overload Ambiguities
+
+- When mocking overloaded methods, always specify argument matchers explicitly to prevent ambiguous invocation errors with `ON_CALL` and `EXPECT_CALL`.
+
+---
+
+## 8. Practical Examples
+
+### Setting a Default Action with ON_CALL
+
+```cpp
+ON_CALL(mock_obj, GetSize())
+    .WillByDefault(Return(42));
+```
+
+This configures the default return value for calls to `GetSize()` if no expectation matches.
+
+### Setting Expectations with EXPECT_CALL
+
+```cpp
+EXPECT_CALL(mock_obj, ProcessElement(_, _))
+    .Times(3)
+    .WillOnce(Return(true))
+    .WillRepeatedly(Return(false));
+```
+
+Sets an expectation for three calls, returning `true` once and `false` afterward.
+
+### Defining Multiple Actions
+
+```cpp
+EXPECT_CALL(mock_obj, Mutate(_, _))
+    .WillOnce(DoAll(SetArgPointee<1>(7), Return(true)));
+```
+
+Sets an output argument and specifies a return value simultaneously.
+
+### Invoking a Callback Argument
+
+```cpp
+EXPECT_CALL(mock_obj, RunCallback(_))
+    .WillOnce(InvokeArgument<0>(5));
+```
+
+Triggers the callable passed as the first argument with parameter `5`.
+
+---
+
+## 9. Where to Get More Help
+
+- Refer to the [GoogleMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) for practical usage recipes.
+- Use `--gmock_verbose=info` to gain detailed runtime insights.
+- For in-depth API and feature details, investigate the [Mocking Reference](https://google.github.io/googletest/reference/mocking.html) and [Actions Reference](https://google.github.io/googletest/reference/actions.html).
+- Review related documentation on [Matchers and Expressive Assertions](https://google.github.io/googletest/concepts/data-models-parameterization/matchers-and-expressive-assertions.html).
+
+---
+
+## 10. Summary
+
+- Always specify `.WillByDefault()` in `ON_CALL` clauses.
+- Use `.Times()` judiciously in `EXPECT_CALL`; if omitted, cardinalities may be inferred.
+- Be aware of clause order and repetition rules when chaining expectation modifiers.
+- Use `NiceMock`, `NaggyMock`, or `StrictMock` appropriately to control mock behavior regarding uninteresting calls.
+- Leverage sequences and `.After()` to enforce call order.
+- Use `Invoke`, `InvokeArgument`, and custom actions for complex mock behaviors.
+- Use verbosity modes to debug failing or unexpected behaviors.
+
+---
+
+For a complete workflow and background, see the related pages on:
+- [Setting Call Expectations: EXPECT_CALL and ON_CALL](../../api-reference/core-mocking-apis/call-expectations.md)
+- [Argument Matchers](../../api-reference/matchers-and-actions/argument-matchers.md)
+- [Actions and Return Behaviors](../../api-reference/matchers-and-actions/mock-actions.md)
+- [Mocking Reference](../../docs/reference/mocking.md)
+- [gMock Cookbook](../../docs/gmock_cook_book.md)
+
+---
+
+_This page focuses exclusively on troubleshooting advanced actions and complex matcher definitions within GoogleMock's mocking syntax and semantics._
+
+---
+
+# Related Article Watchouts
+
+- Always check whether method mocking errors relate to macro misuse, incorrect matcher usage, or missing `.WillByDefault()` in `ON_CALL`.
+- Beware of unexpected warnings when default actions or expectations are missing; use `NiceMock` or explicit catch-all expectations where appropriate.
+
+<Tip>
+When debugging confusing matcher or action errors, rerun tests with `--gmock_verbose=info` for detailed diagnostic output showing matching attempts, active expectations, and full call traces.
+</Tip>
+
+<Tip>
+Remember: expectations must be set *before* calling the mock method to avoid undefined behavior.
+</Tip>
+
