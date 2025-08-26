@@ -1,0 +1,201 @@
+---
+title: "What are death tests and parameterized tests, and how do I use them?"
+description: "Explains advanced test types—death tests for error-handling validation and parameterized tests for broad coverage. Provides usage tips and caveats for stability and reliability."
+---
+
+# What are death tests and parameterized tests, and how do I use them?
+
+This page demystifies the advanced test types in GoogleTest that validate error-handling and enhance test coverage. It explains **death tests**, which verify program termination behavior under faulty conditions, and **parameterized tests**, which automate running the same test logic over multiple input values. You'll find usage tips, practical examples, and crucial caveats to ensure your tests remain stable and reliable.
+
+---
+
+## Death Tests: Validating Error-Handling by Testing Program Termination
+
+### What Are Death Tests?
+
+Death tests are specialized tests designed to verify that running a specific piece of code causes the program to terminate, either due to assertion failures or other fatal errors.
+
+This is invaluable when testing error-handling code that must crash the program when critical invariants are violated, preventing further damage or undefined behavior.
+
+### How to Write a Death Test
+
+GoogleTest provides assertion macros specifically for death tests:
+
+- `ASSERT_DEATH(statement, matcher)`
+- `EXPECT_DEATH(statement, matcher)`
+- `ASSERT_EXIT(statement, predicate, matcher)`
+- `EXPECT_EXIT(statement, predicate, matcher)`
+- `EXPECT_DEBUG_DEATH(statement, matcher)` (executes only in debug builds)
+
+Here is a typical usage example:
+
+```cpp
+TEST(MyDeathTest, FailsOnBadInput) {
+  ASSERT_DEATH({
+    int n = -1;
+    Foo(n); // Foo should abort if n is negative
+  }, "negative input");
+}
+
+TEST(MyExitTest, ExitsWithCodeZero) {
+  EXPECT_EXIT(NormalExitFunction(), ::testing::ExitedWithCode(0), "Success");
+}
+
+TEST(MySignalTest, TerminatesWithSIGKILL) {
+  EXPECT_EXIT(KillProcess(), ::testing::KilledBySignal(SIGKILL), ".*");
+}
+```
+
+- The `matcher` argument checks for a regular expression match against the program's `stderr` output.
+- The `predicate` in `EXPECT_EXIT` and `ASSERT_EXIT` checks the exit status code or signal that caused termination.
+
+### Death Test Styles and Thread Safety
+
+GoogleTest supports two death test styles controlled by the flag `--gtest_death_test_style`:
+
+- **fast** (default): the child process executes the test statement directly after forking.
+- **threadsafe**: the child process re-execs the entire test binary to run only the specific death test.
+
+The "threadsafe" mode avoids issues arising from testing in multithreaded contexts but is slower due to re-execution.
+
+Use the following to set the style programmatically:
+
+```cpp
+GTEST_FLAG_SET(death_test_style, "threadsafe");
+```
+
+### Important Usage Notes and Caveats
+
+- Name your test suite with a suffix `DeathTest` to ensure they run early and minimize thread interference.
+
+- The statement passed to a death test must not use `return` or exceptions; doing so causes test failure.
+
+- Side effects inside death tests are not observable in the parent process, due to testing in a child process.
+
+- A warning is printed if multiple threads exist when running a death test, as forking in multithreaded programs is unsafe.
+
+- Avoid placing multiple death assertions on the same source line; it leads to compilation errors.
+
+- When your death test contains mocks that expect a specific exit code, allow mock leaks with `Mock::AllowLeak()` to prevent false failures.
+
+
+---
+
+## Parameterized Tests: Running Broad Test Coverage with Different Inputs
+
+### What Are Parameterized Tests?
+
+Parameterized tests automate running the same test logic multiple times with different input values. This pattern enables data-driven testing without duplicating code, increasing coverage and reducing maintenance overhead.
+
+Value-parameterized tests work with arbitrary parameter types and use GoogleTest fixtures with parameter support.
+
+### How to Write Parameterized Tests
+
+1. Define a fixture class inheriting from `testing::TestWithParam<T>`, where `T` is your parameter type.
+
+2. Use the `TEST_P` macro to define your parameterized test, accessing the parameter via `GetParam()`.
+
+3. Instantiate the test suite with the desired input values using `INSTANTIATE_TEST_SUITE_P` and parameter generators.
+
+Example:
+
+```cpp
+class FooTest : public testing::TestWithParam<int> {
+  // Optional: setup/teardown and members
+};
+
+TEST_P(FooTest, HandlesValues) {
+  int value = GetParam();
+  EXPECT_TRUE(IsValid(value));
+}
+
+INSTANTIATE_TEST_SUITE_P(MyValues, FooTest, testing::Values(1, 2, 3, 5, 8));
+```
+
+### Parameter Generators
+
+GoogleTest provides built-in generators to produce input sequences:
+
+- `Values(v1, v2, ..., vN)`: enumerates explicit values.
+- `ValuesIn(container or iterator range)`: enumerates values from STL containers or arrays.
+- `Range(begin, end[, step])`: enumerates values in half-open range `[begin, end)`.
+- `Bool()`: enumerates `false` and `true`.
+- `Combine(g1, g2, ..., gN)`: cartesian product of multiple generators.
+- `ConvertGenerator<T>(gen)`: converts generated types to `T`.
+
+Example using combination:
+
+```cpp
+INSTANTIATE_TEST_SUITE_P(
+    CombinedTests, FooTest,
+    testing::Combine(testing::Values(1, 2), testing::Bool()));
+```
+
+### Naming Parameterized Tests
+
+The first argument to `INSTANTIATE_TEST_SUITE_P` assigns a prefix to generated test names, helping organize and distinguish them. The optional last argument can specify a custom function to generate suffixes based on parameters.
+
+### Additional Notes
+
+- For user-defined types, ensure proper print support so test parameter names are descriptive.
+- If you do not instantiate a parameterized test suite, GoogleTest will report failures by default, unless suppressed with `GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST`.
+
+---
+
+## Best Practices and Tips for Stable Death and Parameterized Tests
+
+- **Death Tests:**
+  - Keep the death test code simple and side-effect free.
+  - Avoid global state changes inside death tests.
+  - Use `SCOPED_TRACE` to add contextual information if the death test contains complex logic.
+  - For expected mock leaks in death tests, explicitly allow them to avoid false alarms.
+
+- **Parameterized Tests:**
+  - Use parameter generators and `INSTANTIATE_TEST_SUITE_P` to cover broad input spaces succinctly.
+  - Construct clear parameter names for test reporting.
+  - Avoid overly large Cartesian products that cause combinatorial explosion and long test times.
+  - Use `GTEST_SKIP()` inside parameterized tests when some parameters are not applicable.
+
+- **General:**
+  - Use `ASSERT_*` macro variants to enforce preconditions within the test body that, if failed, should abort the current test.
+  - Use `EXPECT_*` macros when you want the test to continue collecting all failures.
+  - Combine death and parameterized tests cautiously; naming and management complexity increases.
+
+## Troubleshooting
+
+### Death Test Failures
+
+- **Test does not die:** Ensure the code under test actually causes termination. Check for side effects that might prevent the termination.
+- **Error message mismatch:** The `matcher` must accurately reflect the output on stderr. Adjust regex or matcher syntax accordingly.
+- **Multiple threads warning:** Either run tests single-threaded or switch to "threadsafe" death test style.
+- **Exception thrown from death test:** Death tests treat exceptions as failures — ensure code terminates without throwing.
+
+### Parameterized Test Issues
+
+- **No tests instantiated:** Confirm that your `INSTANTIATE_TEST_SUITE_P` call is present and correct.
+- **Test names unreadable:** Define a custom name generator or ensure your parameter types support `PrintToString`.
+- **Slow tests due to excessive parameters:** Reduce parameter combinations or split tests logically.
+
+---
+
+## See Also
+
+- [Death Assertions](reference/assertions.md#death) — detailed macro usage for death tests.
+- [Value-Parameterized Tests](docs/advanced.md#value-parameterized-tests) — comprehensive guide on parameterized testing.
+- [Parameterized and Type-Parameterized Tests](guides/advanced-testing/parameterized-and-type-parameterized-tests) — best practices and use cases.
+- [Death and Exception Testing](guides/advanced-testing/death-tests-and-exception-testing) — deeper concepts and troubleshooting.
+- [SCOPED_TRACE](reference/testing.md#SCOPED_TRACE) — enhance tracing in tests.
+
+---
+
+<Tip>
+Death and parameterized tests let you write robust, expressive tests for critical failure paths and broad inputs with minimal boilerplate. Use them wisely to make your test suites powerful and maintainable.
+</Tip>
+
+<Note>
+Regular expression syntax for death test matchers varies by platform; familiarize yourself with supported syntax to avoid subtle mismatches.
+</Note>
+
+<Warning>
+Avoid returning or throwing exceptions inside death test statements; GoogleTest treats these as unexpected and will fail the test.
+</Warning>
