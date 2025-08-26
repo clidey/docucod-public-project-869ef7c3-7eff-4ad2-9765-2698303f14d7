@@ -1,0 +1,242 @@
+---
+title: "Actions"
+description: "Overview of action macros and templates used to specify expected behaviors and responses from mock objects, including variadic and advanced user-defined actions."
+---
+
+# Actions Reference
+
+Actions in GoogleMock define the behavior that a mock function should perform when called. They are the core means by which users specify what their mocked methods do—returning values, modifying arguments, throwing exceptions, or invoking custom code.
+
+All built-in actions reside in the `::testing` namespace.
+
+## Returning a Value
+
+GoogleMock includes a collection of standard actions to return values from mock methods. Depending on your use case, you can return raw values, references, pointers, or rotate through a list of values.
+
+| Action                     | Description                                                                                                                             |
+|----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| `Return()`                 | Return from a `void` mock function (useful to explicitly specify no return).                                                            |
+| `Return(value)`            | Return `value`. The `value` is converted to the return type at the time the expectation is set, not at call time.                       |
+| `ReturnArg<N>()`           | Return the *N*-th (0-based) argument of the mock function.                                                                              |
+| `ReturnNew<T>(a1, ..., ak)`| Return `new T(a1, ..., ak)`; a *new* object is created on every call.                                                                    |
+| `ReturnNull()`             | Return a null pointer.                                                                                                                   |
+| `ReturnPointee(ptr)`       | Return the value pointed to by `ptr`. Useful for returning a live value rather than a copy.                                              |
+| `ReturnRef(variable)`      | Return a reference to `variable`.                                                                                                       |
+| `ReturnRefOfCopy(value)`   | Return a reference to a *copy* of `value`; the copy's lifetime matches the action's lifetime.                                           |
+| `ReturnRoundRobin({a1,...})` | Cycle through and return each value in the list per call, restarting at the beginning after the last.                                   |
+
+### Practical Tip
+
+For returning live values whose state may change during test execution, prefer `ReturnRef()` or `ReturnPointee()` over `Return()`. Avoid using `Return(std::ref(x))` as it returns a copy at set time, which may cause unexpected values.
+
+## Side Effects
+
+Actions allow you to mimic functions that produce side effects such as modifying arguments, saving arguments, deleting pointers, or setting `errno`.
+
+| Action                   | Description                                                            |
+|--------------------------|------------------------------------------------------------------------|
+| `Assign(&var, value)`    | Assign `value` to variable `var`.                                     |
+| `DeleteArg<N>()`         | Delete the *N*-th (0-based) argument, which must be a pointer.        |
+| `SaveArg<N>(pointer)`    | Copy-assign the *N*-th argument into `*pointer`.                      |
+| `SaveArgByMove<N>(pointer)` | Move-assign the *N*-th argument into `*pointer`.                      |
+| `SaveArgPointee<N>(pointer)` | Copy the value pointed to by the *N*-th argument into `*pointer`.     |
+| `SetArgReferee<N>(value)` | Assign `value` to the variable referenced by the *N*-th argument.      |
+| `SetArgPointee<N>(value)` | Assign `value` to the variable pointed to by the *N*-th argument.      |
+| `SetArgumentPointee<N>(value)` | Alias for `SetArgPointee<N>(value)`, deprecated and removed in v1.7.0. |
+| `SetArrayArgument<N>(first, last)` | Copy elements from `[first, last)` into the array pointed to by the *N*-th argument (pointer or iterator). Does not take ownership. |
+| `SetErrnoAndReturn(error, value)` | Sets `errno` to `error` and returns `value`.                         |
+| `Throw(exception)`       | Throws the given exception object (must be copyable). Available since v1.1.0. |
+
+### Best Practice
+
+Use actions that save or modify arguments to closely mimic function side effects. For instance, use `SetArgPointee` for output parameters and `DeleteArg` to ensure your mock cleans up resources.
+
+## Using a Function, Functor, or Lambda as an Action
+
+If built-in actions don't fit your needs, you can specify any callable as an action that will be invoked when the mock method is called. This could be a free function, a lambda, or a functor.
+
+| Action                                         | Description                                                                                              |
+|-----------------------------------------------|----------------------------------------------------------------------------------------------------------|
+| `f`                                           | Invoke callable `f` with the mock function's arguments.                                                   |
+| `Invoke(f)`                                   | Same as above. `f` can be a global or static function or a functor.                                      |
+| `Invoke(object_pointer, &class::method)`      | Invoke the specified method on `object_pointer` with the mock’s arguments.                               |
+| `InvokeWithoutArgs(f)`                         | Invoke callable `f` with *no* arguments. Useful for calling functions that take zero parameters.         |
+| `InvokeWithoutArgs(object_pointer, &class::method)` | Invoke method with zero arguments on an object.                                                            |
+| `InvokeArgument<N>(arg1, arg2, ..., argk)`    | Calls the *N*-th argument (function or functor) passed to the mock method with specified parameters.     |
+
+#### Notes on `Invoke*`
+
+- Unused parameters in callables can be marked as `Unused` for cleaner code.
+  
+- `Invoke` and `InvokeWithoutArgs` take ownership of their callables; ensure these are permanent objects.
+
+- When passing reference parameters to `InvokeArgument`, wrap them with `std::ref()` to avoid copying.
+
+```cpp
+using ::testing::Invoke;
+using ::testing::Unused;
+
+// A callable ignoring first arg
+int Distance(Unused, double x, double y) {
+  return sqrt(x*x + y*y);
+}
+
+EXPECT_CALL(mock, Foo("Hi", _, _)).WillOnce(Invoke(Distance));
+```
+
+## Default Action
+
+GoogleMock provides a special action:
+
+| Action        | Description                                                    |
+|---------------|----------------------------------------------------------------|
+| `DoDefault()` | Invoke the default action set by `ON_CALL()` or the built-in one. |
+
+<Note>
+`DoDefault()` cannot be used within composite actions due to technical limitations; doing so will cause a run-time error.
+</Note>
+
+## Composite Actions
+
+Composite actions let you combine multiple sub-actions into more complex behaviors.
+
+| Action                         | Description                                                                                  |
+|-------------------------------|----------------------------------------------------------------------------------------------|
+| `DoAll(a1, a2, ..., an)`       | Perform all actions `a1` to `an` sequentially, returning the result of `an`. The first `n-1` must return void and take readonly arguments. |
+| `IgnoreResult(a)`              | Perform action `a` and discard its return value (useful if `a` returns non-void but your mock method returns void). |
+| `WithArg<N>(a)`                | Pass the *N*-th argument of the mock method as sole argument to action `a`.                   |
+| `WithArgs<N1, N2, ..., Nk>(a)` | Pass selected arguments of the mock method to action `a` in the specified order.              |
+| `WithoutArgs(a)`               | Perform action `a` with no arguments.                                                        |
+
+### Example
+
+```cpp
+EXPECT_CALL(mock, Foo(_, _, _))
+    .WillOnce(DoAll(SetArgPointee<1>(true), Return(42)));
+```
+
+Here, the second argument pointed to by the parameter is set to `true`, then the method returns `42`.
+
+## Defining Custom Actions
+
+GoogleMock supports defining your own actions using macros for convenience, especially when the built-in ones aren't enough.
+
+| Macro                                    | Description                                                            |
+|------------------------------------------|------------------------------------------------------------------------|
+| `ACTION(Name) { statements; }`            | Defines an action `Name()` where `statements` return the result. Access mock method arguments as `arg0`, `arg1`, etc.         |
+| `ACTION_P(Name, param) { statements; }`     | Defines a parameterized action `Name(param)` with the given statements. Parameters accessible as `param`, arguments as `argN`. |
+| `ACTION_Pk(Name, p1, ..., pk) { statements; }` | Defines an action with multiple parameters.                                                           |
+
+The `ACTION*` macros can only be declared at namespace scope (not inside a class or function).
+
+### Example
+
+```cpp
+ACTION(IncrementArg1) { return ++(*arg1); }
+
+EXPECT_CALL(mock, Foo(_))
+    .WillOnce(IncrementArg1());
+```
+
+The above action returns the value of the second parameter incremented.
+
+## Practical Recommendations
+
+- Use built-in actions where possible for simplicity and maintainability.
+- Use `DoAll()` to combine multiple actions, ensuring only the last returns a value.
+- Use `Invoke()` and related actions to encapsulate complex behavior and delegation.
+- Parameterize custom actions with `ACTION_P*` macros to reuse generic logic.
+
+## Troubleshooting and Common Pitfalls
+
+<Tip>
+When using `Return(value)`, the value is captured at expectation setup time, not per invocation. For fresh results each time, use `ReturnPointee(&value)` or lambdas via `Invoke()`.
+</Tip>
+
+<Warning>
+Avoid using `DoDefault()` inside composite actions—it results in a runtime error.
+</Warning>
+
+<Info>
+If a callable invoked via `Invoke*` expects reference arguments, wrap them with `std::ref()` to ensure references to originals are passed instead of copies.
+</Info>
+
+---
+
+<AccordionGroup title="Code Examples and Patterns">
+
+<Accordion title="Returning different values sequentially">
+```cpp
+EXPECT_CALL(mock, Method())
+    .WillOnce(Return(1))
+    .WillOnce(Return(2))
+    .WillRepeatedly(Return(3));
+```
+The mock method will return 1 first call, 2 second call, then 3 on all subsequent calls.
+</Accordion>
+
+<Accordion title="Combining actions with side effects">
+```cpp
+EXPECT_CALL(mock, Update(_))
+    .WillOnce(DoAll(SetArgPointee<0>(42), Return(true)));
+```
+Sets value pointed by first argument to 42, then returns true.
+</Accordion>
+
+<Accordion title="Using Invoke to call a lambda">
+```cpp
+EXPECT_CALL(mock, Compute(_, _))
+    .WillOnce(Invoke([](int x, int y) { return x + y; }));
+```
+The mock method returns sum of its two arguments.
+</Accordion>
+
+<Accordion title="Creating a parameterized custom action">
+```cpp
+ACTION_P(AddToArg0, n) { arg0 += n; }
+EXPECT_CALL(mock, Modify(_)).WillOnce(AddToArg0(10));
+```
+Adds 10 to first argument when called.
+</Accordion>
+
+</AccordionGroup>
+
+---
+
+## Summary
+
+This reference covers the full spectrum of actions available in GoogleMock, detailing how to return values, affect side effects, invoke custom code, combine multiple behaviors, and define reusable user-defined actions for flexible and powerful mocking.
+
+For deep mastery, combine these with techniques from the [Mocking API](./mocking-api), [Matchers Reference](./matchers-reference), and [Core Testing Workflows](../guides/core-testing-workflows/test-doubles-with-googlemock.md).
+
+---
+
+<Steps>
+<Step title="Setting a return value">
+Use `Return(value)` or `ReturnRef(variable)` in `WillOnce()` or `WillRepeatedly()` to specify the return for mocked functions.
+</Step>
+<Step title="Specifying side effects">
+Use `SetArgPointee<N>(value)` or `Assign(&var, value)` to modify arguments or variables during call.
+</Step>
+<Step title="Using functions or lambdas">
+Specify existing functions or lambdas with `Invoke()` or `InvokeWithoutArgs()` for complex action logic.
+</Step>
+<Step title="Composing multiple actions">
+Combine actions with `DoAll()` and select which arguments to pass using `WithArg()` or `WithArgs()`.
+</Step>
+<Step title="Creating custom actions">
+Write custom actions using `ACTION()` or `ACTION_P()` macros to reuse common mock behaviors.
+</Step>
+</Steps>
+
+---
+
+## Related Documentation
+
+- [`Defining & Using Mocks`](./mocking-api.md): Learn how to define mock classes with mock methods.
+- [`Matchers Reference`](./matchers-reference.md): For argument matching to specify which calls you expect.
+- [`Expectations and Call Ordering`](./cardinalities-reference.md): How to specify expected number and order of calls.
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html): Recipes and examples for advanced usage.
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html): Beginner-friendly introduction to mocking.
+
+<Source url="https://github.com/google/googletest" branch="main" paths='[{"path": "docs/reference/actions.md", "range": "1-207"}]' />
