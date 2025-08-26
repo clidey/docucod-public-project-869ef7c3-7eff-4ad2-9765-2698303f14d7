@@ -1,0 +1,278 @@
+---
+title: "Default Values and Call Cardinalities"
+description: "Explore how default values, return types, and call count constraints (cardinalities) are handled conceptually. Learn how to model expected interactions, enforce strict call contracts, and ensure that test intent is explicit and maintainable."
+---
+
+# Default Values and Call Cardinalities
+
+Understanding how GoogleMock handles default return values, the behavior of mock functions when not explicitly configured, and the mechanisms for specifying how many times a mock method is expected to be invoked is key to writing effective, maintainable tests. This guide explores these concepts, focusing on the conceptual model behind default values, return types, and call count constraints (cardinalities).
+
+---
+
+## Default Values in GoogleMock
+
+By default, a mock method in GoogleMock returns a value based on its return type when no explicit action is specified. This default behavior ensures tests do not need to define return behavior for every method call, helping keep test code concise while maintaining predictability.
+
+### Built-in Default Values
+
+For common return types, GoogleMock provides default return values:
+
+- `void` functions simply return.
+- `bool` functions return `false`.
+- Numeric types return `0`.
+- Pointer types return `nullptr`.
+- In C++11 and later, types with a default constructor return a default-constructed value.
+
+This default action is used when:
+
+- There is no `ON_CALL` defined for a call.
+- An unexpected call happens (i.e., call does not match any `EXPECT_CALL`).
+
+### Customizing Default Values for Types
+
+Sometimes, the built-in defaults are not suitable. GoogleMock provides the `::testing::DefaultValue<T>` template to let users specify custom global default return values for any copyable type `T`.
+
+```cpp
+using ::testing::DefaultValue;
+
+class Bar {
+  // ...
+};
+
+// Set a custom global default for Bar.
+DefaultValue<Bar>::Set(Bar(/* custom initialization */));
+
+// The following mock method will return the custom default Bar when no action is set.
+EXPECT_CALL(foo, GetBar()).Times(AnyNumber());
+
+// After tests, clear the custom default to prevent contamination.
+DefaultValue<Bar>::Clear();
+```
+
+Alternatively, if you want to compute a default value dynamically each time it is needed, use `SetFactory()`:
+
+```cpp
+DefaultValue<Bar>::SetFactory([]() { return Bar(/* dynamic construction */); });
+```
+
+### Default Actions on a Per-Method Basis Using `ON_CALL`
+
+If you want to customize the default action for a specific mock method rather than the entire return type, use `ON_CALL`.
+
+```cpp
+using ::testing::Return;
+
+ON_CALL(mock_object, Method()).WillByDefault(Return(custom_value));
+```
+
+This sets the behavior used if no matching `EXPECT_CALL` action applies.
+
+### How Default Action and Expectations Interact
+
+- If an `EXPECT_CALL` matches, its actions override default ones.
+- If no `EXPECT_CALL` matches but an `ON_CALL` matches, the `ON_CALL` default action runs.
+- If neither matches, the built-in default value is used.
+
+---
+
+## Call Cardinalities: Controlling How Often a Mock Function is Called
+
+To express how many times a mock function is expected to be called in a test, GoogleMock uses *cardinalities*. They let you specify call count constraints with flexibility and precision.
+
+### Introduction to Cardinalities
+
+A cardinality defines the expected number or range of calls to a mock method. It is specified via the `.Times()` clause in `EXPECT_CALL` but can sometimes be inferred.
+
+### Common Cardinalities
+
+GoogleMock provides these built-in cardinalities under the `::testing` namespace:
+
+| Cardinality     | Meaning                                    |
+|-----------------|--------------------------------------------|
+| `AnyNumber()`   | Call can occur any number of times, including zero. |
+| `AtLeast(n)`    | Call is expected at least `n` times.      |
+| `AtMost(n)`     | Call is expected at most `n` times.       |
+| `Between(m, n)` | Call is expected between `m` and `n` times, inclusive. |
+| `Exactly(n)` / `n` | Call is expected exactly `n` times. If `n` is 0, the call should never happen.|
+
+### Cardinality Inference Rules
+
+If `.Times()` is omitted, GoogleMock infers cardinality based on `.WillOnce()` and `.WillRepeatedly()` clauses:
+
+- No `WillOnce` or `WillRepeatedly`: `Times(1)` is assumed.
+- `n` `WillOnce` clauses and no `WillRepeatedly`: `Times(n)`.
+- `n` `WillOnce` clauses and one `WillRepeatedly`: `Times(AtLeast(n))`.
+
+### How Cardinalities Affect Test Behavior
+
+GoogleMock enforces these cardinalities by:
+
+- Reporting failures if a call is made fewer times than required (lower bound violation).
+- Reporting failures if a call is made more times than allowed (upper bound violation).
+
+### Cardinality Interface for Custom Cardinalities
+
+If needed, users can define custom cardinalities by implementing the interface:
+
+```cpp
+class CardinalityInterface {
+ public:
+  virtual ~CardinalityInterface() = default;
+
+  virtual int ConservativeLowerBound() const = 0;
+  virtual int ConservativeUpperBound() const = 0;
+
+  virtual bool IsSatisfiedByCallCount(int call_count) const = 0;
+  virtual bool IsSaturatedByCallCount(int call_count) const = 0;
+
+  virtual void DescribeTo(std::ostream* os) const = 0;
+};
+```
+
+This interface allows defining arbitrary call count constraints with descriptive reporting.
+
+For example, a cardinality that accepts calls only if the number is even:
+
+```cpp
+class EvenNumberCardinality : public CardinalityInterface {
+ public:
+  bool IsSatisfiedByCallCount(int call_count) const override {
+    return call_count % 2 == 0;
+  }
+  bool IsSaturatedByCallCount(int /* call_count */) const override {
+    return false;
+  }
+  void DescribeTo(std::ostream* os) const override {
+    *os << "called even number of times";
+  }
+};
+
+Cardinality EvenNumber() {
+  return MakeCardinality(new EvenNumberCardinality);
+}
+```
+
+### Sticky Expectations and Retiring
+
+- Expectations remain *active* even after reaching their upper bound, thereby causing failures on excessive calls.
+- Use `.RetiresOnSaturation()` if you want the expectation to become inactive immediately after it's saturated.
+
+### Troubleshooting Cardinalities
+
+- Warnings are issued if the number of `.WillOnce()` and `.WillRepeatedly()` actions do not align with the specified cardinality.
+- Failures are shown clearly when call counts violate expected cardinalities during test runs.
+
+---
+
+## Specifying Mock Interactions: Working with Default Values and Cardinalities
+
+Through `ON_CALL` and `EXPECT_CALL`, GoogleMock allows you to explicitly define mock method behaviors and call expectations:
+
+### `ON_CALL`
+
+Defines what a mock method does by default when called with matching arguments, without setting any expectation on call count.
+
+```cpp
+ON_CALL(mock_obj, Method(matchers))
+    .With(multi_arg_matcher)?
+    .WillByDefault(action);  // required
+```
+
+- `.With()` restricts the call to those matching the tuple matcher (optional).
+- `.WillByDefault()` sets the default action and is mandatory.
+
+### `EXPECT_CALL`
+
+Sets an expectation that the method will be called with specified arguments, and optionally controls how it's called and its behavior:
+
+```cpp
+EXPECT_CALL(mock_obj, Method(matchers))
+    .With(multi_arg_matcher)?
+    .Times(cardinality)?
+    .InSequence(sequences...)*
+    .After(expectations...)*
+    .WillOnce(action)*
+    .WillRepeatedly(action)?
+    .RetiresOnSaturation()?;
+```
+
+- Clauses in square brackets are optional, but `.WillByDefault()` must appear exactly once in `ON_CALL`.
+- Clause order must be respected.
+- `WillOnce()` can be repeated for multiple actions.
+- Cardinality defaults apply if `.Times()` is omitted.
+
+### Behavior with Default Values and Expectations
+
+- If a mock method is called without any matching `EXPECT_CALL`, but matching `ON_CALL` exists, `ON_CALL`'s action runs.
+- If no matching `ON_CALL`, the built-in default value is used.
+- If calls exceed the cardinality, they return default values (or run default actions if set) but also cause test failures.
+
+### Example: Using Call Cardinalities and Default Values
+
+```cpp
+class MyMock {
+ public:
+  MOCK_METHOD(int, GetValue, (), ());
+};
+
+MyMock mock;
+
+// Define default value for int to be 42.
+::testing::DefaultValue<int>::Set(42);
+
+// Default behavior for GetValue.
+ON_CALL(mock, GetValue())
+    .WillByDefault(::testing::Return(10));
+
+// Expect exactly two calls.
+EXPECT_CALL(mock, GetValue())
+    .Times(2)
+    .WillOnce(::testing::Return(1))
+    .WillOnce(::testing::Return(2));
+
+int a = mock.GetValue();  // returns 1
+int b = mock.GetValue();  // returns 2
+int c = mock.GetValue();  // cardinality exceeded: returns 42, test failure
+
+// Cleanup default value.
+::testing::DefaultValue<int>::Clear();
+```
+
+---
+
+## Best Practices
+
+- Use `ON_CALL` to define generic default behaviors.
+- Use `EXPECT_CALL` to specify actual expectations where test verification is needed.
+- Avoid over-specifying expectations to keep tests maintainable and robust.
+- Use explicit `.Times()` or rely on cardinality inference when appropriate.
+- Use `.RetiresOnSaturation()` for expectations that should deactivate immediately after saturation, such as sequences.
+- Customize `DefaultValue<T>` carefully and clear it to avoid side effects.
+
+---
+
+## Troubleshooting and Common Pitfalls
+
+- **Warning about too many or too few actions**: Ensure that the number of `WillOnce()` clauses aligns with specified or inferred cardinalities.
+- **Unexpected calls**: Occur when none of the expectations match; may fall back on default action or cause failures.
+- **Uninteresting calls**: Calls to mock methods without any expectations. By default, warnings are printed unless using `NiceMock`.
+- **Default values for non-copyable types**: Must provide `SetFactory` or `ON_CALL` with lambdas for generating return values every time.
+
+---
+
+## Summary
+
+Default values and call cardinalities form the backbone of expectation specifications in GoogleMock. Understanding these concepts empowers you to write more precise, expressive, and maintainable mock interactions that enforce intended test behavior without over-constraining your tests.
+
+---
+
+## Further Reading and References
+
+- [Mocking Reference - DefaultValue](reference/mocking.md#DefaultValue)
+- [Mocking Reference - EXPECT_CALL Times](reference/mocking.md#EXPECT_CALL.Times)
+- [gMock Cookbook - Knowing When to Expect and Use ON_CALL](docs/gmock_cook_book.md#UseOnCall)
+- [gMock Cookbook - The Nice, the Strict, and the Naggy](docs/gmock_cook_book.md#NiceStrictNaggy)
+- [gMock Cheat Sheet - Cardinalities](docs/gmock_cheat_sheet.md#CardinalityList)
+- [GoogleMock Spec Builders](googlemock/include/gmock/gmock-cardinalities.h)
+
+---
