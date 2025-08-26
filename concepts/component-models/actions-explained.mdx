@@ -1,0 +1,228 @@
+---
+title: "Actions: Defining Mocked Behavior"
+description: "Grasp the concept of actions, which control how mock methods respond to invocations. This page covers built-in actions, custom actions, and how actions can be composed to simulate complex behaviors in your tests."
+---
+
+# Actions: Defining Mocked Behavior
+
+When using GoogleMock, **actions** specify what a mock method does when it is invoked. While expectations define which calls the test expects and how often, actions control the response and side effects that occur when those calls happen.
+
+This page walks you through the concept of actions, built-in available actions, defining custom actions, and composing actions to simulate complex behaviors in your tests.
+
+---
+
+## Understanding Actions: What Should Mocks Do?
+
+Imagine you have a mock class where you’ve set expectations. When the code under test calls a mock method, gMock lets you decide what that method will do — e.g., return a value, invoke a callback, or mutate an argument.
+
+Without an action, gMock applies a default behavior (for instance, return 0 for integers, `false` for bools, or a default-constructed value if possible). However, tests usually require more precise control over behaviors to verify interaction correctness and simulate various scenarios.
+
+**Key takeaway:** Actions define the runtime behavior of mocked methods. They empower your tests to simulate real responses, failures, side effects, and sequences of operations.
+
+---
+
+## Built-in Actions
+
+GoogleMock comes bundled with a rich set of **built-in** actions. Here are the primary categories:
+
+### 1. Returning Values
+
+- `Return(value)` – Returns a fixed value. The value is stored *when the expectation is set*, not at call time.
+- `ReturnRef(variable)` – Returns a reference to a variable. Useful for returning non-trivial objects efficiently.
+- `ReturnPointee(pointer)` – Returns the value pointed to by a pointer at call time, supporting dynamic values.
+- `ReturnNew<T>(args...)` – Returns a new dynamically allocated object, creating a fresh instance on every call.
+
+**Example:**
+```cpp
+using ::testing::Return;
+using ::testing::ReturnRef;
+
+class MockFoo {
+ public:
+  MOCK_METHOD(int, GetValue, (), (override));
+  MOCK_METHOD(const std::string&, GetName, (), (override));
+};
+
+MockFoo foo;
+std::string name = "gMock";
+EXPECT_CALL(foo, GetValue()).WillOnce(Return(42));
+EXPECT_CALL(foo, GetName()).WillRepeatedly(ReturnRef(name));
+
+int val = foo.GetValue();        // Returns 42
+auto& ref_name = foo.GetName(); // Returns reference to name
+```
+
+### 2. Side Effects on Arguments
+
+- `SetArgPointee<N>(value)` – Assigns `value` to the variable pointed to by argument `N`.
+- `SetArrayArgument<N>(first, last)` – Copies a range of elements into an array argument.
+- `SaveArg<N>(pointer)` – Saves a copy of an argument at call time.
+- `DeleteArg<N>()` – Deletes a pointer argument.
+
+**Example:**
+```cpp
+using ::testing::SetArgPointee;
+
+class MockMutator {
+ public:
+  MOCK_METHOD(void, Mutate, (int* value), (override));
+};
+
+MockMutator mutator;
+EXPECT_CALL(mutator, Mutate(_))
+    .WillOnce(SetArgPointee<0>(5));
+
+int x = 0;
+mutator.Mutate(&x);
+// x == 5 now
+```
+
+### 3. Invoking Callables or Functions
+
+- `Invoke(f)` – Invokes a callable `f` with the same arguments as the mock method.
+- `InvokeWithoutArgs(f)` – Invokes a callable `f` without passing any arguments.
+- `InvokeArgument<N>(args...)` – Invokes the N-th argument (a function/functor) passed to the mock method with supplied arguments.
+
+**Example:**
+```cpp
+using ::testing::Invoke;
+using ::testing::InvokeArgument;
+
+class MockFoo {
+ public:
+  MOCK_METHOD(void, DoWork, (int a, std::function<void(int)> callback), (override));
+};
+
+void DoExtraWork(int a) {
+  // ...
+}
+
+MockFoo foo;
+EXPECT_CALL(foo, DoWork(_, _)).WillOnce(Invoke(&DoExtraWork));
+EXPECT_CALL(foo, DoWork(_, _)).WillOnce(InvokeArgument<1>(42));
+
+foo.DoWork(1, [](int val){ /* called with 42 */ });
+```
+
+### 4. Composite Actions
+
+Sometimes you want your mock to do several things in one call:
+
+- `DoAll(a1, a2, ..., an)` – Executes multiple actions in order. The return value of the *last* action is used.
+- `IgnoreResult(a)` – Executes action `a`, discards its return value (useful when the mock method returns `void`).
+- `WithArg<N>(a)` – Executes action `a` with just the N-th argument of the mock call.
+- `WithArgs<N1, N2, ..., Nk>(a)` – Like `WithArg` but for multiple selected arguments.
+- `WithoutArgs(a)` – Executes action `a` without passing any arguments.
+
+**Example:**
+```cpp
+using ::testing::DoAll;
+using ::testing::SetArgPointee;
+using ::testing::Return;
+
+class MockWriter {
+ public:
+  MOCK_METHOD(bool, Write, (int pos, char c), (override));
+};
+
+MockWriter w;
+EXPECT_CALL(w, Write(_, _))
+    .WillOnce(DoAll(SetArgPointee<0>(10), Return(true)));
+```
+
+In the example above, when `Write` is called, the first argument is set to `10` before returning `true`.
+
+---
+
+## Writing Custom Actions
+
+If the built-in actions don’t fulfill your needs, you can easily write your own custom actions.
+
+### 1. Using Lambdas or Function Objects
+
+Custom actions can be any callable with a compatible signature. It can be a:
+
+- Lambda
+- Function pointer
+- Functor (class with `operator()`)
+
+**Example:**
+```cpp
+MockFunction<int(int)> mock;
+EXPECT_CALL(mock, Call(_)).WillOnce([](int input) { return input * 7; });
+EXPECT_EQ(mock.AsStdFunction()(2), 14);
+```
+
+### 2. Using the ACTION and ACTION_P Macros
+
+For more reusable actions, GoogleMock provides macros to define named actions with or without parameters.
+
+**Basic Action:**
+```cpp
+ACTION(IncrementArg1) { return ++(*arg1); }
+EXPECT_CALL(foo, Bar(_)).WillOnce(IncrementArg1());
+```
+
+**Parameterized Action:**
+```cpp
+ACTION_P(Add, n) { return arg0 + n; }
+EXPECT_CALL(foo, Bar(_)).WillOnce(Add(5)); // Returns arg0 + 5
+```
+
+Inside the body of an action:
+- `argN` refers to the N-th argument (0-based) of the mock function.
+- For `ACTION_Pk` macros, parameters are accessible by their name.
+
+### 3. Implementing Polymorphic Actions
+
+For actions intended to be used with different mock method signatures, you can implement the `ActionInterface` or use `MakePolymorphicAction`.
+
+**Example:** Returning the second argument of any mock function:
+```cpp
+class ReturnSecondArgumentAction {
+ public:
+  template <typename Result, typename ArgTuple>
+  Result Perform(const ArgTuple& args) const {
+    return std::get<1>(args);
+  }
+};
+
+PolymorphicAction<ReturnSecondArgumentAction> ReturnSecondArgument() {
+  return MakePolymorphicAction(ReturnSecondArgumentAction());
+}
+
+EXPECT_CALL(mock, Foo).WillOnce(ReturnSecondArgument());
+```
+
+---
+
+## Best Practices and Tips
+
+- Use **`ON_CALL`** to set default behaviors without expecting calls, and **`EXPECT_CALL`** when you want to verify calls.
+- Avoid over-specifying behavior to keep tests maintainable.
+- Chain multiple actions with `DoAll()` when a mock function needs to perform multiple steps.
+- When returning references or pointers, prefer `ReturnRef()` and `ReturnPointee()` to maintain up-to-date values.
+- Use `InvokeArgument<N>(...)` to call through function object arguments passed into mocked methods.
+- When testing asynchronous code, use actions to notify threads or signal completion.
+
+---
+
+## Troubleshooting Common Issues
+
+- **Uninteresting call warnings:** Calls to mock methods without expectations print warnings by default. Use `NiceMock` to suppress, or define expectations explicitly.
+- **Mismatch in return types:** Be cautious with `Return()`—the value is captured at expectation setup time, not call time. Use `ReturnPointee()` for dynamic return values.
+- **Memory management:** Use `DeleteArg<N>()` when the mock should delete pointer arguments to prevent leaks.
+- **Order of actions:** Later expectations override earlier ones. Order your `EXPECT_CALL`s carefully to prioritize more specific matchers.
+
+---
+
+## Additional Resources
+
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) - Recipes for advanced mocking techniques including using actions.
+- [Actions Reference](https://google.github.io/googletest/reference/actions.html) - Complete list and documentation of built-in actions.
+- [Writing New Actions](https://google.github.io/googletest/gmock_cook_book.html#writing-new-actions) - Guidance on defining custom actions.
+- [Using Mocks in Tests](https://google.github.io/googletest/gmock_for_dummies.html#using-mocks-in-tests) - Overview of mock usage patterns, including actions.
+
+---
+
+Feel confident to control your mock object's behavior precisely through actions. This control transforms mocks into powerful tools that simulate complex interactions and behaviors critical for thorough and effective testing.
