@@ -1,0 +1,230 @@
+---
+title: "Error Handling and Status Codes"
+description: "Describes how the API reports errors and failures, including failure modes, status codes, and recommended practices for robust test code. Covers diagnostic output and integrating failure handling into CI systems."
+---
+
+# Error Handling and Status Codes
+
+Google Mock (gMock) provides detailed mechanisms for reporting errors, handling failures, and controlling diagnostic output during mock object usage. This documentation covers how gMock reports test failures including unexpected calls, unsatisfied expectations, and violates cardinality constraints. It also details the status codes and verbosity flags relevant for observing and integrating these reports into continuous integration (CI) workflows, helping you write robust and reliable test code.
+
+---
+
+## 1. Overview of Error Reporting
+
+When using gMock, your tests define expectations on mock methods with `EXPECT_CALL`. If these expectations are not met, gMock produces clear diagnostic messages explaining the failure mode. Failures can result from:
+
+- Calling mock methods fewer times than expected
+- Making unexpected method calls
+- Calling mock methods more times than their specified upper bound
+- Calling expected methods with mismatched arguments
+- Violating specified call order or sequences
+
+The error reporting guides you to quickly identify why a test failed by describing which calls were expected, which were unexpected, and which were excessive or unsatisfied.
+
+### How Failures Are Reported
+
+- **Non-fatal failures** are generated for mismatch and cardinality violations, allowing a test to continue running other checks.
+- **Fatal failures** can be generated using assertions such as `FAIL()`.
+- Diagnostic messages include function call descriptions, argument values, expectation source location, and failure reasons.
+
+This reporting encourages writing tests that precisely verify behavior while assisting in debugging and maintenance.
+
+## 2. Common Failure Modes Explained
+
+### 2.1 Unexpected Call
+
+An unexpected call happens when a mock method is invoked with arguments that do not match any `EXPECT_CALL` expectations. By default, gMock:
+
+- Reports the call as unexpected with a detailed message.
+- Returns the default value for the return type or executes a default action if provided.
+- Prints a list of expectations it tried to match for clarity.
+
+Example diagnostic fragment on an unexpected call:
+
+```text
+Unexpected mock function call - returning default value.
+    Function call: DoB(2)
+          Returns: 0
+Google Mock tried the following 1 expectation, but it didn't match:
+  Expected arg #0: is equal to 1
+           Actual: 2
+         Expected: to be called once
+           Actual: called once - saturated and active
+```
+
+### 2.2 Excessive Call
+
+An excessive call occurs when a mock method is called more times than the upper bound specified by the `Times()` clause. gMock:
+
+- Reports the excessive call warning.
+- Executes the default action or default return value.
+
+Warnings contain function call info, number of calls made vs. expected, and location:
+
+```text
+Mock function called more times than expected - returning default value.
+    Function call: DoB(2)
+          Returns: 0
+         Expected: to be called once
+           Actual: called twice - over-saturated and active
+```
+
+### 2.3 Unsatisfied Calls
+
+If fewer calls occur than the minimum expected by cardinality (`AtLeast(n)` or `Exactly(n)`), gMock reports the deficit as a non-fatal failure after test execution.
+
+### 2.4 Mismatched Arguments
+
+Calls that match a mock method but do not satisfy the argument matchers generate diagnostic messages pointing out mismatch details for individual argument values.
+
+Example:
+
+```text
+Expected arg #0: is equal to 1
+         Actual: 2
+```
+
+### 2.5 Call Ordering Violations
+
+gMock supports specifying call order via `InSequence` or `After`. Calls made out of order will be reported as unexpected calls.
+
+## 3. Controlling Error Diagnostics and Verbosity
+
+### 3.1 The `--gmock_verbose` Flag
+
+This runtime flag controls how much information gMock outputs about mock calls:
+
+| Level   | Description                                             |
+|---------|---------------------------------------------------------|
+| `info`  | Prints info messages for all expected and uninteresting calls including stack traces. Useful for debugging.
+| `warning` | Prints only warnings and errors without stack traces. Default level.
+| `error` | Prints only errors, silencing warnings and info.
+
+Use the flag when running tests or change it programmatically:
+
+```cpp
+::testing::FLAGS_gmock_verbose = "error";
+```
+
+### 3.2 Diagnostic Output Includes
+
+- Description of the function call (name and arguments)
+- Whether it matched an expectation
+- Number of calls and expected call count
+- Stack traces on verbose levels
+
+Example (with `--gmock_verbose=info`):
+
+```text
+Mock function call matches EXPECT_CALL(obj, Method())...
+    Function call: Method()
+    Stack trace:
+...stack tracing details...
+```
+
+## 4. Recommended Practices for Robust Test Code
+
+- Use `EXPECT_CALL` judiciously: only set expectations you care about, use `ON_CALL` for default actions.
+- Handle uninteresting calls by using `NiceMock` to suppress warnings or explicitly allow calls with `.Times(AnyNumber())`.
+- Use `RetiresOnSaturation()` to retire expectations once their call count saturates, preventing excessive call failures later.
+- For complex scenarios, use sequences (`InSequence`) and partial orders (`After`) to specify expected call order.
+- Ensure your test teardown or test fixture destructors verify mock expectations with `VerifyAndClearExpectations()` or allow the mocks to verify on destruction.
+
+## 5. Integrating Failure Handling into CI Systems
+
+Google Mock supports generating test result outputs in formats easily consumable by CI systems (typically through GoogleTest).
+
+### 5.1 Exit Status
+
+Test failures from unmet expectations or unexpected calls result in non-zero exit codes from the test executable, signaling CI systems to mark builds as failed.
+
+### 5.2 Reporting Formats
+
+Configure output with GoogleTest flags such as `--gtest_output=xml:` to generate detailed XML reports for CI systems (e.g., Jenkins, GitLab).
+
+### 5.3 Best Practices
+
+- Run tests with appropriate verbosity during development (`--gmock_verbose=info`) to debug.
+- Once stable, run with `warning` or `error` to reduce noisy logs.
+- Use CI integration extensions such as the VSCode GoogleTest Adapter or XML reporting.
+- Use `Mock::VerifyAndClearExpectations()` in complex test teardown phases to enforce early verification.
+
+## 6. Examples
+
+### 6.1 Example Unexpected Call Warning
+
+```cpp
+EXPECT_CALL(foo, Bar2(0, _));
+foo.Bar2(1, 0);  // Unexpected call, causes warning.
+```
+
+Produces:
+
+```text
+Unexpected mock function call - returning default value.
+    Function call: Bar2(1, 0)
+          Returns: false
+Google Mock tried the following 1 expectation, but it didn't match:
+  Expected arg #0: is equal to 0
+           Actual: 1
+         Expected: to be called once
+           Actual: never called - unsatisfied and active
+```
+
+### 6.2 Example Excessive Call Handling
+
+```cpp
+EXPECT_CALL(foo, Bar2(0, _));
+foo.Bar2(0, 0);  // Expected call
+foo.Bar2(0, 1);  // Excessive call, triggers warning but continues.
+```
+
+### 6.3 Suppress Uninteresting Call Warnings
+
+```cpp
+using ::testing::NiceMock;
+
+NiceMock<MockFoo> mock_foo;
+EXPECT_CALL(mock_foo, DoSomething());
+mock_foo.DoSomethingElse();  // No warning about uninteresting call.
+```
+
+### 6.4 Enforcing Call Order
+
+```cpp
+Sequence s;
+EXPECT_CALL(foo, First()).InSequence(s);
+EXPECT_CALL(foo, Second()).InSequence(s);
+
+// Calls must be First() then Second(), otherwise test fails.
+```
+
+### 6.5 Retiring Expectations Automatically
+
+```cpp
+EXPECT_CALL(foo, Bar(0)).Times(2).RetiresOnSaturation();
+
+foo.Bar(0);
+foo.Bar(0);  // Expectation saturates and retires here
+foo.Bar(0);  // Matches other expectations or errors if none
+```
+
+## 7. Troubleshooting Common Issues
+
+- If you receive "Unexpected mock function call" errors, ensure that you have declared matching `EXPECT_CALL`s for the calls your code makes.
+- Warnings about uninteresting calls suggest you might want to use `NiceMock` or add explicit `EXPECT_CALL(...).Times(AnyNumber())` clauses.
+- Excessive call warnings indicate your code called a mock method more times than expected; verify call counts.
+- Use `--gmock_verbose=info` to get more insight into which expectations matched or failed.
+- Use `Mock::VerifyAndClearExpectations()` to force verification early when tests involve heap-allocated mocks.
+
+## 8. Additional Resources
+
+- [gMock Cookbook - Error Handling and Diagnostics](https://google.github.io/googletest/gmock_cook_book.html#Controlling_How_Much_Information_gMock_Prints)
+- [API Reference - Expectations and Actions](../api-reference/mocking-api/expectations-actions.md)
+- [Guides - Diagnostics, Debugging, and Performance Tips](../guides/advanced_and_best_practices/diagnostics-debugging.md)
+- [API Reference - Assertions and Matchers](../api-reference/core-testing-api/assertions-matchers.md)
+- [Integration with CI and Build Systems](../guides/advanced_and_best_practices/integration-external_tools.md)
+
+---
+
+Explore further to master configuring your mocks, controlling verbosity, and crafting resilient test architectures that integrate smoothly into modern continuous integration workflows.
