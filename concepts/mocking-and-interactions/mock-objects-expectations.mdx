@@ -1,0 +1,296 @@
+---
+title: "Mock Objects and Expectations"
+description: "Describes how mock objects are created and used to control and inspect the interactions between tested code and its collaborators. Introduces the core ideas behind ON_CALL, EXPECT_CALL, and the concept of default actions and strictness in mock behavior."
+---
+
+# Mock Objects and Expectations
+
+This guide explains how to create and use mock objects in GoogleTest to precisely control and inspect interactions between your code and its dependencies. It introduces the core concepts behind setting default behaviors using `ON_CALL`, establishing explicit call expectations with `EXPECT_CALL`, and managing mock object strictness and default actions.
+
+---
+
+## Introduction to Mock Objects
+
+Mock objects simulate the behavior of real objects by allowing you to define how their methods respond during tests. They enable you to:
+
+- Specify expected method calls and their arguments.
+- Control what the mocked methods return or do.
+- Verify interactions such as call count and call order.
+
+GoogleMock integrates tightly with GoogleTest, providing macros and classes to easily create mocks and write expressive expectations.
+
+
+## Creating Mock Methods with `MOCK_METHOD`
+
+Define mock methods inside your mock class using the `MOCK_METHOD` macro:
+
+```cpp
+class MyMock {
+ public:
+  MOCK_METHOD(ReturnType, MethodName, (Args...));
+  MOCK_METHOD(ReturnType, MethodName, (Args...), (qualifiers...));
+};
+```
+
+- Place `MOCK_METHOD` declarations in the `public:` section regardless of the method's original access.
+- The optional fourth parameter specifies qualifiers like `const`, `override`, `noexcept`, or calling conventions.
+- For argument or return types containing commas (e.g., templates), wrap them with extra parentheses or use a type alias to prevent parsing errors.
+
+Example with a type containing commas:
+
+```cpp
+class MockFoo {
+ public:
+  MOCK_METHOD((std::pair<bool, int>), GetPair, ());
+  MOCK_METHOD(bool, CheckMap, ((std::map<int, double>), bool));
+};
+```
+
+Or equivalently:
+
+```cpp
+using BoolAndInt = std::pair<bool, int>;
+using MapIntDouble = std::map<int, double>;
+
+class MockFoo {
+ public:
+  MOCK_METHOD(BoolAndInt, GetPair, ());
+  MOCK_METHOD(bool, CheckMap, (MapIntDouble, bool));
+};
+```
+
+
+## Specifying Default Behavior with `ON_CALL`
+
+`ON_CALL` lets you define the *default* behavior of a mock method when called with matching arguments. It does *not* set any expectation that the call must occur. This is ideal for methods you don't actively want to verify but still want to control their return values or side effects.
+
+### Syntax
+
+```cpp
+ON_CALL(mock_object, Method(matchers...))
+    [.With(multi_argument_matcher)]
+    .WillByDefault(action);
+```
+
+- `matchers...` specifies argument matchers to restrict when the behavior applies. Omitting them defaults to wildcards `_`.
+- `.With(...)` is optional and restricts matching to arguments as a tuple.
+- `.WillByDefault(action)` is **mandatory** and defines the action to perform.
+
+**Example:** Define a default return value:
+
+```cpp
+ON_CALL(my_mock, Compute(_))
+    .WillByDefault(Return(42));
+```
+
+**Example:** Use `.With()` to match constraints on combined arguments:
+
+```cpp
+ON_CALL(my_mock, Update(_, _))
+    .With(Lt())  // first argument less than second
+    .WillByDefault(Return(true));
+```
+
+
+## Setting Explicit Expectations with `EXPECT_CALL`
+
+`EXPECT_CALL` sets an explicit expectation that a mock method will be called with specified arguments, call count, order, and behavior. GoogleMock verifies these expectations are met during test execution.
+
+### Syntax
+
+```cpp
+EXPECT_CALL(mock_object, Method(matchers...))
+    [.With(multi_argument_matcher)]
+    [.Times(cardinality)]
+    [.InSequence(sequence1, sequence2, ...)]
+    [.After(expectation1, expectation2, ...)]
+    [.WillOnce(action)...]
+    [.WillRepeatedly(action)]
+    [.RetiresOnSaturation()];
+```
+
+- `.Times(cardinality)` defines how many times the method is expected to be called. If omitted, GoogleMock infers it based on the `WillOnce` and `WillRepeatedly` clauses.
+- `.InSequence()` specifies call order constraints with objects of type `Sequence`.
+- `.After()` enforces that the call happens after one or more other expectations.
+- `.WillOnce(action)` provides the behavior for the next matching call; multiple `WillOnce` clauses specify behaviors in call order.
+- `.WillRepeatedly(action)` defines behavior for all subsequent calls after `WillOnce` clauses are exhausted.
+- `.RetiresOnSaturation()` marks the expectation as inactive after reaching the call limit.
+
+### Examples
+
+**Basic expectation and behavior:**
+
+```cpp
+EXPECT_CALL(my_mock, GetValue(5))
+    .WillOnce(Return(10));
+```
+
+**Call sequence in order:**
+
+```cpp
+Sequence s;
+EXPECT_CALL(my_mock, Step1()).InSequence(s);
+EXPECT_CALL(my_mock, Step2()).InSequence(s);
+```
+
+
+**Partial order with `.After()`:**
+
+```cpp
+Expectation e1 = EXPECT_CALL(mock1, Init());
+Expectation e2 = EXPECT_CALL(mock1, Start()).After(e1);
+```
+
+
+**Multiple behaviors:**
+
+```cpp
+EXPECT_CALL(my_mock, Compute())
+    .WillOnce(Return(1))
+    .WillOnce(Return(2))
+    .WillRepeatedly(Return(3));
+```
+
+
+## Understanding Default Actions vs Expectations
+
+- `ON_CALL` controls default behavior without requiring calls.
+- `EXPECT_CALL` sets an expectation that calls must occur matching the specification.
+- Default actions set by `ON_CALL` are overridden by actions specified in matching `EXPECT_CALL`.
+- If no default action or expectation exists for a method, GoogleMock uses built-in default return values (e.g., 0, false, etc.).
+
+
+## Handling Uninteresting, Unexpected, and Excessive Calls
+
+| Call Type       | Description | Default Behavior |
+|-----------------|-------------|------------------|
+| **Uninteresting** | Calls to methods without any `EXPECT_CALL`. | Default action runs; warning is logged (naggy behavior). |
+| **Unexpected** | Calls that do not match any `EXPECT_CALL` (arguments or call count mismatch). | Treated as a test failure. |
+| **Excessive** | Calls to an expected method exceeding call count specified in `Times` | Treated as a test failure; default action runs after failure.
+|
+
+
+### Managing Uninteresting Calls Verbosity and Strictness
+
+GoogleMock provides mock wrappers to control uninteresting call handling:
+
+- `NiceMock<T>`: suppresses warnings on uninteresting calls.
+- `NaggyMock<T>`: default mock, warns on uninteresting calls.
+- `StrictMock<T>`: treats uninteresting calls as failures.
+
+Example:
+
+```cpp
+using ::testing::NiceMock;
+NiceMock<MockFoo> nice_mock;
+EXPECT_CALL(nice_mock, DoSomething());
+```
+
+
+## Using Sequences and Partial Ordering
+
+Manage call ordering with `Sequence`:
+
+```cpp
+Sequence s1, s2;
+EXPECT_CALL(mock, A()).InSequence(s1, s2);
+EXPECT_CALL(mock, B()).InSequence(s1);
+EXPECT_CALL(mock, C()).InSequence(s2);
+```
+
+This establishes the partial order where `A` precedes both `B` and `C`, but `B` and `C` can be in any relative order.
+
+
+## Retiring Expectations on Saturation
+
+By default, expectations are "sticky" and remain active after being saturated. Use `.RetiresOnSaturation()` to deactivate an expectation when it reaches the call limit, allowing other matching expectations to take effect.
+
+
+## Verifying and Resetting
+
+- Mocks automatically verify expectations on destruction.
+- You can force verification earlier with:
+
+```cpp
+Mock::VerifyAndClearExpectations(&mock_object);
+```
+
+- Clean default actions and expectations with:
+
+```cpp
+Mock::VerifyAndClear(&mock_object);
+```
+
+- To disable leak detection and verification for certain mocks, call:
+
+```cpp
+Mock::AllowLeak(&mock_object);
+```
+
+
+## Tips and Best Practices
+
+- Prefer `ON_CALL` for default behavior and `EXPECT_CALL` for the specific behavior you want to verify.
+- Use `NiceMock` to reduce noise from uninteresting calls in tests.
+- Control call order with `Sequence` or `.After()` to avoid brittle tests.
+- Use `.RetiresOnSaturation()` to avoid "sticky" expectations when chaining `WillOnce` calls.
+- Set expectations before exercising code; adding expectations after mock calls leads to undefined behavior.
+
+---
+
+## Example Mock Setup and Usage
+
+```cpp
+#include <gmock/gmock.h>
+using ::testing::Return;
+using ::testing::_;
+
+class MockFoo {
+ public:
+  MOCK_METHOD(int, GetValue, (int), ());
+};
+
+TEST(ExampleTest, UsesMock) {
+  MockFoo mock;
+
+  // Default behavior
+  ON_CALL(mock, GetValue(_)).WillByDefault(Return(0));
+
+  // Expect exact calls
+  EXPECT_CALL(mock, GetValue(5)).WillOnce(Return(10));
+
+  // Exercise code using mock
+  EXPECT_EQ(mock.GetValue(5), 10);  // Matches EXPECT_CALL
+  EXPECT_EQ(mock.GetValue(3), 0);   // Uses ON_CALL default
+}
+```
+
+
+## Troubleshooting Common Issues
+
+- Ensure all expectations (`EXPECT_CALL`) are set before the mock methods are called.
+- Use `--gmock_verbose=info` to trace calls and understand why matchers fail.
+- If you see warnings like "Uninteresting mock function call", use `NiceMock` or add a catch-all expectation with `Times(AnyNumber())` for that method.
+- Ensure mocked interfaces have virtual destructors to avoid memory issues.
+
+---
+
+## Additional Resources
+
+- [Mocking Reference](https://google.github.io/googletest/reference/mocking.html) — full list of macros and classes.
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) — practical recipes and advanced usage.
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html) — beginner’s guide with examples.
+- [Matchers Reference](https://google.github.io/googletest/reference/matchers.html) — detailed matcher usage.
+- [Actions Reference](https://google.github.io/googletest/reference/actions.html) — defining custom mock behaviors.
+- API Reference:
+  - Mocking APIs and Macros
+  - Cardinalities and Call Expectations
+  - Nice, Naggy, and Strict Mocks
+
+Explore related concepts in the [Argument Matching and Custom Actions](https://google.github.io/googletest/concepts/mocking-and-interactions/argument-matching-and-actions.html) guide for deeper mastery.
+
+---
+
+This page is part of the [Concepts > Mocking Fundamentals and Behavior](https://google.github.io/googletest/concepts/mocking-and-interactions/mock-objects-expectations.html) section and complements the [GoogleTest Primer](https://google.github.io/googletest/primer.html) for hands-on testing workflows.
+
+---
