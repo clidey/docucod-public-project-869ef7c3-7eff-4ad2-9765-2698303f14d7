@@ -1,0 +1,243 @@
+---
+title: "Mocking Strategies and Common Pitfalls"
+description: "Reviews advanced mocking concepts, such as action and matcher customization, best practices, and potential issues (e.g., over-mocking or fragile tests), including when and how to use strict/naggy/nice mocks."
+---
+
+# Mocking Strategies and Common Pitfalls
+
+This page explores advanced mocking strategies in GoogleMock, focusing on customizing mocks with respect to strictness modes (NiceMock, NaggyMock, StrictMock), best practices to avoid common pitfalls like over-mocking and fragile tests, and tips on when and how to use different mock behaviors effectively.
+
+---
+
+## 1. Understanding Mock Strictness Modes
+
+GoogleMock provides three strictness wrappers to control how uninteresting calls (calls to mock methods without explicit expectations) are handled:
+
+- **NiceMock**: Suppresses warnings on uninteresting calls.
+- **NaggyMock** (default behavior): Prints warnings for uninteresting calls.
+- **StrictMock**: Treats uninteresting calls as test failures.
+
+### Usage Examples
+
+```cpp
+using ::testing::NiceMock;
+using ::testing::NaggyMock;
+using ::testing::StrictMock;
+
+class MockFoo {
+ public:
+  MOCK_METHOD(void, DoThis, ());
+};
+
+// NiceMock example: ignores uninteresting calls
+NiceMock<MockFoo> nice_mock;
+EXPECT_CALL(nice_mock, DoThis());
+nice_mock.DoThis();
+// Other methods called with no EXPECT_CALL will be ignored silently
+
+// NaggyMock example: warns on uninteresting calls (default)
+NaggyMock<MockFoo> naggy_mock;
+EXPECT_CALL(naggy_mock, DoThis());
+naggy_mock.DoThis();
+// Uninteresting calls will generate warnings
+
+// StrictMock example: fails test on uninteresting calls
+StrictMock<MockFoo> strict_mock;
+EXPECT_CALL(strict_mock, DoThis());
+naggy_mock.DoThis();
+// Any uninteresting calls cause test failures
+```
+
+### Important Considerations
+
+- These wrappers can only be applied to mock methods defined *directly* in the mock class via `MOCK_METHOD`.
+- Mock classes without virtual destructors may behave incorrectly with these wrappers.
+- Nesting strictness wrappers (e.g., `NiceMock<StrictMock<MockFoo>>`) is unsupported.
+
+### Choosing the Right Mode
+
+- Use **NiceMock** by default to reduce noise from uninteresting calls and improve test maintainability.
+- Use **NaggyMock** during development or debugging to be notified of unexpected interactions.
+- Reserve **StrictMock** for scenarios where it's crucial to reject any calls outside expectations.
+
+<Tip>
+Overusing strict mocks can lead to brittle tests that frequently break during refactoring. Balance strictness with test resilience to ensure maintainable testing.
+</Tip>
+
+---
+
+## 2. Best Practices for Mocking
+
+### Use `ON_CALL` for Defining Behavior, `EXPECT_CALL` for Setting Expectations
+
+- `ON_CALL` defines default behaviors for mock methods without implying the method *must* be called.
+- `EXPECT_CALL` sets an expectation that the mock method will be called with specific arguments and frequency.
+
+```cpp
+ON_CALL(mock_foo, Foo(_)).WillByDefault(Return(true));  // Set default behavior
+EXPECT_CALL(mock_foo, Foo(42)).Times(1);              // Expect Foo(42) once
+```
+
+> **Why?** Using too many `EXPECT_CALL`s can over-constrain your tests, making them brittle and harder to maintain. Prefer `ON_CALL` to specify typical behavior, and use `EXPECT_CALL` only to verify important interactions.
+
+### Avoid Over-Mocking
+
+- Only mock dependencies that impact the code under test.
+- Don't mock everything; keep tests focused on the behavior you're verifying.
+- Over-mocking adds maintenance cost and reduces test readability.
+
+<Tip>
+Favor writing tests that verify behavior over implementation details. Mock interactions that define the contract between components, not every internal call.
+</Tip>
+
+### Simplify Mock Interfaces
+
+When mocking methods with complex or lengthy argument lists, consider:
+
+- **Redispatching** complex methods to simpler mock methods with trimmed argument lists.
+
+```cpp
+class ScopedMockLog : public LogSink {
+ public:
+  void send(LogSeverity severity, const char* filename, const char* , int , const tm* , const char* message, size_t message_len) override {
+    Log(severity, filename, std::string(message, message_len));
+  }
+
+  MOCK_METHOD(void, Log, (LogSeverity severity, const std::string& filename, const std::string& message));
+};
+```
+
+- This makes tests easier to write without changing production code.
+
+### Organize Expectations with Sequences and Ordering
+
+- Use `InSequence` to enforce call order.
+- Use `Sequence` and `After` for partial orders.
+- Proper ordering improves test clarity and detects subtle bugs.
+
+---
+
+## 3. Common Pitfalls and How to Avoid Them
+
+### Fragile Tests Due to Over-Specification
+
+- Avoid overly strict argument matching.
+- Use wildcards (`_`) for unimportant arguments.
+- Use `EXPECT_CALL` sparingly.
+
+### Beware of Unintentional Uninteresting Calls
+
+- Uninteresting calls generate warnings by default;
+- To silence warnings without requiring expectations, use `NiceMock`.
+- Never suppress uninteresting call warnings by adding meaningless `EXPECT_CALL`s.
+
+### Handling Mock Lifetimes and Verification
+
+- Mocks verify expectations upon destruction.
+- If mocks are heap-allocated and owned elsewhere, use `Mock::VerifyAndClearExpectations()` explicitly to verify before destruction.
+
+### Mocking Overloaded/Const Methods
+
+- Define all overloads as `MOCK_METHOD`s to avoid hiding base class methods.
+- Use `using Base::Method;` to bring hidden methods into scope.
+- Use `Const()` wrapper for const-qualified methods in expectations.
+
+### Delegation Patterns
+
+- Delegate to fakes or real objects to reuse implementations and reduce test duplication.
+- Use delegation cautiously; mixing mocks and fakes may indicate overly complex interfaces.
+
+---
+
+## 4. Troubleshooting Mock Strictness Issues
+
+### Uninteresting vs Unexpected Calls
+
+- **Uninteresting call**: method called with no `EXPECT_CALL` defined.
+- **Unexpected call**: method called with some `EXPECT_CALL`s defined, but none match the call.
+
+Uninteresting calls produce warnings/errors depending on strictness mode; unexpected calls always fail the test.
+
+### When Using StrictMock
+
+- All uninteresting calls cause immediate failures.
+- Review test code to ensure all expected calls are declared.
+
+### Diagnosing Failures
+
+- Use `--gmock_verbose=info` to print matching attempts and call traces.
+- Check for arguments mismatched or calls out of order.
+
+<Tip>
+Enable verbose logging during development to gain insight into why expectations fail.
+</Tip>
+
+---
+
+## 5. Summary of When to Use Each Mock Strictness Mode
+
+| Mode          | Behavior for Uninteresting Calls           | When to Use                                         |
+|---------------|--------------------------------------------|----------------------------------------------------|
+| NiceMock      | Suppresses warning; continues silently     | Default; when you want less noisy tests             |
+| NaggyMock     | Prints warnings for uninteresting calls    | Debug/testing phase, to catch unexpected calls     |
+| StrictMock    | Treats uninteresting calls as test failures| Final verification; enforce strict API requirements |
+
+---
+
+## 6. Additional Resources
+
+- [gMock Cookbook: The Nice, the Strict, and the Naggy](https://github.com/google/googletest/blob/main/docs/gmock_cook_book.md#NiceStrictNaggy)
+- [Mock Object Strictness Modes API Reference](https://github.com/google/googletest/blob/main/docs/api-reference/mocking-apis/strictness-modes.mdx)
+- [Setting Expectations & Using ON_CALL/EXPECT_CALL](https://github.com/google/googletest/blob/main/docs/api-reference/mocking-apis/defining-expectations.mdx)
+- [Matchers Guide for Argument Matching](https://github.com/google/googletest/blob/main/docs/api-reference/mocking-apis/using-matchers.mdx)
+- [Effective Mocking Patterns](https://github.com/google/googletest/blob/main/docs/gtest-guides/intermediate-patterns/mocking_patterns.mdx)
+
+---
+
+## 7. Troubleshooting Scenarios
+
+<AccordionGroup title="Troubleshooting and Debugging Mocking Issues">
+<Accordion title="My test fails with uninteresting call warnings despite ON_CALL settings">
+If you see warnings about uninteresting calls despite defining `ON_CALL` defaults, consider:
+
+- `ON_CALL` only sets *default behavior*, it does *not* set expectations.
+- Use `EXPECT_CALL` if you want to assert a method should be called.
+- Alternatively, wrap your mock in `NiceMock` to suppress warnings on uninteresting calls.
+- To allow all calls to a method without warnings, use `EXPECT_CALL(mock, Method(_)).Times(AnyNumber());`.
+
+</Accordion>
+<Accordion title="Unexpected calls causing test failures">
+Unexpected calls (calls that do not match any `EXPECT_CALL` expectation) always cause failures:
+
+- Review your `EXPECT_CALL`s to ensure all expected calls are accounted for.
+- Add catch-all `EXPECT_CALL`s with wildcard matchers as fallbacks.
+- Use verbosity flags (`--gmock_verbose=info`) to diagnose which expectations were tried and why they failed.
+
+</Accordion>
+<Accordion title="StrictMock causing failures on uninteresting calls">
+When switching to `StrictMock`, uninteresting calls cause test failures:
+
+- Make sure all mock method calls are properly expected.
+- Use `NiceMock` if you want to ignore uninteresting calls.
+- Consider whether your tests are over-constraining interactions.
+
+</Accordion>
+<Accordion title="Compiler warnings or errors related to MOCK_METHOD usage">
+Common causes include:
+
+- Commas within template arguments should be wrapped with extra parentheses or use type aliases.
+- For const or overloaded methods, use correct qualifiers `(const, override)`.
+- For complex signatures, refer to the gMock Cookbook and Cheatsheet for syntax details.
+
+</Accordion>
+</AccordionGroup>
+
+---
+
+## 8. Summary
+
+Effective use of GoogleMock's mocking strategies revolves around balancing strictness modes to regulate test noise against mock usage, carefully crafting expectations using `ON_CALL` and `EXPECT_CALL`, organizing mock call sequences to maintain test clarity, and avoiding over-mocking which causes brittle tests. Understanding and selecting between NiceMock, NaggyMock, and StrictMock, combined with practical best practices, empowers you to write robust, maintainable unit tests with precise interaction verification.
+
+<Tip>
+When unsure, start with NiceMock and `ON_CALL` defaults for broad behavior, and write precise `EXPECT_CALL`s only where interaction correctness is critical.
+</Tip>
