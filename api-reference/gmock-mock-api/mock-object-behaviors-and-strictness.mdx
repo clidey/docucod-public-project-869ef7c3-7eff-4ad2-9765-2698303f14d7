@@ -1,0 +1,240 @@
+---
+title: "Mock Object Behaviors & Strictness"
+description: "Explores strictness controls (NiceMock, NaggyMock, StrictMock), managing uninteresting calls, and controlling verification policies. Guides users on choosing the appropriate behavior for thorough, intent-driven unit tests."
+---
+
+# Mock Object Behaviors & Strictness
+
+This page details how GoogleMock manages mock object behaviors concerning uninteresting calls, strictness levels, and verification policies. It explains the three key strictness wrappers — `NiceMock`, `NaggyMock`, and `StrictMock` — and guides users in choosing the appropriate strictness policy to create intentional, stable, and maintainable tests.
+
+---
+
+## Understanding Uninteresting Calls in GoogleMock
+
+In GoogleMock, a call to a mock method is classified based on whether the test has any expressed expectations about it:
+
+- **Uninteresting Call**: Occurs when there is *no* `EXPECT_CALL` set for that method. The mock will proceed with default behavior, but a warning is typically emitted.
+- **Unexpected Call**: Occurs when there *are* `EXPECT_CALL`s set for a method, but none of those expectations match the call's arguments. This always causes a test error.
+
+By default, GoogleMock warns about uninteresting calls, which can be helpful to catch missed or forgotten expectations. However, in some situations, you may want to suppress these warnings or escalate them to failures.
+
+<Note>
+The distinction between uninteresting and unexpected calls is critical for managing test intent and failure sensitivity.
+</Note>
+
+## Strictness Wrappers: NiceMock, NaggyMock, and StrictMock
+
+GoogleMock provides three class templates to modulate how uninteresting calls are treated, enabling you to tune the strictness of your mocks:
+
+### 1. `NiceMock<T>`
+
+A `NiceMock` object silently ignores uninteresting calls. No warnings are emitted for calls that have no matching expectations.
+
+```cpp
+using ::testing::NiceMock;
+
+NiceMock<MockFoo> nice_mock;  // Construct NiceMock from MockFoo
+EXPECT_CALL(nice_mock, DoSomething());
+// Calls to other methods without expectations produce NO warnings.
+```
+
+`NiceMock<T>` inherits all constructors from `T` and can be used wherever `T` is accepted. It is recommended to use `NiceMock` for less noisy tests where uninteresting calls are acceptable.
+
+### 2. `NaggyMock<T>`
+
+A `NaggyMock` object issues warnings on uninteresting calls but does not fail the test.
+
+```cpp
+using ::testing::NaggyMock;
+
+NaggyMock<MockFoo> naggy_mock;
+EXPECT_CALL(naggy_mock, DoSomething());
+// Other uninteresting calls generate warnings.
+```
+
+By default, raw mocks behave like `NaggyMock`. Use `NaggyMock` explicitly to retain this behavior for clarity.
+
+### 3. `StrictMock<T>`
+
+`StrictMock` treats any uninteresting call as a test failure.
+
+```cpp
+using ::testing::StrictMock;
+
+StrictMock<MockFoo> strict_mock;
+EXPECT_CALL(strict_mock, DoSomething());
+// Calls to other methods without expectations cause failures.
+```
+
+Use `StrictMock` when you want to enforce that *all* calls to the mocked object are explicitly expected, which helps ensure completeness but may increase test fragility.
+
+<Warning>
+`NiceMock`, `NaggyMock`, and `StrictMock` only affect uninteresting calls. They do *not* suppress errors from unexpected calls (calls that don't match any expectation's argument matchers).
+</Warning>
+
+<Note>
+These wrappers only work correctly for mock methods defined *directly* in the mock class `T` using `MOCK_METHOD`. They might not affect inherited mock methods due to C++ limitations.
+</Note>
+
+## When to Use Each Wrapper
+
+| Strictness Level         | Behavior on Uninteresting Calls                                                  | Use Cases                               |
+|-------------------------|---------------------------------------------------------------------------------|----------------------------------------|
+| `NiceMock<T>`           | Suppresses all warnings; calls are allowed and silent                           | Tests where excess calls are harmless or irrelevant                         |
+| `NaggyMock<T>` (default)| Emits warnings on uninteresting calls, but test continues                      | Useful during development to catch missed expectations                      |
+| `StrictMock<T>`         | Treats uninteresting calls as test failures                                    | To enforce strict interface contracts and catch unexpected behavior         |
+
+<Info>
+Generally, prefer `NiceMock` for stable, maintainable tests, using `NaggyMock` when actively debugging test behavior, and reserve `StrictMock` for critical interfaces or final verification.
+</Info>
+
+## How Strictness Is Implemented
+
+Under the hood, these wrappers register different reaction policies with GoogleMock’s core. They utilize internal classes that tell the mock framework whether to allow, warn, or fail on uninteresting calls. 
+
+The wrapper classes inherit directly from the original mock class, forwarding constructor arguments transparently to support all forms of mock instantiation.
+
+## Common Usage Patterns
+
+### Suppressing Uninteresting Call Warnings
+
+To silence warnings on specific mocks:
+
+```cpp
+using ::testing::NiceMock;
+NiceMock<MyMock> my_mock;
+EXPECT_CALL(my_mock, UsedMethod());
+// Calls to other mock methods won't warn.
+```
+
+Alternatively, for individual methods you can use a broad catch-all expectation:
+
+```cpp
+EXPECT_CALL(my_mock, SomeMethod(_)).Times(AnyNumber());
+```
+
+This marks all calls to `SomeMethod` as expected, suppressing warnings, but only for that method.
+
+### Making All Calls Strict
+
+When you want to ensure your mock interactions conform exactly to the expectations:
+
+```cpp
+using ::testing::StrictMock;
+StrictMock<MyMock> my_strict_mock;
+EXPECT_CALL(my_strict_mock, ExpectedMethod());
+// Any other method call will fail the test.
+```
+
+### Retiring Expectations to Avoid Stickiness
+
+Expectations in GoogleMock are "sticky" by default — they stay active even after being saturated (reached their call limit), which can cause confusing failures on subsequent calls.
+
+To avoid this, use `.RetiresOnSaturation()` on expectations:
+
+```cpp
+EXPECT_CALL(my_mock, SomeMethod())
+    .Times(2)
+    .RetiresOnSaturation();
+```
+
+This deactivates the expectation once the call count is reached, allowing fallback expectations to match later calls.
+
+When managing sequences of calls with varying actions, combine `.RetiresOnSaturation()` with explicit sequences:
+
+```cpp
+{
+  InSequence seq;
+  EXPECT_CALL(my_mock, DoStep(1))
+      .WillOnce(Return(true))
+      .RetiresOnSaturation();
+  EXPECT_CALL(my_mock, DoStep(2))
+      .WillOnce(Return(false))
+      .RetiresOnSaturation();
+}
+```
+
+## Controlling Verification Lifecycle
+
+GoogleMock verifies that all expectations on a mock object are satisfied when the mock is destroyed. If a mock is allocated on the heap or has an unusual lifecycle, this automatic verification may not occur, possibly masking test failures.
+
+Use `Mock::VerifyAndClearExpectations(&mock_object)` to manually trigger verification and clear expectations while the mock is still alive:
+
+```cpp
+using ::testing::Mock;
+
+MockFoo* foo = new MockFoo;
+EXPECT_CALL(*foo, SomeMethod());
+// ... code that uses foo ...
+Mock::VerifyAndClearExpectations(foo); // verify now
+// delete foo later
+```
+
+<Warning>
+Do not set new expectations on a mock after calling `VerifyAndClearExpectations()`, as this leads to undefined behavior.
+</Warning>
+
+## Important Considerations & Best Practices
+
+- **Uninteresting vs Unexpected Calls**:
+  - Uninteresting calls have no expectations and are either warned (default) or handled based on strictness wrappers.
+  - Unexpected calls violate existing expectations and always cause test failures.
+
+- **Avoid Over-Strictness**: While strict mocks catch unwanted calls, overuse can cause brittle tests that break with implementation changes unrelated to functional correctness.
+
+- **Set Expectations Before Calls**: Always set your `EXPECT_CALL`s before any invocation to ensure predictable behavior and avoid undefined results.
+
+- **Use Sequences and `.RetiresOnSaturation()`**: When controlling order and call counts, use `InSequence` and `.RetiresOnSaturation()` to avoid sticky expectations causing confusing failures.
+
+- **Constructor Support**: `NiceMock`, `NaggyMock`, and `StrictMock` forward all constructors to allow seamless substitution.
+
+- **Limitations**: These wrappers only affect mock methods declared with `MOCK_METHOD` in the immediate class, and assume the mock destructor is virtual.
+
+## Example: Comparing Strictness Wrappers
+
+```cpp
+class MockDatabase {
+ public:
+  MOCK_METHOD(void, Connect, (), ());
+  MOCK_METHOD(bool, Query, (const std::string&), ());
+};
+
+// Default (Naggy) mock: warns on unexpected calls
+TEST(NaggyMockTest, WarnsOnUnexpected) {
+  MockDatabase db;
+  EXPECT_CALL(db, Connect());
+  db.Connect();      // OK
+  db.Query("SELECT");  // Warning: uninteresting call
+}
+
+// NiceMock: silently ignores uninteresting calls
+TEST(NiceMockTest, IgnoresUninteresting) {
+  NiceMock<MockDatabase> db;
+  EXPECT_CALL(db, Connect());
+  db.Connect();
+  db.Query("SELECT");  // No warning
+}
+
+// StrictMock: errors on uninteresting calls
+TEST(StrictMockTest, FailsOnUninteresting) {
+  StrictMock<MockDatabase> db;
+  EXPECT_CALL(db, Connect());
+  db.Connect();
+  // db.Query("SELECT");  // Fails: unexpected call
+}
+```
+
+## Additional Resources
+
+- [Mocking Reference (EXPECT_CALL and ON_CALL)](/api-reference/gmock-mock-api/mock-expectations-and-actions)
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html)
+- [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html)
+- [Matchers Reference](/api-reference/gmock-mock-api/matchers-reference)
+
+---
+
+For guided workflows on creating mocks and handling expectations, see the [Mocking Basics](https://google.github.io/googletest/guides/real-world-workflows/mocking-basics.html) and [Extending GoogleTest and GoogleMock](https://google.github.io/googletest/guides/integration-and-advanced/extending.html) guides.
+
+<Check>
+Ensure you choose the strictness level that matches your test intent and maintain clear, maintainable expectation sets to avoid brittle tests.
+</Check>
