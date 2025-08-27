@@ -1,0 +1,228 @@
+---
+title: "Common Scenarios and Solutions"
+description: "A curated set of practical examples covering frequent use cases such as testing asynchronous code, legacy codebases, and third-party integrations. Each scenario includes illustrated solutions and links to in-depth references."
+---
+
+# Common Scenarios and Solutions
+
+This guide presents practical examples covering frequent GoogleMock use cases, such as testing asynchronous code, legacy projects, and third-party integrations. Each scenario is accompanied by clear, illustrated solutions and pointers to detailed references to help you overcome common challenges.
+
+---
+
+## Table of Contents
+
+- [Testing Asynchronous Behavior](#testing-asynchronous-behavior)
+- [Mocking Legacy Code](#mocking-legacy-code)
+- [Integrating with Third-Party Libraries](#integrating-with-third-party-libraries)
+- [Debugging Expectation Failures](#debugging-expectation-failures)
+- [Handling Move-Only Types](#handling-move-only-types)
+- [Best Practices and Tips](#best-practices-and-tips)
+
+---
+
+## Testing Asynchronous Behavior
+
+When your production code involves asynchronous operations, tests may become nondeterministic and unreliable due to races and timing issues. GoogleMock techniques can help you synchronize and verify asynchronous calls effectively.
+
+### Workflow
+
+1. Use mock callbacks or signals to notify when asynchronous operations complete.
+2. Employ synchronization primitives such as `absl::Notification` or condition variables.
+3. Set expectations to verify that async calls occur as intended.
+
+### Example
+
+```cpp
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+#include "absl/synchronization/notification.h"
+
+class MockAsyncProcessor {
+ public:
+  MOCK_METHOD(void, ProcessEvent, (int event_id), ());
+};
+
+TEST(AsyncTest, ProcessesEvent) {
+  MockAsyncProcessor mock;
+  absl::Notification done;
+
+  EXPECT_CALL(mock, ProcessEvent(42))
+      .WillOnce([&done](int) { done.Notify(); });
+
+  // Code under test triggers ProcessEvent(42) asynchronously
+  // ...
+
+  done.WaitForNotification();  // Wait until ProcessEvent(42) signals completion
+}
+```
+
+### Tips
+
+- Be cautious: if an expectation is not satisfied, waiting indefinitely may occur. Use timeouts where practical.
+- Use `ON_CALL()` to set default behaviors on async methods that don’t affect the main test validation.
+
+[Learn more](https://google.github.io/googletest/gmock_cook_book.html#TestingAsynchronousCode)
+
+---
+
+## Mocking Legacy Code
+
+Legacy code without interfaces or reliance on global/static functions can be challenging to test. Use GoogleMock to simulate difficult-to-change dependencies by introducing polymorphism or function objects.
+
+### Strategy
+
+- Extract dependencies behind interfaces when feasible.
+- Use `MockFunction` for mocking `std::function` or callbacks.
+- Delegate calls to fakes or real objects inside mocks to reuse existing logic.
+
+### Example: Delegating to a Fake
+
+```cpp
+class RealService {
+ public:
+  virtual ~RealService() = default;
+  virtual int DoWork(int x) { return x * 2; }
+};
+
+class MockService : public RealService {
+ public:
+  MOCK_METHOD(int, DoWork, (int x), (override));
+
+  void DelegateToReal() {
+    ON_CALL(*this, DoWork).
+        WillByDefault([this](int x) { return real_.DoWork(x); });
+  }
+
+ private:
+  RealService real_;
+};
+
+// Usage in tests:
+MockService mock;
+mock.DelegateToReal();
+EXPECT_CALL(mock, DoWork(5)).WillOnce(testing::Return(11));
+```
+
+### Tips
+
+- If you cannot modify legacy code, wrap it in adapters to facilitate mocking.
+- Use `Invoke()` or lambdas to forward calls easily.
+
+[Learn more](https://google.github.io/googletest/gmock_cook_book.html#DelegatingCallsToFakes)
+
+---
+
+## Integrating with Third-Party Libraries
+
+Sometimes you need to mock interactions with external libraries that are difficult to control.
+
+### Techniques
+
+- Use adapters/interfaces to abstract the external library.
+- Mock the adapter and set expectations on it.
+- Use `MockFunction` for mocking `std::function` callbacks passed to third-party APIs.
+
+### Example: Mocking a `std::function` Callback
+
+```cpp
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+
+using ::testing::MockFunction;
+
+MockFunction<void(int)> mock_cb;
+EXPECT_CALL(mock_cb, Call(42)).Times(1);
+
+// Passing the callback to third-party code expecting std::function<void(int)>
+auto cb = mock_cb.AsStdFunction();
+third_party_code.RegisterCallback(cb);
+
+// ...
+
+// Invoke code through third party...
+```
+
+### Tips
+
+- Always verify expectations on your mocks before test teardown.
+- Use `ON_CALL` for common default behaviors.
+
+[Learn more](https://google.github.io/googletest/gmock_for_dummies.html#MockFunction)
+
+---
+
+## Debugging Expectation Failures
+
+To effectively diagnose why mocks are not being called as expected:
+
+- Run tests with `--gmock_verbose=info` to get detailed tracing of mock calls and expectation matches.
+- Examine call and expectation order if sequence constraints are used.
+- Use informative matchers and `With()` clauses to better restrict expectations.
+
+### Common Pitfalls
+
+- Setting expectations after the mock has started being used leads to undefined behavior.
+- Overly strict ordering leads to fragile tests; consider partial orders using `After()` or `InSequence`.
+
+[Learn more](https://google.github.io/googletest/gmock_faq.html#faq_12)
+
+---
+
+## Handling Move-Only Types
+
+Mocking methods that accept or return move-only types like `std::unique_ptr` requires attention.
+
+### Guidance
+
+- Use the modern `MOCK_METHOD` macro with the correct signature to support move-only types.
+- Use lambdas in `WillOnce` or `WillRepeatedly` to generate/move values each time they’re needed.
+
+### Example
+
+```cpp
+class Buzz { ... };
+class Buzzer {
+ public:
+  virtual std::unique_ptr<Buzz> MakeBuzz(std::string text) = 0;
+};
+
+class MockBuzzer : public Buzzer {
+ public:
+  MOCK_METHOD(std::unique_ptr<Buzz>, MakeBuzz, (std::string text), (override));
+};
+
+MockBuzzer mock;
+EXPECT_CALL(mock, MakeBuzz("hello"))
+    .WillOnce([](std::string) {
+      return std::make_unique<Buzz>();
+    });
+```
+
+### Tips
+
+- Avoid using `Return(std::move(...))` with repeated calls, as the moved-from object becomes invalid.
+- When mocking methods accepting move-only arguments, use matchers compatible with the logic.
+
+[Learn more](https://google.github.io/googletest/docs/gmock_cook_book.html#MockingMoveOnlyTypes)
+
+---
+
+## Best Practices and Tips
+
+- Use `ON_CALL` to specify default behaviors without imposing strict call expectations.
+- Use `EXPECT_CALL` only when you want to verify that a call must happen.
+- For call sequences, prefer `InSequence` and `After` clauses to specify call order explicitly.
+- Make use of `NiceMock`, `NaggyMock`, and `StrictMock` to control how uninteresting calls are treated.
+- Avoid setting expectations after mock methods have been invoked.
+- For complex argument matching, use combined or multi-argument matchers via the `.With()` clause.
+
+---
+
+For detailed explanations and more examples, consult the following resources:
+
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html)
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html)
+- [Mocking Reference](https://google.github.io/googletest/reference/mocking.md)
+- [Legacy gMock FAQ](https://google.github.io/googletest/gmock_faq.html)
+
+---
