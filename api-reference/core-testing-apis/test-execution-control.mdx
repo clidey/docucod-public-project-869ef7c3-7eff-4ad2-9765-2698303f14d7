@@ -1,255 +1,347 @@
 ---
-title: "Test Execution and Initialization"
-description: "Explains APIs for initializing test environments, running tests programmatically, and controlling test execution (including main entry points and test runners). Helps users understand integration with continuous integration pipelines and custom runners."
+title: "Test Execution Control and Environment"
+description: "Explains the APIs for environment setup, teardown, test filtering, command-line options, and ways to influence test execution. Helps users integrate tests into various build and CI systems, configuring environment variables and reporting options."
 ---
 
-# Test Execution and Initialization
+# Test Execution Control and Environment
 
-GoogleTest provides a comprehensive API for initializing test environments, controlling test execution, and running tests programmatically. This API supports flexible integration into development workflows, including continuous integration (CI) pipelines and custom test runners.
+GoogleTest empowers you to take full control of how tests are executed, filtered, and managed in your development and continuous integration environments. This documentation details the essential APIs and command-line options that enable you to configure the test environment, orchestrate test execution flows, and influence reporting behaviors.
 
 ---
 
-## Overview
+## Table of Contents
 
-At the heart of GoogleTest's test execution API is a simple but powerful flow:
+- [Test Environment Setup and Teardown](#test-environment-setup-and-teardown)
+- [Controlling Test Execution](#controlling-test-execution)
+- [Filtering Tests](#filtering-tests)
+- [Command-Line Flags and Options](#command-line-flags-and-options)
+- [Running Tests Programmatically](#running-tests-programmatically)
+- [Integration with Build and CI Systems](#integration-with-build-and-ci-systems)
+- [Troubleshooting and Best Practices](#troubleshooting-and-best-practices)
 
-1. **Initialize GoogleTest:** Parse command-line flags and set up the framework.
-2. **Register Tests:** Tests are automatically registered via macros or can be registered dynamically.
-3. **Run Tests:** Invoke all registered tests, either in one batch or selectively.
-4. **Retrieve Results:** Analyze and process test results programmatically.
+---
 
-Most developers rely on the default main entry points, but the API also supports writing customized runners for special workflows.
+## Test Environment Setup and Teardown
 
-## Initialization
+GoogleTest provides powerful hooks to initialize and clean up resources before and after test cases run, helping you maintain a clean and controlled environment.
 
-### `InitGoogleTest(&argc, argv)`
+### Environment Setup
 
-To prepare GoogleTest for execution, you must call `InitGoogleTest()` early in your program, typically at the start of your `main()` function. This function:
-
-- Parses GoogleTest-specific command-line flags.
-- Removes recognized flags from `argv`, adjusting `argc` accordingly.
-- Initializes internal state used during test execution.
-
-**Important:** Always call `InitGoogleTest` before running tests or invoking any test-related API.
+Implement the `::testing::Environment` class to define global setup and teardown routines.
 
 ```cpp
+class MyEnvironment : public ::testing::Environment {
+ public:
+  void SetUp() override {
+    // Prepare global resources, e.g., initialize shared data
+  }
+
+  void TearDown() override {
+    // Cleanup resources initialized in SetUp
+  }
+};
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
+  ::testing::AddGlobalTestEnvironment(new MyEnvironment);
   return RUN_ALL_TESTS();
 }
 ```
 
-> `InitGoogleTest()` is available in variants to support wide-character Windows programs and embedded systems with no `argc/argv`.
+- `SetUp()`: Called before any tests run. Use it to initialize resources shared by all tests.
+- `TearDown()`: Called after all tests run. Use it to release global resources.
 
-### Command-Line Flags
+**Tip:** Adding multiple environments is possible and they will be executed in order of addition.
 
-GoogleTest supports multiple flags to control test execution, including test filters, output format, repeat count, and more. These are documented in the user guides and parsed by `InitGoogleTest()` transparently.
+### Test Fixture Setup and Teardown
+
+For setup and teardown at the test case or test suite level, use test fixtures via `TEST_F`:
+
+```cpp
+class MyTestFixture : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    // runs before each test
+  }
+
+  void TearDown() override {
+    // runs after each test
+  }
+};
+
+TEST_F(MyTestFixture, ExampleTest) {
+  // Your test code
+}
+```
 
 ---
 
-## Running Tests
+## Controlling Test Execution
 
-### `RUN_ALL_TESTS()`
+GoogleTest offers APIs and flags to start, pause, stop, and customize test runs.
 
-Once initialized, invoke `RUN_ALL_TESTS()` to execute all tests registered in the current binary. It automatically:
+### Running Tests
 
-- Runs all enabled tests,
-- Aggregates results,
-- Cleans up any registered environments,
-- Returns the overall success status (0 for success, non-zero otherwise).
+- `RUN_ALL_TESTS()`: Executes all tests that match filtering criteria. Returns 0 if all tests succeed.
+
+### Programmatic Control
+
+You can programmatically control test execution using `UnitTest` singleton:
 
 ```cpp
+#include "gtest/gtest.h"
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
+
+  // Access the UnitTest singleton
+  auto& unit_test = *::testing::UnitTest::GetInstance();
+
+  // Custom logic before running tests
+
   int result = RUN_ALL_TESTS();
-  // Optionally use 'result' for your own process handling
+
+  // Custom logic after running tests
+
   return result;
 }
 ```
 
-**Usage Notes:**
+### Setting Up Listeners
 
-- You must **not** ignore the return value of `RUN_ALL_TESTS()`. It represents whether all tests passed.
-- Call this function only once during your program’s lifetime.
-- If a fatal failure occurs in a test, subsequent tests are skipped.
-
-### Custom Test Execution
-
-In advanced use cases, such as when integrating with CI systems or building a custom runner, you may want to invoke tests selectively or programmatically control execution.
-
-You can use the singleton `UnitTest` class to query and run tests:
+Test event listeners allow you to intercept test progress and customize reporting:
 
 ```cpp
-using ::testing::UnitTest;
-
-UnitTest* unit_test = UnitTest::GetInstance();
-int total_tests = unit_test->total_test_count();
-
-// Run tests individually
-for (int i = 0; i < total_tests; ++i) {
-  const ::testing::TestInfo* test_info = unit_test->GetTestSuite(i)->GetTestInfo(0);
-  if (test_info->should_run()) {
-    // You can programmatically invoke this test
+class MyListener : public ::testing::EmptyTestEventListener {
+  void OnTestStart(const ::testing::TestInfo& test_info) override {
+    // Called before a test starts
   }
-}
-```
 
-However, GoogleTest does not provide a public API to invoke tests individually; test registration and execution remain under internal control to maintain consistent test lifecycle management.
-
----
-
-## Test Environment Management
-
-GoogleTest supports registering global environments via `testing::Environment` subclasses. These environments allow setup and teardown arrangements that span multiple tests or test suites.
-
-### Adding Environments
-
-Register environments *before* calling `RUN_ALL_TESTS`:
-
-```cpp
-class MyEnvironment : public testing::Environment {
- public:
-  void SetUp() override {
-    // Code to set up before any test runs
-  }
-  void TearDown() override {
-    // Code to clean up after all tests run
+  void OnTestEnd(const ::testing::TestInfo& test_info) override {
+    // Called after a test ends
   }
 };
 
-testing::AddGlobalTestEnvironment(new MyEnvironment);
-```
-
-Environments are initialized in the order they are registered and torn down in reverse order.
-
----
-
-## Main Entry Points Provided by GoogleMock
-
-When using GoogleMock alongside GoogleTest, integration is seamless. GoogleMock offers a variant of `main()` with `gmock_main` that handles initialization for both frameworks.
-
-### Using `gmock_main` Library
-
-Linking with `gmock_main` provides a pre-built `main()` that:
-
-- Calls `InitGoogleMock()`, which initializes both GoogleMock and GoogleTest,
-- Invokes `RUN_ALL_TESTS()`.
-
-This saves you from writing boilerplate initialization code.
-
-### Writing a Custom `main()` With GoogleMock
-
-If you need custom setup, you can replicate the default main:
-
-```cpp
-#include "gmock/gmock.h"
-
 int main(int argc, char** argv) {
-  testing::InitGoogleMock(&argc, argv);
+  ::testing::InitGoogleTest(&argc, argv);
+
+  auto& listeners = ::testing::UnitTest::GetInstance()->listeners();
+  listeners.Append(new MyListener());
+
   return RUN_ALL_TESTS();
 }
 ```
 
-This approach allows you to add any setup or teardown logic while controlling test execution explicitly.
+### Skipping Tests
 
-### Support for Embedded Platforms
-
-For platforms like ESP8266 or Arduino where no standard `main()` exists, GoogleMock provides hooks `setup()` and `loop()` to integrate with the platform lifecycle:
+- Use `GTEST_SKIP()` within a test to skip it based on conditions:
 
 ```cpp
-void setup() {
-  testing::InitGoogleMock();
-}
-
-void loop() {
-  RUN_ALL_TESTS();
+TEST(MyTest, ConditionallySkip) {
+  if (!FeatureAvailable()) {
+    GTEST_SKIP() << "Skipping because feature is unavailable";
+  }
+  // Test code
 }
 ```
 
-This makes it straightforward to use GoogleMock on constrained and embedded systems.
+---
+
+## Filtering Tests
+
+GoogleTest lets you run a subset of your test suite using filtering expressions.
+
+### Basic Filtering
+
+- Command-line flag: `--gtest_filter` accepts positive and negative patterns.
+- Syntax:
+
+```
+--gtest_filter=PositivePatterns[-NegativePatterns]
+```
+
+- Examples:
+
+```shell
+# Run only tests from FooTest test suite
+--gtest_filter=FooTest.*
+
+# Run tests starting with "Bar"
+--gtest_filter=*.Bar*
+
+# Exclude tests in FooTest.Bar
+--gtest_filter=-FooTest.Bar
+
+# Combine both
+--gtest_filter=FooTest.*-FooTest.Bad*
+```
+
+### Advanced Filtering
+
+- Patterns support wildcards `*` and `?`.
+- Multiple patterns separated by `:` for OR semantics.
+
+```shell
+--gtest_filter=FooTest.*:BarTest.*
+```
+
+### Environment Variable Override
+
+Set `GTEST_FILTER` environment variable if command-line flag is not specified.
+
+**Tip:** Use filtering to reduce runtime and focus on relevant test cases during development or CI.
 
 ---
 
-## Practical Example: Integrating GoogleTest in a CI Pipeline
+## Command-Line Flags and Options
 
-1. **Initialize GoogleTest in `main()`:**
+GoogleTest supports numerous command-line flags to configure behavior.
 
-   ```cpp
-   int main(int argc, char** argv) {
-     ::testing::InitGoogleTest(&argc, argv);
-     return RUN_ALL_TESTS();
-   }
-   ```
+### Common Flags
 
-2. **Configure your CI tool to run the test binary:**
+| Flag                          | Description                                          |
+|-------------------------------|-----------------------------------------------------|
+| `--gtest_output=xml:<path>`   | Generate test results in XML format at the given path. |
+| `--gtest_repeat=N`            | Repeat tests N times. Useful for flaky test detection. |
+| `--gtest_shuffle`             | Randomize the order tests are run in.               |
+| `--gtest_random_seed=1234`    | Use a specific seed for shuffling tests.            |
+| `--gtest_break_on_failure`    | Break into debugger on first test failure.          |
+| `--gtest_catch_exceptions=0` | Disable exception catching to debug test crashes.   |
+| `--gtest_list_tests`          | List all tests without running them.                 |
 
-   ```bash
-   ./my_tests --gtest_filter=* --gtest_output=xml:report.xml
-   ```
+### Mock-Specific Flags (from GoogleMock)
 
-3. **Collect and parse the XML report** to evaluate test results and generate dashboards or alerts.
+| Flag                                  | Description                                              |
+|---------------------------------------|----------------------------------------------------------|
+| `--gmock_verbose=info|warning|error`  | Controls verbosity of gMock warnings and info messages. |
+| `--gmock_catch_leaked_mocks=0|1`      | Enable or disable detection of leaked mock objects.       |
 
-4. **Use command-line flags** like `--gtest_repeat=N` to rerun tests multiple times or `--gtest_fail_fast` to stop on first failure.
+For example:
 
-This flow ensures automated, repeatable, and maintainable test runs in integration environments.
+```shell
+./my_tests --gtest_filter=MathTest.* --gtest_repeat=10 --gtest_output=xml:results.xml
+```
+
+### Viewing All Available Flags
+
+Invoke your test binary with `--help` or `--help --gtest_flags` to see the full list and descriptions.
 
 ---
 
-## Troubleshooting Common Issues
+## Running Tests Programmatically
 
-### Tests Not Running
+### Initialization and Running
 
-- Make sure you call `InitGoogleTest()` before `RUN_ALL_TESTS()`.
-- Confirm that your tests are properly registered (using `TEST()` or `TEST_F()`) and not disabled.
-- Check any filtering flags that might exclude tests.
+Start a test run by initializing GoogleTest and calling the test runner:
 
-### Duplicate or Missing `main()`
+```cpp
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
+}
+```
 
-- If linking against both `gtest_main` and a custom `main()`, you may get linker errors — only one entry point should be defined.
-- When using GoogleMock, prefer linking `gmock_main` or provide your own `main()` that calls `InitGoogleMock()`.
+Modify command-line arguments programmatically before or after initialization to affect filtering and flags.
 
-### Ignored Command-Line Flags
+### Custom Main for Advanced Control
 
-- Ensure `InitGoogleTest()` consumes your flags by calling it early in `main()`.
-- Flags unknown to GoogleTest will remain in `argv`; verify you're passing correct flags.
+You can replace `RUN_ALL_TESTS()` with finer control:
+
+```cpp
+#include "gtest/gtest.h"
+
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  auto& unit_test = *::testing::UnitTest::GetInstance();
+
+  for (int i = 0; i < unit_test.test_to_run_count(); ++i) {
+    const ::testing::TestInfo* test_info = unit_test.GetTestToRun(i);
+    // You can decide to skip or customize execution here
+    test_info->test_case_name();
+    test_info->name();
+  }
+
+  return RUN_ALL_TESTS();
+}
+```
+
+This approach supports complex testing frameworks or when integrating with custom test runners.
+
+---
+
+## Integration with Build and CI Systems
+
+To integrate smoothly with build, continuous integration, and deployment pipelines:
+
+- Use `--gtest_output=xml:<file>` to generate machine-readable reports.
+- Control filtering and repetition to manage test runtimes.
+- Use environment variables and scripts to set flags for different stages.
+
+Example CI job snippet:
+
+```bash
+./my_test_binary --gtest_output=xml=report.xml --gtest_filter=ProdTests.*
+```
+
+Ensure your build system captures standard output and XML reports for failure diagnosis.
+
+---
+
+## Troubleshooting and Best Practices
+
+- **Test Setup Failures:** Ensure proper resource initialization in global and fixture setups.
+- **Test Filtering Unexpected Behavior:** Verify patterns carefully; use `--gtest_list_tests` to confirm.
+- **Flaky Tests:** Use `--gtest_repeat` and random seed flags to expose them.
+- **Mock Object Leaks:** Use `Mock::AllowLeak` to intentionally ignore, but avoid leaks.
+- **Controlling Verbosity:** Adjust `--gmock_verbose` to balance debug message volume.
+
+---
+
+## Related API References and Guides
+
+- [Test Definitions and Registration](./test-definition-macros.md)
+- [Assertions and Test Expectations](./assertions.md)
+- [Mocking APIs Overview](../mocking-apis/mock-classes-methods.md)
+- [Integration and Ecosystem Overview](../../overview/architecture-concepts/integration-other-systems.md)
+
+---
+
+## Example: Using Environment Setup and Filtering
+
+```cpp
+#include <gtest/gtest.h>
+
+class MyEnvironment : public ::testing::Environment {
+ public:
+  void SetUp() override {
+    // Connect to database
+  }
+  void TearDown() override {
+    // Disconnect
+  }
+};
+
+TEST(MathTest, Addition) {
+  EXPECT_EQ(2 + 2, 4);
+}
+
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  ::testing::AddGlobalTestEnvironment(new MyEnvironment);
+
+  // Run only MathTest suite
+  ::testing::GTEST_FLAG(filtered) = "MathTest.*";
+
+  return RUN_ALL_TESTS();
+}
+```
+
+This example illustrates setting up the environment to initialize resources before any tests run, filtering tests programmatically, and then executing them.
 
 ---
 
 ## Summary
 
-This page covered GoogleTest's APIs for initializing test environments, running tests programmatically, and controlling test execution flow. Key entry points like `InitGoogleTest()` and `RUN_ALL_TESTS()` enable both simple and customized test runners, including integration with GoogleMock's initialization. Understanding this API empowers developers to build robust, automated testing pipelines and custom test instruments.
+GoogleTest's test execution control APIs provide the tools you need to build reliable, maintainable, and efficient test workflows. By leveraging environment setup hooks, test filtering capabilities, and customizable event listeners, you can craft test runs tailored precisely to your project's needs.
 
 ---
-
-## References and Further Reading
-
-- [GoogleTest Primer](../docs/primer.md) — Foundations of writing and running tests
-- [GoogleMock README](../googlemock/README.md) — Integration details for mocks and custom main()
-- [GoogleTest User's Guide](../docs/index.md) — Overview and tutorials
-- [Test and Fixture Declarations API](./test-declarations.md) — Defining tests properly
-- [Mocking Reference](./mocking.md) — Covers GoogleMock features
-
----
-
-## Visual Flow of Test Initialization and Execution
-
-```mermaid
-flowchart TD
-
-    Init["Call InitGoogleTest(argc, argv)"] --> Reg["Register Tests Automatically or Dynamically"]
-    Reg --> Run["Invoke RUN_ALL_TESTS()"]
-    Run --> SetupEnv["Set Up Global Environments"]
-    SetupEnv --> Start["Start Test Suites and Tests"]
-    Start --> TestRun["Run Each Test"]
-    TestRun --> TearDownEnv["Tear Down Global Environments"]
-    TearDownEnv --> Results["Return Test Results and Exit"]
-
-    style Init fill:#0078d7,stroke:#004a9f,color:#fff
-    style Run fill:#22b14c,stroke:#0a8a2c,color:#fff
-    style Results fill:#ffb000,stroke:#996600,color:#000
-
-    click Init "docs/primer.md" "More about test initialization"
-    click Reg "api-reference/core-testing-apis/test-declarations.md" "Details on test registration"
-    click Run "docs/primer.md#invoking-the-tests" "Running tests overview"
-
-```
