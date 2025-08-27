@@ -1,0 +1,228 @@
+---
+title: "Cardinalities & Lifecycle Management"
+description: "Understand cardinalities (“how many times” expectations), the role of sequence control, and the lifecycle of objects in test runs. This page connects call counting, order enforcement, and test teardown."
+---
+
+# Cardinalities & Lifecycle Management
+
+GoogleMock empowers you to precisely specify how often a mock method should be called and in what order, ensuring your tests enforce the correct interaction patterns. This page demystifies the concept of **cardinalities** (the "how many times" aspect), sequence controls for ordering calls, and the lifecycle management of mock expectations and objects during test execution.
+
+---
+
+## Understanding Cardinalities: "How Many Times" Expectations
+
+Cardinalities define the expected number of times a mock method should be invoked. They are crucial for verifying that your code interacts with its collaborators exactly as intended — no call too few, no call too many.
+
+### Built-in Cardinalities
+
+GoogleMock provides a versatile set of built-in cardinalities that you specify via the `.Times()` clause after an `EXPECT_CALL()`:
+
+| Cardinality                   | Description                                           |
+|-------------------------------|-------------------------------------------------------|
+| `AnyNumber()`                 | The method can be called any number of times (including zero). |
+| `AtLeast(n)`                 | The method should be called at least *n* times.       |
+| `AtMost(n)`                  | The method should be called at most *n* times.        |
+| `Between(m, n)`              | The method should be called between *m* and *n* times, inclusive. |
+| `Exactly(n)` or `n`          | The method should be called exactly *n* times.
+
+These cardinalities reflect common testing needs, from permissive to strict checks.
+
+### Default Inferred Cardinality
+
+If you omit the `.Times()` clause, GoogleMock infers cardinality based on other parts of the expectation:
+
+- No `.WillOnce()` or `.WillRepeatedly()` clauses → `Times(1)` (expect called exactly once).
+- *n* `.WillOnce()` clauses with no `.WillRepeatedly()` → `Times(n)`.
+- *n* `.WillOnce()` clauses with one `.WillRepeatedly()` → `Times(AtLeast(n))`.
+
+This inference balances convenience with accuracy, making tests easier to write while remaining expressive.
+
+### Custom Cardinalities
+
+If the built-in set doesn't suit your needs, GoogleMock lets you define your own cardinalities by implementing the `CardinalityInterface`. These custom cardinalities can express unique call patterns beyond common scenarios.
+
+```cpp
+class EvenNumberCardinality : public CardinalityInterface {
+ public:
+  bool IsSatisfiedByCallCount(int call_count) const override {
+    return call_count % 2 == 0;
+  }
+
+  bool IsSaturatedByCallCount(int /* call_count */) const override {
+    return false;
+  }
+
+  void DescribeTo(::std::ostream* os) const override {
+    *os << "called even number of times";
+  }
+};
+
+Cardinality EvenNumber() {
+  return MakeCardinality(new EvenNumberCardinality);
+}
+```
+
+Use your custom cardinalities in `.Times()` seamlessly.
+
+---
+
+## Lifecycle of Expectations and Mock Calls
+
+GoogleMock manages the lifecycle of expectations to ensure accurate test validation and helpful error reporting.
+
+### Expectation States
+
+- **Active:** An expectation that can still match calls.
+- **Saturated:** The upper bound of the expected call count is reached.
+- **Retired:** An expectation that no longer matches calls.
+
+**Sticky Expectations:**
+By default, expectations are *sticky*, meaning they remain active after being saturated to catch excessive calls. They only retire when explicitly told or when their successors in a sequence have been invoked.
+
+### Using `RetiresOnSaturation()`
+
+To make an expectation retire immediately once saturated, append `.RetiresOnSaturation()`:
+
+```cpp
+EXPECT_CALL(mock, Foo()).Times(2).RetiresOnSaturation();
+```
+
+This is useful when you want subsequent matching calls to be handled by other expectations.
+
+### Call Count Description
+
+GoogleMock provides human-friendly descriptions of call counts for clearer failure messages:
+
+- "never called"
+- "called once"
+- "called twice"
+- "called N times"
+
+### Common Pitfalls
+
+- Forgetting to set `.RetiresOnSaturation()` when multiple expectations could match the same calls, causing upper-bound call failures.
+
+- Setting expectations *after* the mock method has been called leads to undefined behavior. Always set your expectations *before* exercising the code under test.
+
+---
+
+## Sequence Control: Ordering Mock Calls
+
+Interaction order is frequently important to tests. GoogleMock offers flexible tools to specify **default ordering**, **sequences**, and **partial orders** among mock calls.
+
+### `InSequence` Scoped Ordering
+
+Wrap your `EXPECT_CALL`s in an `InSequence` block to require calls to occur strictly in the order declared:
+
+```cpp
+{
+  InSequence s;
+  EXPECT_CALL(mock, First());
+  EXPECT_CALL(mock, Second());
+  EXPECT_CALL(mock, Third());
+}
+```
+
+Here, `First()` must be called before `Second()`, which must be called before `Third()`.
+
+### Named `Sequence` Objects
+
+For partial ordering or more complex ordering across different mocks or test regions, use `Sequence` objects:
+
+```cpp
+Sequence s1, s2;
+EXPECT_CALL(mock1, A()).InSequence(s1);
+EXPECT_CALL(mock2, B()).InSequence(s1, s2);
+EXPECT_CALL(mock3, C()).InSequence(s2);
+```
+
+This creates a partial order where calls in the same `Sequence` occur in declared order, while calls in different sequences may interleave unless linked.
+
+### Specifying Complex Partial Orders with `.After()`
+
+Use the `.After()` clause to specify that some expectations occur only after others have succeeded:
+
+```cpp
+Expectation e1 = EXPECT_CALL(mock, Init());
+ExpectationSet es;
+es += EXPECT_CALL(mock, Load(1));
+es += EXPECT_CALL(mock, Load(2));
+EXPECT_CALL(mock, Start()).After(e1, es);
+```
+
+This expresses that `Start()` must only be called after `Init()` and all `Load()` calls.
+
+### Best Practices with Sequencing
+
+- Use sequencing sparingly and only where order matters. Overusing it can cause brittle tests fragile to implementation changes.
+
+- Prefer `InSequence` for linear call order assertions in simple scenarios.
+
+- For complex partial orders, use `Sequence` objects or `.After()` carefully.
+
+- Combine order expectations with `.RetiresOnSaturation()` to avoid upper-bound violations.
+
+---
+
+## Summary of Mock Call Processing
+
+When a mock method is called, GoogleMock:
+
+1. Locks internal mutex to maintain thread safety.
+2. Checks expectations in reverse order for a matching active expectation whose predicates match the arguments.
+3. If matched:
+   - Increments call count.
+   - Checks saturation and retires expectations as needed.
+   - Performs associated action (from `WillOnce` / `WillRepeatedly`) or default action.
+4. If no expectation matches, performs ON_CALL default action or returns default value.
+5. Prints warnings or fails if calls violate expectations (unexpected or excessive calls).
+
+This thorough process means your tests enforce both call arguments and order robustly.
+
+---
+
+## Visual Overview
+
+```mermaid
+flowchart TD
+
+  Call([Mock Method Call]) --> CheckExpectations{Find Matching Expectation?}
+
+  CheckExpectations -->|Yes| IncrementCount[Increment Call Count]
+  IncrementCount --> CheckSaturation{Is Saturated?}
+  CheckSaturation -->|Yes| RetireExpectation[Retire if RetiresOnSaturation()]
+  RetireExpectation --> PerformAction[Perform WillOnce/WillRepeatedly Action]
+  CheckSaturation -->|No| PerformAction
+
+  CheckExpectations -->|No| UseDefaultAction[Use ON_CALL or Default Value]
+
+  PerformAction --> TestNextStep[Return to Test Execution]
+  UseDefaultAction --> TestNextStep
+```
+
+---
+
+## Practical Tips and Common Pitfalls
+
+- **Always set expectations before exercising the code under test.** This enables meaningful failure diagnostics.
+- Use `.RetiresOnSaturation()` when chaining multiple `.WillOnce()` expectations to avoid "too many calls" errors.
+- Start with a catch-all `EXPECT_CALL(...).Times(AnyNumber())` for methods you don't want to strictly verify but must not generate warnings.
+- Use `InSequence` blocks only when call order matters; avoid excessive sequencing.
+- Use `.After()` for complex call dependencies across different mocks.
+- Understand that uninteresting calls (calls without expectations) produce warnings unless you use `NiceMock` to suppress them.
+
+---
+
+## Additional Resources
+
+For more in-depth information, examples, and advanced usage, please consult:
+
+- [Mocking Reference](docs/reference/mocking.md) — detailed API reference for mocks
+- [gMock Cookbook](docs/gmock_cook_book.md) — recipes for using cardinalities, sequencing, and mock behaviors
+- [gMock for Dummies](docs/gmock_for_dummies.md) — beginner-friendly intro and concepts
+- [Matchers Reference](reference/matching.md) — for argument matching configurability
+- [Strict, Naggy, and Nice Mocks](api_reference/mocking_and_matchers/strictness_and_nice_mocks.mdx) — managing uninteresting call behavior and mock strictness
+
+---
+
+By mastering cardinalities and lifecycle control in GoogleMock, your tests will reflect the precise intent, making them clearer, more maintainable, and robust against regressions.

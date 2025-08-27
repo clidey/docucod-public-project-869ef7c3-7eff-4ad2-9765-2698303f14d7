@@ -1,191 +1,218 @@
 ---
 title: "Test Discovery and Execution"
-description: "Understand how GoogleTest and GoogleMock automatically register and run tests, including the main entry points and how tests are executed in various environments."
+description: "Unpack the flow from test definition to execution: how test cases are registered, how parameterized and typed tests are organized, and how the main entry points launch and report test results."
 ---
 
 # Test Discovery and Execution
 
-Understanding how GoogleTest and GoogleMock automatically register and run tests is fundamental to leveraging the framework’s full power. This guide explains the processes around test registration, the entry points for executing tests, and how tests run in different environments.
+Understanding how GoogleTest discovers, organizes, and executes tests is fundamental to mastering test development and integration workflows. This guide unpacks the flow from test definition through registration, test suite formation—including parameterized and typed tests—to the main entry points that launch tests and report outcomes.
 
 ---
 
-## 1. Test Registration: Automatic Discovery of Tests
+## Overview of Test Registration and Discovery
 
-GoogleTest and GoogleMock use a powerful automatic test registration mechanism that eliminates the need for manual test enumeration. When you define a test with the `TEST()` or `TEST_F()` macro, the framework automatically registers it during static initialization.
+When you write tests with GoogleTest, the framework automatically discovers and registers them during program initialization. This eliminates the need for manual enumeration of tests, enabling instantaneous scalability and ease of maintenance.
 
-### How Test Registration Works:
+### How Tests Are Registered
 
-- Each `TEST()` or `TEST_F()` macro invocation creates a unique test object.
-- These test objects register themselves into global internal test registries before `main()` runs.
-- This enables the framework to know all available tests at runtime without user intervention.
-- Tests from different translation units and source files are collected seamlessly.
+Each test you define using macros such as `TEST()`, `TEST_F()`, `TEST_P()`, or `TYPED_TEST()` triggers internal registration. This process links your test functions or methods with their metadata, including **test suite names**, **test names**, **source locations**, and **any parameter or type info**.
 
-This automation allows you to add or remove tests without modifying any central list or configuration.
+For advanced scenarios, `::testing::RegisterTest()` allows runtime dynamic registration of tests. The factory callable passed to it creates a fresh test fixture instance for the test. GoogleTest then tracks these registrations to build the test execution plan.
 
-<Check>
-Always use the `TEST()` or `TEST_F()` macros to ensure proper registration. Defining tests without these macros will result in tests not being discovered or executed.
-</Check>
+### Structure Captured at Registration
 
----
+- **Test Info**: Holds metadata for a single test, including the test suite and test name, location, filtering status, and test result.
+- **Test Suite**: Groups multiple tests sharing the same suite name. GoogleTest maintains an internal vector of `TestInfo` pointers.
 
-## 2. Test Execution: Running Your Tests
-
-The central entry point for running all registered tests is the macro `RUN_ALL_TESTS()`. This macro is usually called from your `main()` function or through the provided `gtest_main` or `gmock_main` libraries that supply a default main.
-
-### Typical Usage Flow:
-
-1. **Initialization:**
-   - Call `testing::InitGoogleTest(&argc, argv)` or `testing::InitGoogleMock(&argc, argv)`, which parse command-line flags for test filtering, output formatting, and other runtime options.
-   - These functions also ensure GoogleMock and GoogleTest are prepared for execution.
-
-2. **Run Tests:**
-   - Call `RUN_ALL_TESTS()`
-   - This triggers the test framework to iterate over all registered tests.
-   - For each test:
-     - Construct a fresh test fixture object.
-     - Invoke `SetUp()` on the fixture.
-     - Execute the test body.
-     - Invoke `TearDown()` then destruct the fixture.
-     - Report the test result (success or failure).
-
-3. **Return Status:**
-   - `RUN_ALL_TESTS()` returns `0` if all tests pass, otherwise a non-zero value.
-
-### Important Notes:
-
-- Only call `RUN_ALL_TESTS()` once per run, as multiple invocations interfere with internal test lifecycle management and features such as thread-safe death tests.
-
-- Always return the value of `RUN_ALL_TESTS()` from your program’s `main()` to enable external tools or CI systems to detect test success or failure accurately.
+Once registered, the list of all test suites and their tests are maintained by the singleton `UnitTest` instance.
 
 ---
 
-## 3. How Tests Run in Different Environments
+## Organization of Different Test Types
 
-### Desktop and Server Platforms (Linux, Windows, macOS)
+GoogleTest supports various test declaration paradigms, each organized distinctly:
 
-- The `main(int argc, char** argv)` function calls `InitGoogleTest()` or `InitGoogleMock()` followed by `RUN_ALL_TESTS()`.
-- Command-line arguments can filter tests, control output verbosity, and configure environment variables.
+### Simple Tests (`TEST()`)
 
-### Embedded and Arduino-like Platforms
+- Defined as standalone functions grouped under a test suite name.
+- Automatically registered during static initialization.
+- Independent test fixture per test run.
 
-- Programs do not use the conventional `main()`.
-- Instead, GoogleMock provides `setup()` and `loop()` functions (e.g., for ESP8266, ESP32, NRF52).
-- `setup()` calls `InitGoogleMock()`, and `loop()` runs `RUN_ALL_TESTS()`.
-- This accommodates platforms where a standard `main()` is either unavailable or not used.
+Example:
+```cpp
+TEST(FactorialTest, HandlesZeroInput) {
+  EXPECT_EQ(Factorial(0), 1);
+}
+```
 
-### QuRT Platforms
+### Test Fixtures (`TEST_F()`)
 
-- Platforms like QuRT use `main()` but do not provide usable command-line arguments.
-- GoogleMock initializes and runs tests with adapted startup code suited to the environment.
+- Group tests sharing a test fixture, which contains common setup/teardown and shared state.
+- Each test creates a fresh fixture instance; no cross-test state contamination.
+
+Example:
+```cpp
+class QueueTest : public testing::Test {
+ protected:
+  QueueTest() { q_.Enqueue(5); }
+  Queue<int> q_;
+};
+
+TEST_F(QueueTest, IsNotEmpty) {
+  EXPECT_GT(q_.size(), 0);
+}
+```
+
+### Value-Parameterized Tests (`TEST_P()`)
+
+- Allow a test template to run multiple times with different input values.
+- Test fixture inherits from both `Test` and `WithParamInterface<T>`.
+- Test parameter accessed via `GetParam()` inside the test body.
+
+Example:
+```cpp
+class FooTest : public testing::TestWithParam<std::string> {};
+
+TEST_P(FooTest, HandlesValues) {
+  std::string param = GetParam();
+  EXPECT_TRUE(Process(param));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+  MyInstantiation, FooTest,
+  testing::Values("val1", "val2", "val3")
+);
+```
+
+### Typed Tests (`TYPED_TEST()` and `TYPED_TEST_SUITE()`)
+
+- Facilitate testing the same logic across multiple types, enhancing type coverage.
+- Fixture is a class template parameterized by type.
+- `TYPED_TEST_SUITE` associates a list of types with the test fixture template.
+
+Example:
+```cpp
+template <typename T>
+class MyTypedTest : public testing::Test {
+ public:
+  T value_;
+};
+
+using MyTypes = ::testing::Types<int, double, char>;
+TYPED_TEST_SUITE(MyTypedTest, MyTypes);
+
+TYPED_TEST(MyTypedTest, WorksForAllTypes) {
+  TypeParam v = this->value_;
+  EXPECT_TRUE(sizeof(v) > 0);
+}
+```
+
+### Type-Parameterized Tests (`TYPED_TEST_P()` and `TYPED_TEST_SUITE_P()`)
+
+- Similar to typed tests but allow the list of types to be defined and instantiated separately.
+- Facilitate reusable type-parameterized test patterns.
 
 ---
 
-## 4. Test Lifecycle: What Happens During a Test Execution
+## Execution Flow
 
-When a test is run, GoogleTest follows this precise lifecycle to promote test isolation, repeatability, and accurate reporting:
+### Initialization
 
-1. **Test Fixture Object Creation:**
-   - Each test runs on a new instance of the test fixture class (if any).
+Your test binary calls `testing::InitGoogleTest(&argc, argv);` in `main()`. This function:
 
-2. **Test Setup:**
-   - `SetUp()` method runs to prepare the environment.
+- Parses GoogleTest-specific command-line flags (e.g., filtering, output format).
+- Initializes internal data structures.
 
-3. **Test Body Execution:**
-   - The user-defined test code runs.
+After initialization, you call `RUN_ALL_TESTS()` to trigger test execution.
 
-4. **Test Teardown:**
-   - `TearDown()` method runs to clean up.
+### Running Tests
 
-5. **Test Fixture Destruction:**
-   - The test fixture object is destructed.
+`RUN_ALL_TESTS()` orchestrates the process:
 
-6. **Result Reporting:**
-   - Outcomes, such as passed assertions or failures, are collected and displayed.
+1. Iterates over all registered `TestSuite`s.
+2. For each `TestSuite`, calls its static `SetUpTestSuite()` (if implemented).
+3. Iterates tests within the suite:
+   - Creates a fresh test fixture instance.
+   - Calls `SetUp()`.
+   - Runs the test body (`TestBody()` override).
+   - Calls `TearDown()`.
+   - Deletes the test fixture.
+4. Calls `TearDownTestSuite()` for the `TestSuite`.
+5. Accumulates and reports results.
+
+Test filtering, disabling, and parameterized instantiation influence which tests actually run.
+
+### Reporting
+
+GoogleTest prints results to the console and (optionally) generates an XML or JSON report, detailing:
+
+- Passed and failed tests
+- Failures and error messages
+- Execution times
+- Skipped tests
+
+You can customize reporting by integrating event listeners.
+
+---
+
+## Practical Tips and Best Practices
+
+- Define clear and descriptive test suite and test names; avoid underscores per GoogleTest conventions.
+- Use test fixtures (`TEST_F`) for shared setup to avoid duplicated code.
+- Employ value-parameterized tests (`TEST_P`) for data-driven scenarios, generating multiple test cases efficiently.
+- For type combinatorial testing, use `TYPED_TEST` or `TYPED_TEST_P` to cover multiple type variations without repetition.
 
 <Note>
-Every test has its own fixture lifecycle, ensuring that state or side effects from one test do not affect others.
+Registering tests dynamically allows powerful customized test creation but should be used when static macros do not suffice.
 </Note>
 
 ---
 
-## 5. Practical Example: Custom `main()` Using GoogleTest and GoogleMock
-
-```cpp
-#include <gmock/gmock.h>
-#include <gtest/gtest.h>
-
-int main(int argc, char** argv) {
-  testing::InitGoogleMock(&argc, argv);  // Initializes both GoogleTest and GoogleMock
-  return RUN_ALL_TESTS();                // Runs all registered tests
-}
-```
-
-Most users do not need to implement a custom `main()` as GoogleTest and GoogleMock provide `gtest_main` and `gmock_main` libraries that supply appropriate entry points. Linking with these saves boilerplate coding.
-
----
-
-## 6. Troubleshooting Common Issues
-
-<AccordionGroup title="Common Test Execution Issues">
-<Accordion title="Tests Not Running">
-- Ensure you have properly used `TEST()` or `TEST_F()` macros to define your tests.
-- Confirm that the test files are compiled and linked into your test executable.
-- Verify that `RUN_ALL_TESTS()` is called in your main function.
-</Accordion>
-<Accordion title="Tests Running but No Output">
-- Check if test filtering flags (`--gtest_filter`) might be hiding tests.
-- Make sure `InitGoogleTest()` or `InitGoogleMock()` is called before `RUN_ALL_TESTS()`.
-- Adjust verbosity flags (e.g., `--gtest_verbose=info`).
-</Accordion>
-<Accordion title="Multiple `main()` Definitions or Linking Errors">
-- If providing custom main, link with `gtest` or `gmock` libraries, not `gtest_main` or `gmock_main`.
-- If using `gtest_main` or `gmock_main`, do not write your own main.
-</Accordion>
-</AccordionGroup>
-
----
-
-## 7. Summary Diagram of Test Discovery and Execution Flow
+## Summary Diagram of Test Discovery and Execution Flow
 
 ```mermaid
 flowchart TD
-  A[User Defines Tests via TEST/TEST_F Macros]
-  A --> B[Automatic Test Registration at Static Init]
-  B --> C[Program Starts with main()]
-  C --> D[InitGoogleTest or InitGoogleMock Parses Args]
-  D --> E[RUN_ALL_TESTS() Called]
-  E --> F[Test Registry Iteration Begins]
-  F --> G[For Each Test Instance: Create Fixture Object]
-  G --> H[Run SetUp()]
-  H --> I[Run User Test Body]
-  I --> J[Run TearDown()]
-  J --> K[Destroy Fixture Object]
-  K --> L[Collect and Report Test Results]
-  L --> M{More Tests?}
-  M -- Yes --> F
-  M -- No --> N[RUN_ALL_TESTS() Returns Passing or Failing Code]
+  Init["Main: InitGoogleTest()"] --> RUN_ALL["RUN_ALL_TESTS()"]
+  subgraph Registration
+    reg1["TEST/TEST_F/TEST_P/TYPED_TEST Macros"] --> reg2["Internal TestInfo & TestSuite storage"]
+  end
+  RUN_ALL -->|Iterate TestSuites| TSLoop["TestSuite Loop"]
+  TSLoop -->|Calls| SetUpSuite["SetUpTestSuite()"]
+  SetUpSuite -->|Iterate Tests| TestLoop["Test Loop"]
+  TestLoop -->|Creates Fixture| Fixture["Test Fixture instance"]
+  Fixture -->|SetUp()| SetUp
+  SetUp -->|Run TestBody()| RunTest
+  RunTest -->|TearDown()| TearDown
+  TearDown -->|Delete Fixture| FixtureDel["Test Fixture destroyed"]
+  FixtureDel --> TestLoop
+  TestLoop -->|Done All Tests| TearDownSuite["TearDownTestSuite()"]
+  TearDownSuite --> TSLoop
+  TSLoop -->|Done All Suites| Report["Print Summary & Return"]
+  reg2 --> RUN_ALL
 ```
 
 ---
 
-## 8. Best Practices and Tips
+### Troubleshooting Common Issues
 
-- **Define tests with provided macros only** (`TEST()`, `TEST_F()`) to ensure registration.
-- **Initialize GoogleTest/GoogleMock before running tests** with `InitGoogleTest()` or `InitGoogleMock()`.
-- **Run `RUN_ALL_TESTS()` only once** per process.
-- Use **`gtest_main` or `gmock_main` libraries** to avoid writing boilerplate main functions unless customization is required.
-- Take advantage of **command-line test filters** and flags parsed during initialization to run subsets of tests.
-
----
-
-## 9. Additional Resources
-
-- [Writing Your First Test](../gtest-guides/getting-started/write_first_test)
-- [Building and Running Tests](../gtest-guides/getting-started/build_and_run)
-- [GoogleTest Primer](../docs/primer.md)
-- [Mocking with GoogleMock](./mocking-architecture)
-- [Running and Configuring Tests (API Reference)](/api-reference/core-apis/running-tests)
+- **Tests not discovered?** Ensure all test macros (`TEST`, `TEST_F`, etc.) are used correctly and compiled into the binary.
+- **Test not running despite being defined?** Check for filtering flags (`--gtest_filter`) and disabled prefixes (`DISABLED_`).
+- **Fatal failures within constructors?** GoogleTest forbids fatal assertions in constructors; use `SetUp()` instead.
+- **Parameterization errors?** Verify use of `INSTANTIATE_TEST_SUITE_P` to instantiate `TEST_P` tests properly.
+- **Unexpected test order or sharding effects?** Leverage `--gtest_shuffle` and environment variables `GTEST_TOTAL_SHARDS` and `GTEST_SHARD_INDEX` correctly.
 
 ---
 
-Harnessing automated test discovery and execution empowers you to write scalable, maintainable, and reliable test suites that integrate smoothly with modern development workflows and CI/CD pipelines.
+For deep dives, see related pages in this documentation set, including the [Testing Reference](reference/testing.md), the [GoogleTest Primer](primer.md), and [Advanced GoogleTest Topics](advanced.md).
+
+---
+
+## See Also
+
+- [GoogleTest Primer](primer.md) — Fundamentals of writing tests
+- [Testing Reference](reference/testing.md) — Details on macros, classes, and functions
+- [Advanced GoogleTest Topics](advanced.md) — In-depth techniques for parameterized and typed tests
+- [Run Your First Test](getting_started/configuration_initial_success/running_first_test.md) — Step-by-step walk-through
+- [Test Execution and Runners](api_reference/core_testing_api/test_execution_and_runners.md) — API details
+
+---

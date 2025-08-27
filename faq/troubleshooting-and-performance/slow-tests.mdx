@@ -1,0 +1,210 @@
+---
+title: "Why are my tests slow, and how can I speed them up?"
+description: "Identifies common causes of test slowness, from test design to excessive setup/teardown, and offers actionable suggestions for reducing test runtime, leveraging parameterized tests, and optimizing mocks."
+---
+
+# Why are my tests slow, and how can I speed them up?
+
+GoogleTest is designed to help you write reliable and fast tests, but as your test suite grows in complexity and size, you may encounter test slowness. This page identifies common causes of slow tests and offers actionable strategies to optimize your test execution time. Whether you’re just starting or scaling a large test suite, these insights will help keep your tests speedy and maintain developer productivity.
+
+---
+
+## Common Causes of Test Slowness
+
+Before diving into solutions, it’s vital to understand what typically slows down your tests:
+
+- **Excessive Setup/TearDown Work**: Large fixtures or expensive resource allocations executed before and after each test can greatly increase runtime.
+- **Redundant or Inefficient Test Logic**: Tests performing unnecessary work or using unoptimized assertions and mocks.
+- **Lack of Parameterized Testing**: Writing many individual tests instead of combining them into parameterized tests increases repetition.
+- **Heavily Mocked Dependencies with Complex Expectations**: Mock objects that do extensive computation or verification can slow test runs.
+- **Uncontrolled Test Ordering & Side Effects**: Implicit dependencies or shared external state can cause delays or flakiness.
+
+
+## Strategies to Speed Up Your Tests
+
+### 1. Optimize Setup and Teardown
+
+#### Use `SetUpTestSuite` and `TearDownTestSuite` for Shared Resources
+
+GoogleTest provides static methods `SetUpTestSuite()` and `TearDownTestSuite()` that run once per test suite, rather than before and after every test. Use these for expensive shared resource allocation such as database connections or large data structures.
+
+```cpp
+class FooTest : public testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    // Expensive setup done once for all tests in FooTest
+    shared_resource_ = new Resource();
+  }
+
+  static void TearDownTestSuite() {
+    // Clean up shared resource
+    delete shared_resource_;
+    shared_resource_ = nullptr;
+  }
+
+  void SetUp() override {
+    // Per-test setup, minimal work here
+  }
+
+  static Resource* shared_resource_;  
+};
+
+Resource* FooTest::shared_resource_ = nullptr;
+```
+
+This reduces redundant setup overhead across tests.
+
+<Check>
+Always declare `SetUpTestSuite` and `TearDownTestSuite` as **public** when using `TEST_P` (parameterized tests).
+</Check>
+
+#### Minimize Per-Test Setup
+
+Avoid expensive operations inside `SetUp()` or `TearDown()`. Do only what is necessary for that individual test.
+
+---
+
+### 2. Leverage Parameterized Tests for Reuse
+
+Instead of writing many individual test functions to exercise different input values, GoogleTest supports [value-parameterized tests](../advanced.md#value-parameterized-tests). By defining a fixture class derived from `TestWithParam<T>`, you write test logic once and run it with many parameters efficiently.
+
+#### Defining and Instantiating Parameterized Tests
+
+```cpp
+// Define the test fixture
+class MyTest : public testing::TestWithParam<int> {};
+
+// Write tests using GetParam()
+TEST_P(MyTest, IsEven) {
+  int value = GetParam();
+  EXPECT_EQ(value % 2, 0);
+}
+
+// Instantiate test suite with parameters
+INSTANTIATE_TEST_SUITE_P(EvenValues, MyTest, testing::Values(2, 4, 6, 8));
+```
+
+This approach avoids writing repetitive test bodies and can significantly reduce code duplication and runtime when combined with smart parameter selection.
+
+#### Combining Multiple Parameter Generators
+
+Use `Combine()` to generate Cartesian products of multiple parameter sets, testing all combinations systematically without manual repetition.
+
+```cpp
+INSTANTIATE_TEST_SUITE_P(
+    Combinations, MyTest,
+    testing::Combine(
+        testing::Values(1, 2),
+        testing::Bool())  // Example with two parameters
+);
+```
+
+<Note>
+Parameters are evaluated only once during `InitGoogleTest()`, allowing dynamic or configuration-dependent parameter setups before tests run.
+</Note>
+
+---
+
+### 3. Optimize Mock Usage
+
+Mocks are powerful but can be expensive when overused or misconfigured.
+
+- **Avoid Complex Actions in Mocks**: Keep mock actions and expectations light. Heavy computations or real resource accesses in mock methods slow tests down.
+- **Choose Proper Mock Strictness**: Use `NiceMock` or `NaggyMock` modifiers to reduce unnecessary overhead from strictness when appropriate. Progressively harden mocks only when necessary.
+- **Reuse Mock Objects When Possible**: Instead of creating mocks for every test, consider sharing immutable mocks across tests.
+
+For details, see the [Mocking Best Practices](guides/scenarios-patterns/mocking-best-practices) and [Expectations and Actions](api_reference/mocking_and_matchers/expectations_and_actions) guides.
+
+---
+
+### 4. Run Tests in Parallel and Use Sharding
+
+GoogleTest supports parallel execution and test sharding at the environment level:
+
+- Set `GTEST_TOTAL_SHARDS` and `GTEST_SHARD_INDEX` environment variables to split tests across machines or processes.
+- Utilize build tools or CI systems to run shards concurrently.
+
+This greatly reduces wall-clock time but requires ensuring tests are independent and side-effect free.
+
+See [CI & Build System Integration](guides/real-world-integration/ci-build-integration) for details.
+
+---
+
+### 5. Profile and Identify Bottlenecks
+
+Measure test timing and identify slow tests using GoogleTest's XML or JSON output reports. Focus optimizations on these bottlenecks:
+
+- Add timing instrumentation around fixture setup and test bodies.
+- Use `--gtest_filter=` to isolate and run specific tests faster.
+
+Refer to the [Performance and Scaling Your Test Suite](guides/real-world-integration/performance-optimization) guide for profiling techniques and best practices.
+
+---
+
+## Step-by-Step Workflow to Speed Up Tests
+
+<Steps>
+<Step title="Audit Your Test Fixtures">
+Review `SetUp()` and `TearDown()` in your test fixtures. Identify expensive operations that can be moved to `SetUpTestSuite()` or cached.
+</Step>
+<Step title="Convert Repeated Test Logic into Parameterized Tests">
+Replace multiple similar `TEST` or `TEST_F` cases with a single `TEST_P` and parameter generator like `Values` or `Range`.
+</Step>
+<Step title="Simplify Mock Expectations and Behaviors">
+Check your mock configurations for expensive actions or overly strict expectations. Use lighter strictness modifiers and remove unnecessary expectations.
+</Step>
+<Step title="Enable Test Parallelism or Sharding">
+Set environment variables to run tests in parallel where possible. Validate test independence first.
+</Step>
+<Step title="Profile Test Suite Execution Time">
+Generate XML/JSON reports using `--gtest_output=xml:<file>` or `--gtest_output=json:<file>`. Identify slow tests and refactor or optimize them.
+</Step>
+</Steps>
+
+---
+
+## Common Pitfalls & Best Practices
+
+- **Don’t Put Lengthy Code in Constructor or Destructor**: GoogleTest creates a new test object for each test. Expensive work here multiplies cost. Use `SetUp()` or `SetUpTestSuite()` instead.
+- **Avoid Side Effects in Parameter Generators**: Parameter generators are evaluated once during initialization, so avoid side effects that may confuse test results.
+- **Use `GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST` for Abstract Tests**: When defining tests in libraries without immediate instantiation, use this macro to suppress uninstantiated test warnings.
+- **Keep Parameterized Test Names Unique and Valid**: The test names generated via parameter naming functions must be nonempty, unique, and only contain alphanumeric characters or underscores.
+- **Be Mindful of Thread Safety**: Tests that are not thread-safe cannot be safely run in parallel. Refactor them to remove shared mutable state.
+
+---
+
+## Troubleshooting Slowness
+
+**Symptoms:**
+
+- Tests take consistently long to run.
+- Single tests hang or run much longer than expected.
+- Setup or teardown steps dominate execution time.
+
+**Troubleshooting tips:**
+
+- Use verbose logging in your tests to detect where time is spent.
+- Temporarily disable subsets of tests to isolate which cause slowness.
+- Look for external resource dependencies (e.g., network, filesystem) and consider mocking or caching those.
+
+
+---
+
+## Additional Resources
+
+- [Advanced GoogleTest Topics: Value-Parameterized Tests](../advanced.md#value-parameterized-tests)
+- [Mocking Best Practices](guides/scenarios-patterns/mocking-best-practices)
+- [Performance and Scaling Your Test Suite](guides/real-world-integration/performance-optimization)
+- [CI & Build System Integration](guides/real-world-integration/ci-build-integration)
+- [GoogleTest Primer](overview/getting-started-intro/what-is-googletest)
+
+
+---
+
+By systematically identifying setup inefficiencies, leveraging built-in parameterization, refining mocks, and running tests in parallel, you can drastically speed up your GoogleTest test executions and keep your development feedback loops tight and efficient.
+
+
+---
+
+*For more common issues related to test execution, see [Quick Validation & Troubleshooting](/getting_started/configuration_initial_success/quick_validation_troubleshooting).
+
