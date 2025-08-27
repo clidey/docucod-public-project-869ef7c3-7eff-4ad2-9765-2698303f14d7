@@ -1,0 +1,185 @@
+---
+title: "Death Tests, Mocks, and Custom Actions"
+description: "Answers to common issues when designing death tests, using GoogleMock for mocking, and customizing mock behavior with actions and expectations. Includes cross-references for common pitfalls and best practices."
+---
+
+# Death Tests, Mocks, and Custom Actions FAQ
+
+This FAQ page addresses common questions and issues related specifically to **death tests**, the **use of GoogleMock for creating and verifying mocks**, and **customizing mock behavior with actions and expectations** in GoogleTest. It helps users understand the nuances of writing death tests that reliably verify program aborts or exits, how to mock functions properly using GoogleMock, and how to tailor mocks with granular control over behavior.
+
+---
+
+## 1. Death Tests
+
+### What is a death test and when should I use it?
+Death tests verify that a particular statement or code block causes the program to terminate as expected, such as aborting due to a failed assertion or exiting with a specific code.
+
+Use death tests when you want to ensure your program fails correctly on invalid input, consistency checks, or unexpected conditions that result in process termination.
+
+### How do death tests work under the hood?
+When you write death tests (like `EXPECT_DEATH` or `ASSERT_DEATH`), GoogleTest forks a child process to run the statement. It then:
+
+1. Checks that only one thread is active (forking with multiple threads is unsafe).
+2. In the child process, runs the code expected to die.
+3. Lets the parent process wait for the child's termination.
+4. Verifies the exit status and stderr output match expectations.
+
+There are two death test styles:
+
+- **Fast:** The child process runs the test immediately after forking.
+- **Threadsafe:** The child process re-executes the test binary with flags to run only the relevant death test.
+
+You can select the style via `GTEST_FLAG_SET(death_test_style, "threadsafe")`.
+
+### What macros are available for death tests?
+
+| Macro                  | Behavior                                                                |
+|------------------------|------------------------------------------------------------------------|
+| `ASSERT_DEATH`         | Asserts the statement causes process death; aborts test on failure.    |
+| `EXPECT_DEATH`         | Same as ASSERT_DEATH but non-fatal failure, test continues.            |
+| `ASSERT_EXIT`          | Asserts statement causes process exit with predicate on exit code.     |
+| `EXPECT_EXIT`          | Non-fatal version of ASSERT_EXIT.                                      |
+| `EXPECT_DEBUG_DEATH`   | Same as `EXPECT_DEATH` in debug mode; runs statement normally if not.   |
+
+#### Example
+```cpp
+TEST(MyDeathTest, CheckAbort) {
+  ASSERT_DEATH({ SomeFun(); }, "Error on line .* of SomeFun");
+}
+
+TEST(MyDeathTest, CheckExitCode) {
+  EXPECT_EXIT(NormalExit(), testing::ExitedWithCode(0), "Success");
+}
+```
+
+### How can I match the error message the death test outputs?
+
+The death test framework uses regular expressions to match the stderr output of the child process. On POSIX, POSIX extended regex syntax is used; on Windows, a simpler regex flavor without unions, grouping, or character sets is supported.
+
+Supported elements include:
+
+- Literal characters
+- Character classes like `\d`, `\w`, `\s`, etc.
+- Quantifiers: `?`, `*`, `+`
+- Anchors: `^`, `$`
+
+Avoid using unsupported features like `|` (union), `( )` (grouping), `[ ]` (character sets), or repetition counts like `{5,7}`.
+
+### What are common pitfalls in writing death tests?
+
+- **Multiple active threads warning:** Death tests emit a warning if more than one thread is active due to forking risks.
+- **Illegal returns inside death test statement:** Use of `return` inside the death statement causes the test to fail.
+- **Exception thrown during death test:** Exceptions escaping the death test cause failure.
+- **Side effects inside death tests are not observed in parent process** because the test runs in a child process.
+
+### How to handle death tests with mock objects?
+
+If your death test involves mock objects that may leak memory, use `Mock::AllowLeak()` to avoid false leak detection failures since the child process exits abnormally.
+
+### What if death tests are not supported on my platform?
+
+GoogleTest provides `EXPECT_DEATH_IF_SUPPORTED` and `ASSERT_DEATH_IF_SUPPORTED` which act like death tests when supported, otherwise the test passes with a warning.
+
+---
+
+## 2. Using GoogleMock for Mocking
+
+### How do I define a mock class and its methods?
+
+Use the `MOCK_METHOD` macro within your mock class to define mock methods. Example:
+
+```cpp
+class MyMock {
+ public:
+  MOCK_METHOD(void, Foo, (int x), (override));
+  MOCK_METHOD(int, Bar, (), (const));
+};
+```
+
+Remember:
+
+- The macro must be in the `public` section.
+- Use qualifiers like `const`, `override`, and `noexcept` if the method you override has them.
+- Wrap complex argument types with parentheses or use type aliases to avoid macro parsing issues.
+
+### How do I set expectations on mock method calls?
+
+Use `EXPECT_CALL` to specify that a method is expected to be called with arguments matching specified matchers. You can chain modifiers to control behavior:
+
+```cpp
+EXPECT_CALL(mock, Foo(testing::Gt(0)))
+    .Times(Exactly(2))
+    .WillOnce(Return(1))
+    .WillRepeatedly(Return(2));
+```
+
+### What are key modifiers for `EXPECT_CALL`?
+
+- `.With(multi_arg_matcher)`: restricts matching based on all arguments.
+- `.Times(n)`: specify how many times a call is expected.
+- `.InSequence(sequences...)`: specify call order.
+- `.After(expectations...)`: impose dependence on other expectations.
+- `.WillOnce(action)`: specify behavior for a single call.
+- `.WillRepeatedly(action)`: specify behavior for all subsequent calls.
+- `.RetiresOnSaturation()`: retire expectation once saturated.
+
+### How to specify default behaviors without setting expectations?
+
+Use `ON_CALL(mock, Method(matchers...)).WillByDefault(action)` to specify default behavior that applies when no explicit `EXPECT_CALL` matches.
+
+### What are NiceMock, NaggyMock, and StrictMock?
+
+They are wrappers to manage uninteresting calls:
+
+- **NiceMock**: suppress warnings on unexpected calls.
+- **NaggyMock**: warn on uninteresting calls (default behavior).
+- **StrictMock**: fail the test on uninteresting calls.
+
+Choose according to how strict you want verification to be.
+
+---
+
+## 3. Customizing Mock Behavior with Actions and Expectations
+
+### How do actions affect mocked method behavior?
+
+Actions specify what a mocked method does when called. Common actions include:
+
+- `Return(value)`: returns a value.
+- `Invoke(function)`: calls a function.
+- `SetArgPointee<N>(value)`: sets the value pointed to by the Nth argument.
+- `DoAll(action1, action2, ...)`: performs multiple actions in sequence.
+
+### Can I define custom actions?
+
+Yes, you can create your own action classes or use the `ACTION` and `ACTION_P` macros to define reusable mock actions.
+
+### How to control call order with sequences and expectations?
+
+- Use `Sequence` objects with `.InSequence()` modifier on `EXPECT_CALL` to enforce chronological order.
+- Use `Expectation` objects returned by `EXPECT_CALL` and chain using `.After()` to specify dependencies.
+
+### How to avoid pitfalls with mock expectations?
+
+- Ensure expectations match actual calls; unmatched calls may fail or cause warnings.
+- Avoid overlapping expectations without `.RetiresOnSaturation()` or explicit cardinalities.
+- Use wildcard matchers `_` judiciously.
+- Prefer clear and concise matchers for maintainability.
+
+### What to do if mocks cause test failures in death tests?
+
+Use `Mock::AllowLeak(m)` on mocks involved in death tests to tolerate leaks due to abrupt child process termination.
+
+---
+
+## Additional Resources
+
+- Detailed assertions including death assertions: [Assertions Reference](../reference/assertions.md#death)
+- Mocking basics and macros: [Mocking Reference](../reference/mocking.md)
+- Custom matchers and actions guide: [Custom Matchers and Actions](../guides/real-world-mocking/custom-matchers-actions.md)
+- Advanced death tests guide with examples: [Death Tests Guide](../guides/parameterization-and-patterns/death-tests.md)
+- Troubleshooting common pitfalls: [Common Issues FAQ](../faq/common-issues/assertion-matcher-issues.md)
+
+---
+
+Feel free to consult GoogleTest and GoogleMock official documentation to deepen your mastery in writing robust tests with death tests, mocks, and customized mock behaviors.
