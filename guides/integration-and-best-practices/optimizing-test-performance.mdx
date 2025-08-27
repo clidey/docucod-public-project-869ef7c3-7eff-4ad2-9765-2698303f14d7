@@ -1,0 +1,214 @@
+---
+title: "Optimizing Test Performance and Parallelism"
+description: "Tips and patterns for speeding up C++ test execution: running tests in parallel, filtering test suites, minimizing overhead, and scaling for large codebases using GoogleTest's features and community tools."
+---
+
+# Optimizing Test Performance and Parallelism
+
+Efficient test execution is crucial for maintaining fast development cycles and scaling testing to large codebases. This guide helps you speed up C++ testing using GoogleTest's features and common practical patterns, focusing specifically on the execution of tests: running tests in parallel, selectively filtering which tests run, minimizing test overhead, and strategies to scale tests in large projects.
+
+---
+
+## 1. Understanding Test Execution Optimization
+
+Before diving into techniques, it's important to understand what slows down tests:
+
+- Long-running test fixtures or setup/teardown operations.
+- Excessive test coverage without filtering.
+- Single-threaded execution limiting CPU utilization.
+- Repeated initialization of shared resources.
+
+GoogleTest offers several mechanisms to mitigate these bottlenecks and control test runtime.
+
+### Key Goals:
+- Utilize parallel execution to leverage multiple CPU cores.
+- Reduce test execution time by running only relevant tests.
+- Reuse expensive test fixture setup when safe.
+- Scale testing workflows for large codebases.
+
+---
+
+## 2. Running Tests in Parallel
+
+Parallel test execution maximizes CPU utilization by running tests simultaneously across multiple cores or machines.
+
+### a) Using Test Sharding
+
+GoogleTest supports *sharding*, allowing the test suite to be split across shards (machines or processes).
+
+1. Define the total number of shards with the `GTEST_TOTAL_SHARDS` environment variable.
+2. Assign each shard a unique index with `GTEST_SHARD_INDEX`.
+3. Run the test executable independently on each shard.
+
+GoogleTest automatically distributes test cases evenly so that each shard runs a subset of tests without overlap.
+
+```bash
+export GTEST_TOTAL_SHARDS=4
+export GTEST_SHARD_INDEX=0
+./my_test_executable  # Shard 0
+
+export GTEST_SHARD_INDEX=1
+./my_test_executable  # Shard 1
+
+export GTEST_SHARD_INDEX=2
+./my_test_executable  # Shard 2
+
+export GTEST_SHARD_INDEX=3
+./my_test_executable  # Shard 3
+```
+
+This approach allows parallelization across machines or CI agents.
+
+<Check>
+Ensure that all shards share versions of code and dependencies to maintain test consistency.
+</Check>
+
+### b) Parallelizing via External Test Runners
+
+Although GoogleTest does not internally parallelize tests within a single process, you can use external build systems or test runners that spawn multiple test processes in parallel (e.g., GNU Make’s `-j` option, Bazel, or CTest).
+
+Parallel execution at the test binary level is preferred over parallelizing individual tests because GoogleTest creates fresh fixtures per test, avoiding shared state concurrency issues.
+
+---
+
+## 3. Filtering Tests to Minimize Execution Time
+
+Sometimes, running all tests is unnecessary or inefficient. GoogleTest provides multiple ways to selectively run tests.
+
+### a) Using `--gtest_filter`
+
+Run only tests whose full names match a filter pattern.
+
+- Format: `--gtest_filter=PositivePatterns[-NegativePatterns]`
+- Use wildcards `*` for any substring, and `?` for any character.
+
+**Example:**
+
+```bash
+./my_test_executable --gtest_filter=FastTest.*  # Run all tests in test suite FastTest
+
+./my_test_executable --gtest_filter=*Login*  # Run tests with "Login" in their names
+
+./my_test_executable --gtest_filter=-*Slow*  # Run all tests except those with "Slow"
+```
+
+### b) Running Disabled Tests
+
+Tests prefixed with `DISABLED_` are excluded by default but can be run using:
+
+```bash
+./my_test_executable --gtest_also_run_disabled_tests
+```
+
+---
+
+## 4. Reducing Overhead by Sharing Test Fixture Setup
+
+By default, GoogleTest creates a fresh test fixture instance for each test, calling `SetUp()` and `TearDown()` per test, which may be expensive.
+
+### a) Use `SetUpTestSuite()` and `TearDownTestSuite()` for Shared Resource Management
+
+Declare shared expensive resources as `static` members in your test fixture class and use these static methods to allocate and release resources once per test suite.
+
+```cpp
+class ExpensiveFixture : public testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    shared_db_connection = new DatabaseConnection();
+  }
+
+  static void TearDownTestSuite() {
+    delete shared_db_connection;
+    shared_db_connection = nullptr;
+  }
+
+  static DatabaseConnection* shared_db_connection;
+};
+
+DatabaseConnection* ExpensiveFixture::shared_db_connection = nullptr;
+```
+
+This saves repeated setup and teardown costs for each test.
+
+### b) Caution: Keep Tests Independent
+
+Shared fixtures must not allow any test to modify shared state in a way that affects others. Ensure test isolation to avoid flaky tests.
+
+---
+
+## 5. Scaling to Large Code Bases
+
+In large projects, running all tests can be slow.
+
+### a) Organize Tests into Logical Test Suites
+
+Group tests by functionality or module for selective execution.
+
+### b) Prioritize and Run Critical Tests Often
+
+Run fast or critical tests in quick iteration cycles; run long-running tests less frequently.
+
+### c) Parallelize Test Runs Across Multiple Machines
+
+Combine sharding and external parallelization techniques to distribute tests across many workers.
+
+### d) Use Test Caching and Selective Execution in CI
+
+Some CI systems support caching previously passed tests and re-running only changed or related tests.
+
+---
+
+## 6. Practical Tips & Common Pitfalls
+
+- <Tip>Start by adding **sharding support** with environment variables before moving to complex parallel test runners.</Tip>
+- <Tip>Use **`--gtest_filter`** during development to speed up iterative testing by targeting specific tests.</Tip>
+- <Tip>Wrap shared resources in `SetUpTestSuite()` / `TearDownTestSuite()`, but never share mutable state unsafely.</Tip>
+- <Warning>Don’t parallelize individual tests within one process; GoogleTest fixtures aren’t thread-safe across tests.</Warning>
+- <Warning>Beware of flaky tests caused by shared fixture state or order dependencies. Use `--gtest_shuffle` to detect such issues.</Warning>
+- <Tip>Leverage powerful assertions and custom test names to make filtered test runs more meaningful.</Tip>
+- <Tip>Use external build systems (e.g., CTest, Bazel) that support test parallelism natively to simplify integration.</Tip>
+
+---
+
+## 7. Summary Table of Flags and Environment Variables
+
+| Feature                  | Flag / Env Variable                   | Description                                                |
+| ------------------------ | ----------------------------------- | ---------------------------------------------------------- |
+| List Tests               | `--gtest_list_tests`                 | Lists all available tests without running.                  |
+| Filter Tests             | `--gtest_filter`                    | Runs only matching tests based on filter pattern.           |
+| Run Disabled Tests       | `--gtest_also_run_disabled_tests`  | Includes disabled tests in test runs.                       |
+| Sharding (parallel run)  | `GTEST_TOTAL_SHARDS`, `GTEST_SHARD_INDEX` | Controls test sharding for parallel execution.     |
+| Shuffle Tests            | `--gtest_shuffle`                   | Randomizes order of tests (detects inter-test dependencies).|
+| Repeat Tests             | `--gtest_repeat`                    | Runs tests multiple times (useful for flaky tests).         |
+
+---
+
+## 8. Example: Combining Filtering and Sharding
+
+Suppose you want to run a subset of tests in parallel across 2 shards:
+
+```bash
+export GTEST_TOTAL_SHARDS=2
+export GTEST_FILTER="*ImportantFeature*"
+
+export GTEST_SHARD_INDEX=0
+./my_test_executable
+
+export GTEST_SHARD_INDEX=1
+./my_test_executable
+```
+
+Each shard runs only tests matching the filter and a portion of the workload, speeding up the total execution time.
+
+---
+
+## 9. Additional Resources
+
+- [GoogleTest Primer](primer.md#basic-concepts) — Introduction to test basics
+- [Running a Subset of Tests](advanced.md#running-a-subset-of-the-tests) — Detailed filtering options
+- [Global Set-Up and Tear-Down](advanced.md#global-set-up-and-tear-down) — Manage resources shared by all tests
+- [Integration & Best Practices Guide](guides/integration-and-best-practices/test-integration) — Integration tips including performance
+
+<Note>
+Optimizing your test suite execution is essential for quicker feedback and continuous integration efficiency. Combine GoogleTest's built-in features with your build system capabilities to achieve maximum speed and reliability.
+</Note>
