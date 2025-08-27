@@ -1,0 +1,283 @@
+---
+title: "Troubleshooting assertion failures and misleading output"
+description: "Understand why certain assertions might report confusing errors, how to interpret failure output, and how to leverage printers and custom messages to debug failures more effectively."
+---
+
+# Troubleshooting Assertion Failures and Misleading Output
+
+Understanding assertion failure messages and test output is critical when working with GoogleTest. This page helps you interpret confusing errors, decode failure output, and leverage tools like custom printers and messages to debug effectively.
+
+---
+
+## 1. Why Are Some Assertion Failures Confusing?
+
+Assertion failures sometimes provide messages that may be unexpected or difficult to interpret. Common reasons include:
+
+- **Pointer Comparisons Instead of Value Comparisons:**
+  Assertions like `EXPECT_EQ` compare pointer addresses when given C-style strings (`char*`) rather than their contents. Use specialized assertions like `EXPECT_STREQ` to compare contents of C strings.
+
+- **Evaluation Order and Side Effects:**
+  Assertion macros evaluate their arguments exactly once but in undefined order. Expressions with side effects can cause surprising results.
+
+- **Lack of Custom Printing:**
+  By default, GoogleTest tries to print values of types it recognizes. User-defined types without printer support may produce unhelpful output.
+
+- **Empty or Null Strings:**
+  Special handling is needed when asserting against `nullptr` or empty strings.
+
+---
+
+## 2. Interpreting Failure Outputs
+
+### Understanding the Failure Format
+
+Failure messages typically contain:
+
+- Location (file and line number) of the failing assertion.
+- The assertion condition that failed.
+- Expected vs. actual values or conditions.
+- Optional stack trace and trace points (when enabled).
+
+Example failure message:
+
+```none
+/path/to/foo_test.cc:11: Failure
+Value of: Bar(n)
+Expected: 1
+  Actual: 2
+```
+
+This indicates that the expression `Bar(n)` was expected to return `1`, but actually returned `2` at the specified line.
+
+### Failure Summaries and Diffs
+
+For string equality assertions, GoogleTest often shows the detailed diff highlighting differences between expected and actual values, making it easier to pinpoint issues.
+
+If the standard output is unclear, you can stream a custom failure message to assertions to add context, e.g.: 
+
+```cpp
+EXPECT_EQ(result, expected) << "Failure at index " << i;
+```
+
+---
+
+## 3. Decoding Pointer and String Assertions
+
+### Pointer Equality
+
+- `EXPECT_EQ(ptr1, ptr2)` compares addresses, not contents.
+- Use `EXPECT_STREQ(str1, str2)` to compare C-strings by actual content.
+
+### Null Pointer Handling
+
+- Use `nullptr` in assertions to avoid ambiguous behavior.
+- Comparing to `NULL` literals may not behave as expected.
+
+### Wide vs. Narrow String Support
+
+- GoogleTest supports `wchar_t*` and `std::wstring` and prints them as UTF-8.
+- When streaming wide strings into assertions, GoogleTest converts them properly for output.
+
+---
+
+## 4. Tips to Get Better Failure Messages
+
+### Use Predicate Assertions
+
+When simple Boolean checks aren’t descriptive enough, use predicate assertions that print out arguments on failure:
+
+```cpp
+bool IsEven(int n) { return (n % 2) == 0; }
+EXPECT_PRED1(IsEven, x);
+```
+
+### Use AssertionResult for Custom Messages
+
+Make predicates return `testing::AssertionResult` to provide informative success/failure messages:
+
+```cpp
+testing::AssertionResult IsEven(int n) {
+  if ((n % 2) == 0)
+    return testing::AssertionSuccess() << n << " is even";
+  else
+    return testing::AssertionFailure() << n << " is odd";
+}
+EXPECT_TRUE(IsEven(x));
+```
+
+### Use Predicate-Formatter Assertions for Complex Cases
+
+Custom predicate-formatters give full control over formatting error messages:
+
+```cpp
+AssertionResult AssertMutuallyPrime(const char* m_expr, const char* n_expr, int m, int n);
+EXPECT_PRED_FORMAT2(AssertMutuallyPrime, a, b);
+```
+
+### Stream Additional Information
+
+You can append extra data to failure messages by streaming to the assertion macros:
+
+```cpp
+EXPECT_EQ(x, y) << "Extra context with x = " << x;
+```
+
+### Enabling SCOPED_TRACE for Nested Calls
+
+Use `SCOPED_TRACE(message);` to attach a trace point to all assertions in a scope.
+
+Example:
+
+```cpp
+void Helper(int n) {
+  EXPECT_EQ(n, 1);
+}
+
+TEST(FooTest, Example) {
+  SCOPED_TRACE("Test case 1");
+  Helper(2);  // Failure will show trace "Test case 1"
+}
+```
+
+---
+
+## 5. Teaching GoogleTest How to Print Values
+
+GoogleTest prints values in failure messages using a universal printer:
+
+- Supports built-in types, STL containers, pointers.
+- Supports user-defined types with `operator<<` overloads.
+
+To customize printing:
+
+### Define `PrintTo()`
+
+Define a `PrintTo` friend function in the same namespace as your type:
+
+```cpp
+namespace foo {
+  class Point {
+   public:
+    int x, y;
+    friend void PrintTo(const Point& p, std::ostream* os) {
+      *os << "(" << p.x << ", " << p.y << ")";
+    }
+  };
+}
+```
+
+### Define `AbslStringify()`
+
+If using Abseil, define `AbslStringify(Sink&, const T&)` in your type’s namespace to customize printing.
+
+GoogleTest prefers `PrintTo` over `AbslStringify` if both exist.
+
+### Use `PrintToString()` Explicitly
+
+To print any value into a string, use:
+
+```cpp
+std::string s = ::testing::PrintToString(value);
+```
+
+---
+
+## 6. Avoiding Common Pitfalls
+
+### Mixing `TEST()` and `TEST_F()` in Same Suite
+
+All tests in a suite should use the same fixture type. Mixing both macros in same suite causes failures.
+
+### Disabled Tests Are Not Run by Default
+
+Prefix test or test suite names with `DISABLED_` to temporarily exclude from runs.
+
+### Fatal Failures Abort Only Current Function
+
+When a fatal assertion fails in a subfunction, only that function returns early, not the whole test case. Use:
+
+- `ASSERT_NO_FATAL_FAILURE(statement);`
+- `HasFatalFailure();`
+- Exception-based listeners to propagate failures.
+
+### Avoid Multiple Death Tests on the Same Line
+
+Death-test macros may fail compilation if multiple invoke on one source line.
+
+### Streaming Null Pointers
+
+GoogleTest replaces streamed `(const char*)nullptr` with "(null)" to avoid crashes in MSVC.
+
+---
+
+## 7. Using gtest/gtest-spi.h to Catch Expected Failures in Tests
+
+When writing tests for testing utilities, or verifying that failed assertions occur as expected, use the following macros from `gtest/gtest-spi.h`:
+
+- `EXPECT_FATAL_FAILURE(statement, substring)` asserts that `statement` causes exactly one fatal failure whose message contains `substring`.
+- `EXPECT_NONFATAL_FAILURE(statement, substring)` likewise for non-fatal failures.
+
+These macros only intercept failures on the current thread. For multi-threaded tests, use:
+
+- `EXPECT_FATAL_FAILURE_ON_ALL_THREADS(statement, substring)`
+- `EXPECT_NONFATAL_FAILURE_ON_ALL_THREADS(statement, substring)`
+
+**Restrictions:**
+
+- `statement` cannot stream into the macro.
+- `statement` cannot reference local non-static variables in case of fatal failure macros.
+- `statement` cannot return a value.
+
+---
+
+## 8. Examples of Using Custom Messages and SCOPED_TRACE
+
+```cpp
+TEST(VectorTest, SizeAndContents) {
+  std::vector<int> v = {1, 2, 3};
+  EXPECT_EQ(v.size(), 3) << "Size mismatch";
+
+  for (size_t i = 0; i < v.size(); ++i) {
+    SCOPED_TRACE(testing::Message() << "Index: " << i);
+    EXPECT_GE(v[i], 0);
+  }
+}
+```
+
+Failures inside the loop will show the index due to `SCOPED_TRACE`, aiding debugging.
+
+---
+
+## 9. Summary
+
+By understanding GoogleTest's assertion failure semantics, carefully choosing the right assertion macros, and leveraging tools like custom predicates, streaming messages, and trace points, you can greatly improve the clarity of test output and accelerate diagnosis.
+
+---
+
+## Related Documentation
+
+- [Assertions Reference](reference/assertions.md)
+- [Advanced GoogleTest Topics — Predicate Assertions](guides/advanced.md#predicate-assertions-for-better-error-messages)
+- [GoogleTest Primer](docs/primer.md)
+- [gtest/gtest-spi.h — Testing GoogleTest](googletest/include/gtest/gtest-spi.h)
+- [Writing Custom Printers](api_reference/utilities_and_lowlevel/printers_and_output_utilities.mdx)
+- [SCOPED_TRACE for Better Test Messages](guides/real-world-integration/testing-edge-cases-advanced.md#adding-traces-to-assertions)
+
+---
+
+## Troubleshooting Tips
+
+- Always use the right assertion macro for string comparisons (`EXPECT_STREQ` for C strings).
+- When failure messages print pointers, check if you should use a content comparison instead.
+- Use `ASSERT_NO_FATAL_FAILURE` if subsequent code depends on previous assertions.
+- Add `SCOPED_TRACE` in nested or looped calls to clearly identify failure contexts.
+- Define custom printers (`PrintTo`) to clarify value outputs for user-defined types.
+- When testing assertions, leverage `EXPECT_FATAL_FAILURE` and `EXPECT_NONFATAL_FAILURE` macros.
+
+---
+
+## Final Notes
+
+GoogleTest failure messages are designed to be succinct but informative; however, careful test design and judicious use of its reporting features can significantly enhance their helpfulness in real-world debugging.
+
+For deep troubleshooting, consider enabling stack tracing (`--gtest_stack_trace_depth`) and advanced failure handling strategies discussed in related advanced topics.
