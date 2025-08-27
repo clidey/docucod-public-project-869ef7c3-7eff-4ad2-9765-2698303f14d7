@@ -1,0 +1,261 @@
+---
+title: "Performance Optimization and Troubleshooting"
+description: "Offers actionable tips for speeding up test execution, mitigating bottlenecks, and resolving common configuration or runtime issues. Designed to help teams maintain fast feedback loops as test suites grow."
+---
+
+# Performance Optimization and Troubleshooting
+
+## Overview
+This guide helps you optimize the performance of your GoogleTest and GoogleMock test suites and troubleshoot common issues that might slow down test execution or cause confusing failures. As test suites grow, maintaining fast feedback cycles is critical — this documentation offers actionable tips and proven solutions to keep your tests running efficiently and reliably.
+
+## Prerequisites
+- You should have an existing GoogleTest/GoogleMock test suite integrated and running.
+- Basic familiarity with writing tests using `TEST()`, `TEST_F()`, and using mocks with `MOCK_METHOD` and expectations.
+- Access to your project’s build system and test execution environment.
+
+## Expected Outcome
+- Improved test execution speed through practical compilation and runtime techniques.
+- Clear understanding of common runtime errors and how to resolve them.
+- Guidance on structuring mock classes and managing expectations to avoid pitfalls that slow tests or cause flakiness.
+
+## Time Estimate
+Allow 30–60 minutes initially to apply optimizations and familiarize yourself with troubleshooting tips.
+
+## Difficulty Level
+Intermediate
+
+---
+
+## Performance Optimization Tips
+
+### 1. Minimize Mock Compilation Overhead
+
+Mock classes can cause slow builds due to heavy constructor/destructor generation.
+
+- **Action:** Move mock class constructors and destructors out of the header and implement them in `.cc` file(s).
+  ```cpp
+  // mock_foo.h
+  class MockFoo : public Foo {
+   public:
+    MockFoo();
+    ~MockFoo() override;
+
+    MOCK_METHOD(int, DoThis, (), (override));
+    // ... other mock methods ...
+  };
+
+  // mock_foo.cc
+  #include "mock_foo.h"
+  MockFoo::MockFoo() {}
+  MockFoo::~MockFoo() {}
+  ```
+
+- This reduces repeated compiler work when including mocks across multiple translation units.
+
+
+### 2. Use `NiceMock` to Suppress Noise from Uninteresting Calls
+Uninteresting calls (calls to mock methods without expectations) can clutter test logs and complicate debugging.
+
+- Use `NiceMock<YourMockClass>` to suppress warnings for uninteresting calls, making output cleaner.
+
+  ```cpp
+  NiceMock<MockFoo> mock_foo;
+  EXPECT_CALL(mock_foo, DoSomething());
+  // Calls to other mock methods that have no EXPECT_CALL do not produce warnings.
+  ```
+
+- Avoid adding `EXPECT_CALL(...).Times(AnyNumber())` blindly just to suppress warnings; it can make tests verbose and brittle.
+
+
+### 3. Use `ON_CALL` for Default Behavior Instead of Overusing `EXPECT_CALL`
+
+- `ON_CALL` defines default/mock behavior without setting expectations.
+- Overused `EXPECT_CALL`s add strictness and slow down test execution with excessive checks.
+- Define shared mock behavior once with `ON_CALL`, then add minimal `EXPECT_CALL`s only where verification is needed.
+
+```cpp
+ON_CALL(mock_foo, GetValue()).WillByDefault(Return(5));
+EXPECT_CALL(mock_foo, GetValue()).Times(1);  // only when you need to verify call count
+```
+
+---
+
+## Troubleshooting Common Issues
+
+### 1. Unexpected Calls or Excess Invocation Failures
+
+If tests fail indicating "unexpected mock function call" or "too many calls to mock function":
+
+- Check that expectations (`EXPECT_CALL`) are established before mock method calls.
+- Avoid setting expectations after passing mocks to APIs or when calls have already happened.
+- Use `.RetiresOnSaturation()` on limited invocation expectations to deactivate them when saturated.
+
+Example:
+```cpp
+EXPECT_CALL(mock, SetValue(7))
+    .Times(2)
+    .RetiresOnSaturation();
+```
+
+This allows the expectation to retire after 2 calls, preventing errors on excessive calls.
+
+
+### 2. StrictMock Failures from Uninteresting Calls
+
+Using `StrictMock` on mocks causes failures if any unexpected calls occur.
+
+- Use `NiceMock` instead during test development.
+- Explicitly add `EXPECT_CALL(mock, Method(_)).Times(AnyNumber())` for methods expected to be called without detailed verification.
+- Review and limit the scope of `StrictMock` usage to critical cases.
+
+
+### 3. Heap Check Failures or Memory Leaks with Mocks
+
+Common cause: base class does not have a virtual destructor.
+
+- Ensure all interfaces mocked have virtual destructors.
+- If mock objects leak (not deleted), final verification will not run. Use `Mock::AllowLeak(&mock_object)` when necessary, e.g. in death tests.
+
+
+### 4. Compilation Failures on Mock Methods with Template, Comma, or Overloaded Types
+
+- Wrap complex return types or argument types in parentheses when using `MOCK_METHOD`.
+- Use type aliases to simplify signatures involving commas.
+
+Example:
+```cpp
+using BoolInt = std::pair<bool, int>;
+
+class MockFoo {
+ public:
+  MOCK_METHOD((BoolInt), GetPair, ());
+};
+```
+
+- For overloaded method mocks, define mocks for all overloads or use `using` to bring other overloads into scope.
+
+
+### 5. Slow Test Suites Due to Excessive `EXPECT_CALL` Usage
+
+- Limit the number of expectations to only necessary ones.
+- Use `ON_CALL` to set default behavior where call verification is not critical.
+- Avoid using `.Times()` excessively with tight bounds unless needed.
+
+
+## Best Practices
+
+- Always set `EXPECT_CALL` before exercising mocks.
+- Use sequences (`InSequence` or `Sequence` objects) only if call order matters.
+- Use `.WillOnce` and `.WillRepeatedly` to shape mock behavior clearly.
+- Avoid over-specifying arguments in matchers, use `_` for flexibility.
+- Use `RetiresOnSaturation()` to make expectations non-sticky and avoid upper bound violations.
+
+---
+
+## Verifying and Clearing Mocks Before Destruction
+
+In some cases, your mock object might be leaked or long-lived, preventing automatic verification.
+
+- Explicitly verify and clear expectations with:
+
+```cpp
+::testing::Mock::VerifyAndClearExpectations(&mock_object);
+```
+
+- This helps catch failures early and avoid false positives caused by undestroyed mocks.
+
+---
+
+## Controlling Verbosity and Logs
+
+- Use the `--gmock_verbose` flag to control logging of mock function calls:
+  - `info` logs all calls, expectations, and stack traces.
+  - `warning` logs warnings and errors (default).
+  - `error` logs errors only.
+
+- To enable detailed tracing for diagnosing failing expectations, run tests with:
+
+```shell
+./your_test --gmock_verbose=info
+```
+
+- Combine with `--gtest_stack_trace_depth=0` to hide stack traces if desired.
+
+---
+
+## Example: Making a Mock Return Different Values on Multiple Calls
+
+```cpp
+using ::testing::Return;
+using ::testing::InSequence;
+
+class MockCalculator {
+ public:
+  MOCK_METHOD(int, Compute, (int x), (override));
+};
+
+TEST(CalculatorTest, ReturnsDifferentValuesOnEachCall) {
+  MockCalculator calc;
+  {
+    InSequence s;  // Expect calls in order
+
+    EXPECT_CALL(calc, Compute(5))
+        .WillOnce(Return(10))
+        .WillOnce(Return(20))
+        .WillRepeatedly(Return(30));
+  }
+
+  EXPECT_EQ(calc.Compute(5), 10);
+  EXPECT_EQ(calc.Compute(5), 20);
+  EXPECT_EQ(calc.Compute(5), 30);
+  EXPECT_EQ(calc.Compute(5), 30);
+}
+```
+
+This example also avoids pitfalls of sticky expectations by relying on the sequence.
+
+---
+
+## Troubleshooting Flow
+
+1. Ensure all `EXPECT_CALL`s appear before the mocks are used.
+2. Use `--gmock_verbose=info` to observe mock call matching.
+3. Use `RetiresOnSaturation()` for expectations with limited calls.
+4. Verify your mocks use virtual destructors to avoid leaks.
+5. Suppress uninteresting call warnings with `NiceMock` when appropriate.
+6. Check compilation warnings/errors about const parameters or parameter types.
+
+---
+
+## Next Steps & Related Content
+
+- Explore the [Mocking Basics Guide](/guides/core-workflows/mocking-basics) for foundational mock usage.
+- Advance to [Mocking with Cardinalities and Actions](/guides/real-world-scenarios/mocking-with-cardinalities-actions) to refine behaviors.
+- Review [Build System Integration](/guides/integration-and-optimization/build-system-integration) to optimize build configurations.
+- Consult [Troubleshooting Common Issues](/getting-started/troubleshooting-validation/common-issues) for error resolution.
+
+---
+
+## Resources
+- [gMock FAQ](docs/gmock_faq.md)
+- [gMock Cookbook](docs/gmock_cook_book.md)
+- [gMock Cheat Sheet](docs/gmock_cheat_sheet.md)
+- [GoogleTest Primer](docs/primer.md)
+- Official GoogleTest repository: https://github.com/google/googletest
+
+---
+
+<AccordionGroup title="Performance Optimization and Troubleshooting Summary">
+<Accordion title="Speeding up Mock Compilation">
+Move constructors and destructors out of headers into `.cc` files to reduce build times.
+</Accordion>
+<Accordion title="Managing Expectations and Calls">
+Use `NiceMock` to suppress warnings for uninteresting calls; set expectations early; use `RetiresOnSaturation()` to handle limited calls.
+</Accordion>
+<Accordion title="Controlling Verbosity and Logs">
+Use `--gmock_verbose=info` for detailed debug output; `warning` for balance; `error` to reduce log noise.
+</Accordion>
+<Accordion title="Common Troubleshooting Areas">
+Unexpected/extensive calls often stem from missing or late expectations. Virtual destructors are critical for heap safety. Use `Mock::VerifyAndClearExpectations()` to verify mocks early.
+</Accordion>
+</AccordionGroup>
