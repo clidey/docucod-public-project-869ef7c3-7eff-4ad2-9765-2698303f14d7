@@ -1,245 +1,195 @@
 ---
-title: "Common Installation Issues"
-description: "Lists the most frequent installation or build problems users encounter, from compiler compatibility problems to linking errors, and provides clear solutions or workarounds."
+title: "Troubleshooting Common Issues"
+description: "Find answers and solutions to frequently encountered issues, such as compiler errors, missing dependencies, and platform-specific quirks, to get back on track quickly."
 ---
 
-# Common Installation Issues
+# Troubleshooting Common Issues
 
-This guide lists the most frequent installation or build problems users encounter when setting up GoogleTest and GoogleMock, including compiler compatibility problems, linking errors, and common runtime problems. Each section provides concrete solutions or workarounds to help you get past common pitfalls quickly.
+Find answers and solutions to frequently encountered issues, such as compiler errors, missing dependencies, and platform-specific quirks, to get back on track quickly.
 
 ---
 
-## 1. Compiler Compatibility Issues
+## Common Compiler Errors
 
-### Problem: Unsupported or Too Old Compiler
+Compiler errors can often halt progress early. Here's how to identify and quickly resolve them:
 
-GoogleTest and GoogleMock require a C++17-compliant compiler. Using older compilers may result in build failures or unexpected runtime errors.
+### Error: Commas in `MOCK_METHOD` Arguments
 
-**Symptoms:**
-- Compiler errors related to modern C++ features
-- Failing to compile certain headers like `<optional>`, `<variant>`, or template errors
+When using `MOCK_METHOD`, argument or return types containing commas (such as `std::pair` or `std::map`) may cause parsing errors.
+
+**Symptom:** Compilation fails with cryptic errors near the `MOCK_METHOD` macro.
 
 **Solution:**
-- Upgrade your compiler to a supported version:
-  - GCC 7.3 or later
-  - Clang 5 or later
-  - MSVC 2017 15.7 or later
-- Verify your build environment targets C++17 or higher (e.g., add `-std=c++17` for GCC/Clang, or `/std:c++17` for MSVC).
 
-**Tip:** Check your compiler version with:
+- Wrap types that contain commas in parentheses. For example:
 
-```bash
-gcc --version
-clang --version
-cl.exe  # for MSVC
+  ```cpp
+  // Incorrect - causes compilation error
+  MOCK_METHOD(std::pair<bool, int>, GetPair, ());
+  MOCK_METHOD(bool, CheckMap, (std::map<int, double>, bool));
+
+  // Correct - using parentheses to protect commas
+  MOCK_METHOD((std::pair<bool, int>), GetPair, ());
+  MOCK_METHOD(bool, CheckMap, ((std::map<int, double>), bool));
+  ```
+
+- Alternatively, define a type alias to simplify the macro usage:
+
+  ```cpp
+  using BoolAndInt = std::pair<bool, int>;
+  using MapIntDouble = std::map<int, double>;
+
+  MOCK_METHOD(BoolAndInt, GetPair, ());
+  MOCK_METHOD(bool, CheckMap, (MapIntDouble, bool));
+  ```
+
+This avoids direct macro parsing issues related to unprotected commas.
+
+---
+
+## Issues with Mocking Const and Overloaded Methods
+
+### Compiler Warnings for Const Parameters
+
+If you encounter warnings such as MSVC warnings C4301 or C4373 when mocking methods with `const` parameters, it is due to a known compiler quirk. 
+
+**Best Practice:** Remove top-level `const` qualifiers on primitive parameters in both your base and mock methods, as they are ignored by C++ and can trigger warnings.
+
+### Mocking Overloaded Methods
+
+When mocking overloaded methods, ensure you mock *all* relevant overloads to avoid compiler warnings about hidden base class methods.
+
+If you want to mock only some overloads and allow others to pass through, bring the unmocked overloads into scope with `using`:
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  using Foo::Add;  // Make unmocked overloads visible
+  MOCK_METHOD(int, Add, (Element x), (override));
+};
 ```
 
 ---
 
-## 2. Linking Errors
+## Managing Expectations & Avoiding Common Test Pitfalls
 
-### Problem: Undefined Reference or Linker Errors Related to GoogleTest or GoogleMock Symbols
+### Uninteresting Calls Warning
 
-These often happen if:
-- GoogleTest or GoogleMock libraries are not linked properly
-- Mixing static and shared versions incorrectly
-- Including source files manually without corresponding object files
+When a mock method is called without any `EXPECT_CALL` set, gMock prints a warning about an "uninteresting mock function call." This is normal and means your test does not specify expectations for that method.
 
-**Typical Errors:**
-```text
-undefined reference to `testing::InitGoogleMock(int*, char**)`
-undefined reference to `testing::Test::Test()`
+**How to handle:**
+
+- If such calls are expected and should be ignored, consider using `NiceMock` to suppress warnings:
+
+  ```cpp
+  NiceMock<MockFoo> mock_foo;
+  EXPECT_CALL(mock_foo, DoThis());  // set expectations on interesting calls
+  ```
+
+- To explicitly allow any number of calls without warnings, add a catch-all `EXPECT_CALL`:
+
+  ```cpp
+  EXPECT_CALL(mock_foo, Method(_)).Times(AnyNumber());
+  ```
+
+### Unexpected Calls and Strict Mocks
+
+Unexpected calls are calls that do not match any existing `EXPECT_CALL`.
+
+- By default, gMock treats these as errors.
+- Using `StrictMock` makes all uninteresting calls failures, tightening test validation.
+
+### Sticky Expectations
+
+Expectations remain active even after their expected call count is saturated ("sticky") unless explicitly retired with `.RetiresOnSaturation()`. This may lead to confusing errors like call count violations if not handled as intended.
+
+**Tip:** To make expectations retire automatically on saturation:
+
+```cpp
+EXPECT_CALL(mock, Foo())
+    .Times(2)
+    .RetiresOnSaturation();
 ```
-
-**Solution:**
-- Confirm you have linked the appropriate GoogleTest and GoogleMock libraries.
-- With CMake, ensure you link to `gtest` and `gmock` targets correctly.
-- If using Bazel, depend on `@com_google_googletest//:gmock` and `@com_google_googletest//:gtest` targets.
-- Avoid mixing static and dynamic libraries for GTest/GMock in the same build.
-
-**Best Practice:** Build GoogleTest/GMock separately and link against the resulting libraries instead of including source files directly.
 
 ---
 
-## 3. Missing Virtual Destructors in Mock Interfaces
+## Platform-Specific Quirks
 
-### Problem: Runtime Heapcheck Failures or Crashes Reported When Deleting Mock Objects
+### Virtual Destructors Required
 
-GoogleMock requires the base class you mock to have a virtual destructor. Failing to do so can cause undefined behavior and difficult-to-debug runtime errors.
-
-**Example Symptom:**
-- Memory leaks reported
-- Program crashes at object destruction
-
-**Solution:**
-- Ensure all interfaces meant to be mocked have a **virtual destructor**.
+Always declare base classes with virtual destructors to avoid undefined behavior, especially when mocking. Missing a virtual destructor can cause leaks or crashes due to improper destruction.
 
 Example:
 
 ```cpp
 class Foo {
  public:
-  virtual ~Foo() {}  // Must be virtual!
+  virtual ~Foo() {}  // Must be virtual
   virtual void Bar() = 0;
 };
 ```
 
----
+### MSVC Macro Conflicts
 
-## 4. Build Failures Due to Commas in Template Arguments
+Windows headers sometimes define macros that clash with mock method names.
 
-### Problem: Errors When Using `MOCK_METHOD` Macro With Types That Contain Commas
+**Solution:** Either:
 
-Because `MOCK_METHOD` macro parses its arguments by commas, if you use template types with commas unprotected, compilation will fail.
+- Undefine conflicting macros before using `EXPECT_CALL` or `ON_CALL`.
+- Use alternate names.
 
-**Example Failure:**
-```cpp
-MOCK_METHOD(std::pair<bool, int>, GetPair, ());  // Won't compile!
-MOCK_METHOD(bool, CheckMap, (std::map<int, double>, bool));  // Won't compile!
-```
-
-**Solutions:**
-- Wrap the type with parentheses:
+Example in tests:
 
 ```cpp
-MOCK_METHOD((std::pair<bool, int>), GetPair, ());
-MOCK_METHOD(bool, CheckMap, ((std::map<int, double>), bool));
-```
-
-- Or define type aliases:
-
-```cpp
-using BoolAndInt = std::pair<bool, int>;
-MOCK_METHOD(BoolAndInt, GetPair, ());
-using MapIntDouble = std::map<int, double>;
-MOCK_METHOD(bool, CheckMap, (MapIntDouble, bool));
+#undef Method
+EXPECT_CALL(mock, Method());
 ```
 
 ---
 
-## 5. Linking and Using with Older or Customized Build Systems
+## Best Practices for Effective Mock Usage
 
-### Problem: Linking problems or missing symbols when building GoogleTest manually or integrating with non-standard build tools.
-
-**Solution:**
-- Follow best practices to use GoogleTest with supported build systems such as CMake or Bazel.
-- Explicitly compile and link the GoogleTest and GoogleMock sources as separate libraries.
-- Consult `Installing with CMake` or `Installing with Bazel` guides for configuration details.
-
----
-
-## 6. Multiple Definitions or Symbol Conflicts
-
-### Problem: Linker errors about multiple definitions
-
-This can happen if the GoogleTest or GoogleMock sources are included in more than one translation unit without proper `extern` declarations or if static linking is done improperly.
-
-**Solution:**
-- With CMake, use GoogleTest as a library dependency, not by adding source files multiple times.
-- Avoid including `.cc` files directly in multiple places.
-- Use proper `testonly` build rules if using Bazel to avoid multiple definitions.
+- Define `MOCK_METHOD` macros in the public section even if mocking private or protected methods.
+- Use `ON_CALL()` to specify default behaviors without expectations.
+- Use `EXPECT_CALL()` only to enforce that calls must occur, avoiding over-constrain tests.
+- Set expectations before exercising the mock.
+- Use sequences or `InSequence` to enforce call order explicitly.
+- When mocking methods with move-only types, provide lambdas or functors to handle the returned or passed unique pointers.
+- For complex argument matching, use matchers (`_`, `Eq()`, or custom matchers).
 
 ---
 
-## 7. Runtime Warning: Uninteresting Mock Calls
+## Troubleshooting Tips
 
-### Problem: Console warnings like `Uninteresting mock function call - returning default value.`
+### Diagnosing Expectation Failures
 
-This is a warning that a mock method was called without an explicit expectation.
+Run tests with the flag `--gmock_verbose=info` to get detailed call matching traces with stack backtraces, helping identify why expectations fail.
 
-**To Fix or Suppress:**
-- Use `ON_CALL()` to specify default mock behaviors without setting call count expectations.
-- Use `NiceMock` to suppress warnings on uninteresting calls.
+### Compilation Errors Related to MOCK_METHOD
 
-**Example:**
-```cpp
-using ::testing::NiceMock;
-NiceMock<MockFoo> mock_foo;
-EXPECT_CALL(mock_foo, DoThis());
-```
+Ensure types with commas are wrapped or aliased as noted above. Confirm qualifiers in MOCK_METHOD match those in the base class methods.
 
-See [Knowing When to Expect](gmock_cook_book.md#UseOnCall) for best practices.
+### Unexpected Call Errors
 
----
+Check if missing `EXPECT_CALL` or too restrictive matchers are causing calls to be unexpected. Add more permissive expectations or set catch-all expectations.
 
-## 8. MSVC-Specific Compiler Warnings
+### Method Not Being Mocked
 
-### Problem: Warnings C4301 or C4373 When Mocking Methods with `const` Parameters
+Verify that the method is virtual (except for Hi-perf dependency injection use cases). For non-virtuals, template-based mocking may be used instead.
 
-Visual Studio sometimes warns about overriding virtual functions that differ only by const on parameters.
+### Multiple EXPECT_CALL and Matching Order
 
-**Solution:**
-- Remove top-level const qualifiers on value parameters in interface and mock method declarations, as they are ignored by the compiler.
+Remember gMock matches expectations in reverse order of specification. Put more specific expectations after the general ones to override them.
 
 ---
 
-## 9. Slow Compilation Performance
+## Further Resources
 
-### Problem: Building mocks is slow, memory-intensive, or fails with out-of-memory errors
-
-**Cause:** Mocks generate a lot of code, and compiling mock classes inline can cause issues.
-
-**Solution:**
-- Move mock class constructors and destructors definitions to a `.cc` file.
-- This reduces per-translation unit compilation and greatly improves build speed.
-
-Example:
-```cpp
-// In mock_foo.h
-class MockFoo : public Foo {
- public:
-  MockFoo();
-  ~MockFoo();
-  MOCK_METHOD(...);
-};
-
-// In mock_foo.cc
-MockFoo::MockFoo() {}
-MockFoo::~MockFoo() {}
-```
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.md) - detailed recipes and examples
+- [Legacy gMock FAQ](https://google.github.io/googletest/gmock_faq.html) - common questions and clarifications
+- [GoogleTest Primer](https://google.github.io/googletest/primer.html) - learning tests writing basics
+- [Mocking Reference](https://google.github.io/googletest/docs/reference/mocking.html) - API documentation
 
 ---
 
-## 10. GoogleMock and Multi-threading
-
-### Problem: Deadlocks or race conditions when using mocks in multi-threaded tests
-
-**Guidelines:**
-- Always manipulate and set expectations on mocks in a single thread.
-- Calls to mocks can occur in any thread safely.
-- Synchronize actions explicitly if order matters between threads.
-
----
-
-## 11. Verbosity and Debugging
-
-### Problem: Too many or too few gMock diagnostic messages
-
-Control verbosity using the `--gmock_verbose` flag:
-
-| Level   | Description                                         |
-|---------|-----------------------------------------------------|
-| info    | Most verbose, prints all calls and stack traces    |
-| warning | Default, prints warnings and errors without stack trace |
-| error   | Only print errors                                   |
-
-Example:
-```bash
-./my_test --gmock_verbose=info
-```
-
----
-
-# Summary
-This document helps users quickly diagnose and remedy the most common build and installation issues with GoogleTest and GoogleMock. It covers compiler compatibility, linking errors, macro usage nuances, runtime warnings, and build performance tips. Additionally, it addresses platform-specific quirks and best practices for multi-threaded usage.
-
----
-
-# References
-- [Installing with CMake](getting-started/installation/install-cmake)
-- [Installing with Bazel](getting-started/installation/install-bazel)
-- [Configuring Your Project](getting-started/installation/initial-configuration)
-- [gMock Cookbook](docs/gmock_cook_book.md)
-- [gMock for Dummies](docs/gmock_for_dummies.md)
-- [General Usage FAQ](docs/gmock_faq.md)
-- [Supported Platforms](getting-started/setup-requirements/supported-platforms)
+For more examples and explanations, visit the [GoogleMock Github Repository](https://github.com/google/googletest) to explore source code and additional tests addressing corner cases and advanced usage.
