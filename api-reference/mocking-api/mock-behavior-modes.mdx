@@ -1,0 +1,212 @@
+---
+title: "Mock Object Behavior Modes"
+description: "Documents the available mock object wrappers (NiceMock, NaggyMock, StrictMock) that modify how uninteresting calls are handled in test runs. Explains impact on failure reporting, debugging, and gradual test migration. Offers guidance on selecting the right mode for development versus enforcement scenarios."
+---
+
+# Mock Object Behavior Modes
+
+GoogleTest's mocking framework offers specialized mock object wrappers that influence how uninteresting calls (calls not covered by any `EXPECT_CALL`) are treated during test execution. These wrappers — `NiceMock`, `NaggyMock`, and `StrictMock` — provide fine-grained control over warning suppression, failure reporting, and debugging output. Understanding how and when to use each mode empowers you to write cleaner, more maintainable, and predictable tests.
+
+---
+
+## Overview of Mock Behavior Modes
+
+By default, a mock object issues a **warning** when an uninteresting call is made, but continues running. This corresponds to the **naggy** behavior.
+
+The three mock wrappers modify this default behavior:
+
+| Wrapper        | Description                                                       | Effect on Uninteresting Calls                              |
+|----------------|-------------------------------------------------------------------|-----------------------------------------------------------|
+| `NiceMock<T>`  | Suppresses warnings about uninteresting calls                    | Allows uninteresting calls silently (no warnings/errors)  |
+| `NaggyMock<T>` | Prints warnings on uninteresting calls (default behavior)        | Prints warnings, but test continues                         |
+| `StrictMock<T>`| Fails the test on uninteresting calls                            | Treats uninteresting calls as **errors**, causing test failure |
+
+All of these wrappers subclass the original mock class `T` and inherit its constructors, enabling seamless substitution.
+
+## Impact on Your Tests
+
+Uninteresting calls happen when a method without an explicit `EXPECT_CALL` is invoked. The test framework assumes the user is unconcerned about such calls unless otherwise specified.
+
+- **NaggyMock (Default):** Handy during test development or debugging to get notified when unexpected calls happen without failing tests immediately.
+- **NiceMock:** Useful for large test suites or code bases where you want to avoid noise from uninteresting calls, promoting test maintainability.
+- **StrictMock:** Best suited for enforcing strict APIs where any unanticipated call is a test failure, ideal for final verification stages or highly robust test guarantees.
+
+<Tip>
+Given that `NaggyMock` can produce a lot of output during test development, consider starting with `NiceMock` for cleaner logs, then use `StrictMock` when you want to strictly enforce call expectations.
+</Tip>
+
+---
+
+## Using Mock Wrappers
+
+### Declaration and Construction
+
+Each wrapper is a template class that takes your existing mock class `MockFoo` as a parameter. Usage looks like this:
+
+```cpp
+#include <gmock/gmock.h>
+
+using ::testing::NiceMock;
+using ::testing::NaggyMock;
+using ::testing::StrictMock;
+
+// Your mock class
+class MockFoo {
+ public:
+   MOCK_METHOD(void, DoSomething, (), ());
+   MOCK_METHOD(int, Compute, (int x), ());
+};
+
+// Creating mocks with behavior modes:
+NiceMock<MockFoo> nice_mock;
+NaggyMock<MockFoo> naggy_mock;
+StrictMock<MockFoo> strict_mock;
+
+// You can also forward constructor arguments:
+NiceMock<MockFoo> nice_mock_with_args(42, "hello");
+```
+
+### Behavior
+
+| Mode       | Uninteresting Call Outcome                                          |
+|------------|-------------------------------------------------------------------|
+| NiceMock   | Call silently allowed. No warnings or failures.                   |
+| NaggyMock  | Call allowed with warning printed to stderr or test log.          |
+| StrictMock | Call considered a test failure. Emitting failure and aborting test (if configured). |
+
+### Successor Behavior
+
+- `NiceMock`, `NaggyMock`, and `StrictMock` only affect *uninteresting calls* — calls to mock methods **without** any expectations.
+- Calls that match an expectation but do not satisfy argument constraints (**unexpected calls**) always result in test failures regardless of mode.
+
+---
+
+## Practical Guidance and Best Practices
+
+### When to Use Each Mock Mode
+
+| Situation                               | Recommended Mode                 |
+|----------------------------------------|--------------------------------|
+| Early development or exploratory tests | `NaggyMock` (default)            |
+| Large test suites; minimizing noise     | `NiceMock`                      |
+| Strict contract enforcement or CI runs  | `StrictMock`                   |
+
+When refactoring, tests using `StrictMock` will immediately alert you to any API call changes, but may also increase maintenance overhead.
+
+### Gradual Migration Strategy
+
+If you maintain legacy tests that produce many uninteresting call warnings:
+
+1. Begin by switching to `NiceMock` to reduce noise.
+2. Gradually tighten expectations using `EXPECT_CALL` or specific behaviors.
+3. Transition to `StrictMock` for new or critical tests to enforce correctness.
+
+### Caveats and Limitations
+
+- Wrappers only affect mock methods defined **directly** in the mock class, not inherited mock methods.
+- Nesting wrappers such as `NiceMock<StrictMock<MockFoo>>` is not supported.
+- The mock class should have a virtual destructor for correct wrapper behavior.
+
+<Warning>
+If your mock class's destructor is not virtual, using these wrappers can lead to resource leaks or undefined behavior.
+</Warning>
+
+---
+
+## Understanding Uninteresting vs Unexpected Calls
+
+- **Uninteresting calls:** No `EXPECT_CALL` exists for the method.
+- **Unexpected calls:** `EXPECT_CALL`s exist but none match the call's arguments or invocation order.
+
+**Mock Wrappers affect only uninteresting calls**:
+- `NiceMock` suppresses warnings.
+- `NaggyMock` outputs warnings.
+- `StrictMock` treats warnings as failures.
+
+Unexpected calls always cause test failures regardless of the mode.
+
+---
+
+## Example: Using the Mock Behavior Modes
+
+```cpp
+#include <gmock/gmock.h>
+using namespace testing;
+
+class MockDatabase {
+ public:
+  MOCK_METHOD(bool, Connect, (), ());
+  MOCK_METHOD(void, Disconnect, (), ());
+  MOCK_METHOD(int, Query, (const std::string& sql), ());
+};
+
+void TestWithNiceMock() {
+  NiceMock<MockDatabase> mock_db;
+  EXPECT_CALL(mock_db, Connect()).WillOnce(Return(true));
+
+  // No restrictions on Disconnect or Query: uninteresting calls ignored.
+  mock_db.Connect();  // Expected call.
+  mock_db.Disconnect();  // No warning.
+  int result = mock_db.Query("SELECT * FROM users"); // No warning.
+}
+
+void TestWithStrictMock() {
+  StrictMock<MockDatabase> mock_db;
+  EXPECT_CALL(mock_db, Connect()).WillOnce(Return(true));
+
+  mock_db.Connect();  // Okay.
+
+  mock_db.Disconnect();
+  // Test will fail here: unexpected uninteresting call to Disconnect.
+}
+
+void TestWithNaggyMock() {
+  NaggyMock<MockDatabase> mock_db;
+  EXPECT_CALL(mock_db, Connect()).WillOnce(Return(true));
+
+  mock_db.Connect();  // Okay.
+
+  mock_db.Disconnect();
+  // Warning will be printed but test continues.
+}
+```
+
+---
+
+## Additional Tips
+
+- **Suppress uninteresting call warnings for specific methods:** Use `EXPECT_CALL(obj, Method(_)).Times(AnyNumber())`.
+
+- **Controlling verbosity:** Use the `--gmock_verbose` flag or programmatically set `::testing::FLAGS_gmock_verbose` to toggle messages related to uninteresting calls.
+
+- Carefully design mock classes to minimize uninteresting calls by setting relevant expectations.
+
+---
+
+## How Mock Wrappers are Implemented (Brief Insight)
+
+Each wrapper (`NiceMock`, `NaggyMock`, `StrictMock`) works by registering the mock object's address with Google Mock's internal registry to specify the reaction to uninteresting calls:
+
+- `NiceMock` causes uninteresting calls to be allowed silently.
+- `NaggyMock` issues warnings upon uninteresting calls.
+- `StrictMock` treats uninteresting calls as failures.
+
+This registration occurs in the wrapper's constructor and unregistration upon destruction, ensuring scoped management of behavior.
+
+---
+
+## Summary
+
+GoogleTest's mock object behavior modes — `NiceMock`, `NaggyMock`, and `StrictMock` — provide configurable strategies for handling uninteresting calls. Choosing the right mode balances test noise, strictness, and maintainability. These wrappers inherit from your mock class and can be seamlessly integrated into existing tests or new ones:
+
+- Use **`NiceMock`** to clean up tests by suppressing warnings.
+- Use **`NaggyMock`** during active test development for visibility.
+- Use **`StrictMock`** for enforcing strict correctness and catching unintended calls as errors.
+
+Always ensure your mock classes have virtual destructors and define mocks directly in the class to guarantee correct wrapper behavior.
+
+---
+
+For practical usage, refer to the [Mocking Reference - NiceMock, NaggyMock, StrictMock](https://google.github.io/googletest/reference/mocking.html#NiceMock) and the [gMock Cookbook section on The Nice, the Strict, and the Naggy](https://google.github.io/googletest/gmock_cook_book.html#NiceStrictNaggy).
+
+<Source url="https://github.com/google/googletest" paths={[{"path": "googlemock/include/gmock/gmock-nice-strict.h", "range": "1-140"}]} />
