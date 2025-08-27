@@ -1,0 +1,201 @@
+---
+title: "Assertion Failures & Mock Expectations"
+description: "Discusses typical causes and resolutions for assertion failures, unexpected behavior from mock objects, and understanding fatal vs non-fatal test failures. Explains best practices for debugging failed tests and clarifies error messages."
+---
+
+# Assertion Failures & Mock Expectations FAQs
+
+This FAQ answers common user questions about assertion failures, mock expectations, and related error messages in GoogleTest and GoogleMock. It helps you diagnose why tests fail due to mismatched calls, unexpected behavior of mocks, and clarifies how to interpret fatal vs non-fatal failures.
+
+---
+
+## 1. Understanding Types of Test Failures
+
+### What is the difference between a fatal and a non-fatal failure?
+
+- **Fatal failures** stop the current test function immediately and abort execution of that test. These are triggered by `ASSERT_*` and `FAIL()` macros.
+- **Non-fatal failures** report the failure but allow the test function to continue running. These are triggered by `EXPECT_*` macros.
+
+Knowing this helps you decide whether to use `EXPECT_` or `ASSERT_` depending on whether you want the test to proceed after failure.
+
+### What causes assertion failures?
+
+Assertion failures happen when an `EXPECT_*` or `ASSERT_*` macro checks a condition or compares values that do not meet the expected criteria. For example, expecting that `foo == bar` but `foo != bar`.
+
+Use the failure messages to identify the exact assertion and values that failed. They include the file, line, and the expected vs actual values.
+
+### Why do I see assertion failures related to mock expectations?
+
+GoogleMock validates that calls to mock methods match the expectations you have set using `EXPECT_CALL`. Failures occur if:
+
+- A mock method is called fewer times than expected.
+- A mock method is called with unexpected or unmatched arguments.
+- Calls occur in the wrong order if sequencing constraints are used.
+- There are unexpected or excessive calls beyond specified cardinalities.
+
+---
+
+## 2. Common Mock Expectation Failures
+
+### What causes an "unexpected mock function call" failure?
+
+This error occurs when a mock method is called with arguments that do not match **any** active expectation (`EXPECT_CALL`) for that method. It means your production code called a mock method in a way your test did not expect.
+
+**How to resolve:**
+- Review the arguments passed in the failed call.
+- Add or adjust `EXPECT_CALL` to cover those arguments, or
+- Use a catch-all expectation like `EXPECT_CALL(mock, Method(_)).Times(AnyNumber())` to allow other calls.
+
+### What does "uninteresting call" mean in the warning message?
+
+An *uninteresting call* is a call to a mock method that does not have any `EXPECT_CALL` expectation set on it. By default, gMock warns if such uninteresting calls happen to alert you that you might have forgotten to set an expectation.
+
+**How to handle:**
+- If the call is OK, ignore the warning or switch your mock object to a `NiceMock` to suppress such warnings.
+- If the call should be disallowed, add `EXPECT_CALL(mock, Method(_)).Times(0)`.
+
+### What happens if a mock method is called more times than expected?
+
+This triggers an *excessive call* failure. It means the call count exceeded the cardinality set by `Times()`.
+
+To fix this:
+- Adjust the expected call count cardinality or ordering.
+- Use `.RetiresOnSaturation()` to retire expectations after their intended use.
+- Use sequences (`Sequence`) to enforce call order when multiple expectations overlap.
+
+### What is the difference between `ON_CALL` and `EXPECT_CALL`?
+
+- `ON_CALL` specifies default behavior for a mock method **without** setting a requirement that it must be called.
+- `EXPECT_CALL` sets an expectation that the method *will* be called, with specific argument matchers and cardinality.
+
+Missed `EXPECT_CALL`s for a method but with an `ON_CALL` only will cause *uninteresting call* warnings.
+
+### Why do my EXPECT_CALL arguments and `.With()` matcher not match during a call?
+
+The `.With()` clause applies a matcher to the entire argument tuple beyond individual argument matchers in `EXPECT_CALL`. Failure to match either the individual arguments or the `.With()` matcher results in a call mismatch.
+
+Check that your `.With()` matcher correctly reflects the combined logic on all arguments.
+
+---
+
+## 3. Typical Causes & Debugging Tips
+
+### Why does gMock report "Actions ran out" on an EXPECT_CALL?
+
+If you provide more mock method calls than there are `.WillOnce()` actions and no final `.WillRepeatedly()`, gMock warns that explicit actions have run out and executes the default action.
+
+To fix this, either provide enough `.WillOnce()` clauses or add a `.WillRepeatedly()` action to define behavior for remaining calls.
+
+### Why do I get a warning or error about leaking mock objects?
+
+Mock expectations are verified when the mock object is destructed. Objects allocated on the heap that are never deleted cause expectations to never be verified.
+
+You can:
+- Ensure mocks are deleted properly.
+- Call `Mock::VerifyAndClearExpectations(mock_ptr)` manually.
+- Use `Mock::AllowLeak(mock_ptr)` to suppress leaks if deliberate (not recommended).
+
+### How to interpret "mock function call matches EXPECT_CALL" informational messages?
+
+When running tests with `--gmock_verbose=info`, gMock prints detailed traces showing when mock calls match specific expectations. This helps debug why certain calls matched or didn't.
+
+Use this to trace the flow of calls and figure out mismatches and branching.
+
+### How do I deal with call order issues?
+
+gMock allows strict ordering of expectations using `InSequence` or `.InSequence()` clauses with `Sequence` objects.
+
+If your calls must happen in order, ensure your `EXPECT_CALL`s are placed inside an `InSequence` block or assigned to sequences correctly.
+
+If you want a partial order, use `.After()` clauses or multiple sequences.
+
+---
+
+## 4. Best Practices for Debugging Failed Tests
+
+- Always run your tests with `--gmock_verbose=info` for detailed mock call traces.
+- Examine failure messages for:
+  - Exact function and arguments called
+  - Expected calls and their counts
+  - Unsatisfied pre-requisites or call ordering violations
+- Use `NiceMock` to suppress warnings about uninteresting calls if those calls are acceptable.
+- Use `.RetiresOnSaturation()` on expectations to avoid sticky expectations causing failures.
+- Add catch-all expectations with `.Times(AnyNumber())` for methods that may be called with unexpected arguments.
+- Use sequence constructs to check call order explicitly.
+- Verify mock objects are deleted or call `Mock::VerifyAndClearExpectations()` if used on the heap.
+- Adjust verbosity level (`--gmock_verbose`) to control output noise during debugging.
+
+---
+
+## 5. Understanding Error Messages in Mock Failures
+
+Below are explanations of common key phrases in failure messages from GoogleMock:
+
+- **"Unexpected mock function call":** call did not match any active expectation.
+- **"Uninteresting mock function call":** call to method with no expectation set.
+- **"Actions ran out":** no more `WillOnce()` actions available; default action or WillRepeatedly is used.
+- **"Saturated and active":** expectation is met exactly but still active (sticky).
+- **"Over-saturated and active":** expectation called more times than allowed.
+- **"Retired":** expectation is no longer active (e.g. due to sequencing or `.RetiresOnSaturation()`).
+- **"Unsatisfied pre-requisite":** this expectation cannot be matched before prerequisite expectations are met.
+- **"Actual call count doesn't match":** the number of calls was fewer or more than expected.
+
+Always check the messages carefully to pinpoint the root cause.
+
+---
+
+## 6. Troubleshooting Common Scenarios
+
+### Scenario: Your mock method is called but the test says the expectation was not satisfied.
+
+- Confirm your `EXPECT_CALL` is set up *before* the mock method is called.
+- Increase verbosity with `--gmock_verbose=info` to see detailed call matching.
+- Check for argument mismatches in matchers or `.With()` clause.
+- Consider call order constraints causing an expectation to not be active when called.
+
+### Scenario: You get warnings about uninteresting calls even though you used `ON_CALL`.
+
+- `ON_CALL` only sets default behavior, it does not verify calls. You need `EXPECT_CALL` to expect a call.
+- If many uninteresting calls must be ignored, use `NiceMock` as your mock type.
+
+### Scenario: A mock method returns unexpected values.
+
+- Use `.WillOnce()` or `.WillRepeatedly()` to specify the return values or behavior explicitly.
+- Check if default return value or `ON_CALL` default actions are interfering.
+
+### Scenario: Tests are failing unexpectedly due to excessive calls.
+
+- Add `.RetiresOnSaturation()` to expectations to prevent them from matching after saturation.
+- Add explicit cardinalities to control expected call count.
+
+### Scenario: Calls are failing because of order.
+
+- Use `InSequence` or `.InSequence()` on `Sequence` objects to enforce order.
+- Verify `.After()` clauses to ensure prerequisites are met.
+
+---
+
+## 7. Additional Tips
+
+- Always put `EXPECT_CALL` statements before exercising the code under test.
+- Avoid overly strict expectations; prefer verifying behavior that matters.
+- Combine manual debugging with `--gmock_verbose=info` for the clearest insight.
+- Use the mock’s `WillOnce` and `WillRepeatedly` clauses to finely control mock behavior.
+- Use `Mock::AllowLeak()` sparingly and only if confident about mock object lifetime.
+
+---
+
+## Related Documentation
+
+- [Mock Method Definition](../api-reference/mocking-apis/mock-methods.md) for declaring mocks.
+- [Setting Mock Expectations](../api-reference/mocking-apis/expect-call-and-on-call.md) for mastering EXPECT_CALL and ON_CALL.
+- [Nice, Strict, and Naggy Mock Classes](../api-reference/mocking-apis/mock-class-behaviors.md) for controlling uninteresting calls.
+- [Matchers Reference](../api-reference/matchers-and-actions/argument-matchers.md) for detailed argument matching.
+- [gMock Cookbook](../docs/gmock_cook_book.md) for practical tips and recipes.
+- [Assertion Macros](../api-reference/core-testing-apis/assertion-macros.md) for understanding assertion failures.
+
+<Info>
+For quick resolution of unexpected or failed mock expectations, run tests with `--gmock_verbose=info` to trace all mock calls and matched expectations with argument values and stack frames.
+</Info>
+
+---
