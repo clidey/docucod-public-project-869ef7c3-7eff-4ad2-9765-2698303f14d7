@@ -1,0 +1,244 @@
+---
+title: "Test Execution and Failure Troubleshooting"
+description: "Solutions for common issues related to running tests, interpreting failures, and debugging problematic test cases. Addresses test discovery, crash diagnostics, managing test output, and handling assertion failures."
+---
+
+# Test Execution and Failure Troubleshooting
+
+This page provides practical solutions and guidance for common issues encountered during test execution, interpreting test failures, and debugging complex or problematic test cases in GoogleTest. It focuses on enabling users to effectively run, monitor, and troubleshoot their tests by understanding test discovery, failure diagnostics, output management, and assertion failure handling.
+
+---
+
+## 1. Understanding Test Execution Flow
+
+GoogleTest automatically discovers and executes all registered tests based on your code and test suites. The execution flow includes:
+
+- **Test Discovery:** GoogleTest registers all tests declared via macros such as `TEST()`, `TEST_F()`, `TEST_P()`, or those dynamically registered using `RegisterTest()`. Only tests matching user-provided filters and flags run.
+- **Global Environment Setup:** Registered global test environments are set up before any tests execute.
+- **Test Suite Setup:** For each test suite, `SetUpTestSuite()` is called before the first test.
+- **Individual Test Execution:** Each test runs with its own fixture setup (`SetUp()`) and teardown (`TearDown()`).
+- **Test Suite Teardown:** After the last test, `TearDownTestSuite()` executes.
+- **Global Environment Teardown:** After all tests, global test environments are torn down.
+
+The full lifecycle ensures isolation and consistent environment for each test.
+
+<Check>
+Make sure you initialize GoogleTest properly with `InitGoogleTest()` before calling `RUN_ALL_TESTS()` to properly set up filters, listeners, and environments.
+</Check>
+
+---
+
+## 2. Common Test Execution Problems
+
+### 2.1 Tests Not Running or Being Discovered
+
+**Symptoms:**
+- No tests appear to run.
+- Test framework output shows "0 tests run".
+
+**Causes and Solutions:**
+- **Missing Initialization**: Ensure `InitGoogleTest()` is called before `RUN_ALL_TESTS()`.
+- **Filter Settings:** The default or user-specified filter (`--gtest_filter`) may exclude all tests. Verify the filter value.
+- **Disabled Tests:** Tests with a `DISABLED_` prefix or suites with the same will be skipped unless `--gtest_also_run_disabled_tests` is specified.
+- **Parameterized Tests Not Instantiated:** Tests declared with `TEST_P` must have a corresponding `INSTANTIATE_TEST_SUITE_P` to run; otherwise, they are reported as uninstantiated and do not execute.
+
+For example:
+```cpp
+// Parameterized test not instantiated, will not run
+class MyParamTest : public testing::TestWithParam<int> {};
+TEST_P(MyParamTest, ShouldDoSomething) {
+  EXPECT_EQ(1, GetParam());
+}
+
+// Missing instantiation causes no tests to run:
+// INSTANTIATE_TEST_SUITE_P(, MyParamTest, testing::Values(1, 2, 3));
+```
+
+Use the macro `GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(MyParamTest);` to suppress errors if this is intentional.
+
+---
+
+### 2.2 Tests Executing in Unexpected Order or Being Skipped
+
+By default, GoogleTest executes tests in source file order but supports shuffling and repetition.
+
+- Use `--gtest_shuffle` to randomize test order to detect order dependencies.
+- Use `--gtest_repeat=N` to repeat tests multiple times to detect flaky tests.
+- If `--gtest_fail_fast` is enabled, test execution stops on first failure.
+
+For test skipping:
+- If a fatal failure or `GTEST_SKIP()` occurs in a global setup or fixture setup, subsequent tests may be skipped.
+- Filters and shard environment variables (`GTEST_SHARD_INDEX`, `GTEST_TOTAL_SHARDS`) further control which tests run.
+
+---
+
+## 3. Interpreting Failures and Error Messages
+
+GoogleTest classifies failures into:
+
+- **Fatal Failures:** (e.g., from `ASSERT_*` macros) cause the current function to abort.
+- **Non-fatal Failures:** (e.g., from `EXPECT_*` macros) note the failure but let the test continue.
+
+Error messages typically include:
+
+- The file and line number where failure occurred.
+- Failure summary and detailed messages.
+- Optional stack traces indicating the call path.
+- Additional traces from `SCOPED_TRACE` or `ScopedTrace` scopes if used.
+
+### 3.1 Common Failure Scenarios in Test Fixtures
+
+Failures may occur within:
+
+- **Fixture Constructors/Destructors:** Fatal failures here do not abort the test run but simply return from constructor/destructor early. Use `SetUp()`/`TearDown()` to detect failures properly.
+
+- **`SetUp()` and `TearDown()` Methods:** Fatal failures here cause test to be aborted immediately. Non-fatal failures are reported but test continues.
+
+- **Test Body:** Assertions in test body directly decide pass/fail.
+
+### 3.2 Failure Propagation in Subroutines
+
+An `ASSERT_*` failure in a subroutine aborts that subroutine but not the calling test. To handle this, GoogleTest provides:
+
+- `HasFatalFailure()` to detect if a fatal failure occurred in the current test.
+- `ASSERT_NO_FATAL_FAILURE(statement)` and `EXPECT_NO_FATAL_FAILURE(statement)` macros to verify that a statement does not generate fatal failures.
+
+Example:
+```cpp
+void Helper() {
+  ASSERT_EQ(1, 2);  // Fatal failure, aborts Helper()
+}
+
+TEST(FooTest, Bar) {
+  Helper();
+  if (HasFatalFailure()) return;  // Stops test if fatal failure
+  // Safe to continue here
+}
+```
+
+### 3.3 Leveraging `SCOPED_TRACE` for Trace Context
+
+When calling common helper functions multiple times causing failures, use `SCOPED_TRACE(message)` to add context to failure messages, making debugging easier.
+
+Example:
+```cpp
+SCOPED_TRACE("Helper invocation 1");
+Helper();
+```
+
+The failure output will include trace indicating which invocation failed.
+
+---
+
+## 4. Managing and Interpreting Test Output
+
+GoogleTest supports different output formats and verbosity controls.
+
+- **Console Output:** Default text output color-coded by success, failure, or skip.
+- **Brief Mode:** Use `--gtest_brief=1` to print only failures.
+- **Elapsed Time:** Controlled with `--gtest_print_time=0` to omit timing.
+- **UTF-8 Handling:** Controlled with `--gtest_print_utf8=0`.
+- **Listing Tests Only:** Use `--gtest_list_tests` to list all discovered tests without running them.
+- **XML and JSON Reports:** Use `--gtest_output=xml[:PATH]` or `json[:PATH]` to generate detailed test reports for CI integration.
+
+Reading XML or JSON reports helps integrate with CI dashboards and debugging tools.
+
+---
+
+## 5. Troubleshooting Assertion Failures
+
+### 5.1 Understanding Assertion Macros
+
+- `ASSERT_*` macros generate fatal failures and abort the current function.
+- `EXPECT_*` macros generate non-fatal failures allowing test continuation.
+
+Fatal failures inside void-returning functions abort that function, so placing fatal assertions in constructors or destructors is unsafe and discouraged.
+
+### 5.2 Testing Expected Failures
+
+GoogleTest provides macros to verify that code generates expected assertion failures:
+
+- `EXPECT_FATAL_FAILURE(statement, "substring")` checks that `statement` triggers exactly one fatal failure whose message contains `substring`.
+- `EXPECT_NONFATAL_FAILURE(statement, "substring")` checks for exactly one non-fatal failure.
+
+Variants exist for failures on all threads:
+
+- `EXPECT_FATAL_FAILURE_ON_ALL_THREADS(statement, substring)`
+- `EXPECT_NONFATAL_FAILURE_ON_ALL_THREADS(statement, substring)`
+
+### 5.3 Using Scoped Fake Test Part Result Reporter
+
+Internal utilities such as `ScopedFakeTestPartResultReporter` can intercept test failures programmatically for advanced testing and verification of failure reporting.
+
+---
+
+## 6. Debugging Crashes and Unexpected Terminations
+
+- If tests crash or the process exits prematurely, verify setup code (global environments, test suite fixtures) is not causing fatal failures.
+- Use the `TEST_PREMATURE_EXIT_FILE` environment variable protocol to detect unexpected early termination.
+- Enable debugger breakpoints on failures with `--gtest_break_on_failure`.
+- If exceptions are enabled, fatal failures may throw exceptions if `--gtest_throw_on_failure` is set.
+
+---
+
+## 7. Best Practices for Stable and Maintainable Test Runs
+
+- Use `SetUpTestSuite` and `TearDownTestSuite` to share expensive resources across tests.
+- Prefer `EXPECT_*` over `ASSERT_*` in helper functions unless immediate abort is necessary.
+- Use `SCOPED_TRACE` to add context to repeated invocation failures.
+- Avoid fatal assertions in constructors and destructors.
+- Regularly check test filtering and sharding environment to ensure intended tests run.
+- Use XML/JSON output for CI integration and post-mortem analysis.
+- Be mindful of multi-threading in tests possibly affecting failure interception.
+
+---
+
+## 8. Additional Resources
+
+- [GoogleTest Assertions Reference](https://google.github.io/googletest/reference/assertions.html)
+- [GoogleTest Testing Reference](docs/reference/testing.md)
+- [GoogleTest Advanced Topics](docs/advanced.md)
+- [Using SCOPED_TRACE and Failure Propagation](docs/advanced.md#using-assertions-in-subroutines)
+- [gtest/gtest-spi.h - Failure Testing Macros](https://github.com/google/googletest/blob/main/googletest/include/gtest/gtest-spi.h)
+- [GoogleTest API Reference - Test Definition & Execution](api-reference/core-test-api/test-definition-execution)
+
+For help with mocking failures, see the [GoogleMock FAQ and Cookbook](googlemock/README.md).
+
+---
+
+## Example: Catching Fatal Failures in a Subroutine
+
+```cpp
+void HelperCheck(int x) {
+  ASSERT_EQ(1, x);  // May fatal fail and abort this function
+}
+
+TEST(MyTest, FailurePropagation) {
+  HelperCheck(2);  // Will fatal fail inside HelperCheck
+  if (testing::Test::HasFatalFailure()) return;  // Abort test early
+
+  // Safe code below
+  EXPECT_TRUE(true);
+}
+```
+
+## Example: Using EXPECT_FATAL_FAILURE to Verify Failure Message
+
+```cpp
+EXPECT_FATAL_FAILURE({ ASSERT_EQ(1, 2); }, "Expected equality of these values");
+```
+
+## Example: Adding Context with SCOPED_TRACE
+
+```cpp
+for (int i = 0; i < 3; ++i) {
+  SCOPED_TRACE(testing::Message() << "Loop iteration " << i);
+  EXPECT_EQ(i, i + 1);  // Will fail with added trace info
+}
+```
+
+Messages will include "Loop iteration 0", "Loop iteration 1", etc., helping debug.
+
+---
+
+For full understanding and troubleshooting, review the wider documentation on [Test Lifecycle](concepts/core-architecture/test-lifecycle), [Assertions](api-reference/core-test-api/assertions-reference), and [Test Event Listeners](docs/advanced.md#extending-google-test-by-handling-test-events).
