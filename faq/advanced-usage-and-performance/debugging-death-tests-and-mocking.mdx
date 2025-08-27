@@ -1,0 +1,273 @@
+---
+title: "How do I debug issues with death tests or mock objects?"
+description: "Covers subtle issues in writing and running death tests, as well as common pitfalls in using GoogleMock (e.g., strictness, cardinalities, and action behaviors). Explains test environment requirements and approaches for tracking down elusive bugs."
+---
+
+# How do I debug issues with death tests or mock objects?
+
+This page offers practical guidance for diagnosing and resolving subtle challenges when working with **death tests** and **GoogleMock** objects in GoogleTest. It covers common pitfalls, environment requirements, and strategies to track down elusive bugs that arise due to threading, process behavior, strictness in mocks, and test execution internals.
+
+---
+
+## Understanding the Death Test Environment
+
+Death tests verify that certain code paths terminate the program as expected. However, due to platform and threading intricacies, running and debugging death tests can sometimes be complex.
+
+### Death Test Styles
+
+GoogleTest offers two death test styles controlled by the `--gtest_death_test_style` flag:
+
+- **threadsafe:** The child process re-executes the test binary and runs only the current death test. This approach is safer in multi-threaded environments but slower.
+- **fast:** The child process immediately runs the test code after `fork()`. While faster, it is only safe if your environment is single-threaded.
+
+You can set this style programmatically via:
+
+```cpp
+GTEST_FLAG_SET(death_test_style, "threadsafe");
+```
+
+### Warning About Threading
+
+Because death tests use `fork()` under the hood, multiple active threads may cause unpredictable results or deadlocks. GoogleTest issues warnings when more than one thread is detected prior to running a death test.
+
+Ensure your test environment:
+
+- Minimizes threads before death tests run.
+- Names death test suites ending with `DeathTest` to prioritize their execution early, reducing threading risks.
+
+See [Death Tests And Threads](https://github.com/google/googletest/blob/main/docs/advanced.md#death-tests-and-threads) for detailed explanations.
+
+## Common Issues and How to Debug Them
+
+### Death Test Failures and Diagnostic Suggestions
+
+| Symptom                                    | Cause                                                          | Suggested Action                                                     |
+|--------------------------------------------|----------------------------------------------------------------|--------------------------------------------------------------------|
+| Death test “failed to die”                  | The test code did not cause termination as expected            | Double-check that the statement triggers a crash or exits.        |
+| Death test stderr does not match expected  | Regex matcher syntax incompatible or wrong error message       | Use supported regex subset: avoid unsupported constructs like `|`, `{}`, groups.
+| Death test aborted due to return statement | Using `return` inside death test’s `statement` macro            | Avoid `return` in death test code; it causes failures.             |
+| Death test hangs or deadlocks               | Multiple threads active and unsafe fork                        | Name suite as `*DeathTest`, use threadsafe style, or isolate tests.
+
+### Debugging Tips
+
+- Use `SCOPED_TRACE` to add context inside helper functions called in death test statements to pinpoint failure location.
+- Run death tests in isolation with verbose logging enabled.
+- Use `GTEST_FLAG_SET(death_test_style, "threadsafe")` to improve reliability during debugging.
+- Check the output for GoogleTest’s last death test message via `DeathTest::LastMessage()` if you are implementing custom death tests.
+
+### Example: Debugging an Unexpected Death Test Failure
+
+```cpp
+TEST(MyDeathTest, DiesAsExpected) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+
+  SCOPED_TRACE("Testing buffered close behavior");
+  ASSERT_DEATH({ CloseSocket(); }, "socket closed error");
+}
+```
+
+If this test fails:
+
+- Verify `CloseSocket()` triggers a termination.
+- Confirm the regex accurately matches the error output.
+- Look for thread warnings before test runs.
+
+## Common Pitfalls With GoogleMock
+
+When using mocks in death tests or any tests, subtle issues can cause confusion or failures. The following best practices and troubleshooting hints help ensure smooth usage:
+
+### Strictness and Uninteresting Calls
+
+- GoogleMock provides mock wrappers like `StrictMock`, `NiceMock`, and `NaggyMock`:
+  - `StrictMock` fails on unexpected calls.
+  - `NiceMock` ignores unexpected calls.
+  - `NaggyMock` warns on unexpected calls.
+- Use the appropriate wrapper based on test granularity needs.
+- If death tests are failing due to mock leak detection, consider `Mock::AllowLeak()` for mocks that live beyond test scope by design.
+
+### Cardinality Mismatches
+
+- Expectation cardinalities, such as `Times(1)`, `Times(AtLeast(1))`, must reflect the actual call behavior.
+- Mismatches produce clear failure messages; fix by adjusting `EXPECT_CALL` cardinalities.
+
+### Action and Behavior Misconfiguration
+
+- Use `ON_CALL` macros to set default behaviors to avoid unexpected return values.
+- Use `EXPECT_CALL` with `.WillOnce()` or `.WillRepeatedly()` to specify mock method actions.
+
+### Common Debugging Strategies
+
+- Stream diagnostic messages with calls, e.g., `EXPECT_CALL(mock, Foo()).WillOnce(Return(42)) << "Unexpected call to Foo";`
+- Use `SCOPED_TRACE()` within helper methods to trace complex call paths.
+- Enable verbose output from GoogleMock if necessary for detailed call reports.
+
+## Tracking Down Elusive Bugs
+
+When standard diagnostics are insufficient, employ these advanced workflows:
+
+### Verify Single Evaluation of Arguments in Death Tests
+
+Death test statements must evaluate arguments only once to avoid side effects impacting test validity. GoogleTest internally ensures this, but if you see unexpected behavior:
+
+- Check that your test expressions are side-effect free or use local temporaries.
+
+### Use MockDeathTestFactory for Testing Death Test Macros
+
+For framework developers or advanced debugging, you can substitute GoogleTest’s death test factory with mocks to verify macro interactions and failure handling for return or exception escape cases.
+
+### Handling Multiline and Complex Regex in Death Tests
+
+Regular expressions in death test assertions must be supported by GoogleTest’s limited regex engine:
+
+- Avoid features like unions (`|`), groups (`()`), brackets (`[]`), or repetition counts (`{}`).
+- Try matching output line-by-line or use simpler regex constructs.
+- Review failure output carefully; it includes actual stderr output indented with `[  DEATH   ]`.
+
+### Use Separate Processes for Death Tests
+
+Death tests run isolated from the main test to prevent side effects. Memory freed or file handles closed in a death test won’t affect the parent process. To debug this:
+
+- Simplify test code outside death tests to reproduce failure.
+- Use logging or side-channel outputs for exploration, as in-test side effects aren’t visible afterward.
+
+## Troubleshooting Common Death Test Failures
+
+<AccordionGroup title="Death Test Troubleshooting">
+<Accordion title="Death Test Does Not Die">
+If the death test assertion fails because the code does not terminate:
+
+- Verify the code inside the death test statement truly causes termination.
+- Avoid `return` or throwing exceptions inside the death test statement block.
+- Check for unintentional handling of signals or exceptions that prevent crash.
+- Confirm your regex matcher matches stderr output exactly or partially, per the supported features.
+- Make sure your test binary path includes directory components when using "threadsafe" style.
+</Accordion>
+<Accordion title="Regex Mismatch in Death Tests">
+
+Ensure your error regex matches stderr output as GoogleTest performs a regex match (or matcher match) on stderr.
+
+- Simplify regex to match key substrings.
+- Avoid unsupported regex constructs.
+- Consider using GoogleMock's ContainsRegex matcher.
+</Accordion>
+<Accordion title="Threading Issues">
+
+Seeing warnings about more than one thread when running a death test?
+
+- Death tests expect a single-threaded environment.
+- Rename suites to end with `DeathTest` to prioritize execution early.
+- Use `threadsafe` style for better threading tolerance.
+- Isolate or mock out background threads when possible.
+</Accordion>
+<Accordion title="Unexpected Return in Death Test Statement">
+
+Returning from the death test's statement block is illegal and causes failure.
+
+- Don't use statements like `return` in ASSERT_DEATH or EXPECT_DEATH.
+- Use `SCOPED_TRACE` or break complex logic into non-returning helper functions.
+</Accordion>
+</AccordionGroup>
+
+## Debugging GoogleMock in Tests
+
+<AccordionGroup title="GoogleMock Debugging Tips">
+<Accordion title="Mock Object Leak Detection in Death Tests">
+
+Death tests terminate the child process prematurely, which may leave mocks as leaked if not handled.
+
+- Use `Mock::AllowLeak()` on mocks leaking in death tests to prevent false positives.
+- Avoid relying on destructor side-effects in death test code.
+</Accordion>
+<Accordion title="StrictMock Unexpected Calls">
+
+If `StrictMock` causes failures due to unexpected calls:
+
+- Review your expectations with `EXPECT_CALL` and provide default behaviors using `ON_CALL`.
+- Consider relaxing into `NiceMock` for tests where some calls are acceptable.
+- Use sequences to enforce call order if applicable.
+</Accordion>
+<Accordion title="Action Misbehavior and Call Cardinality">
+
+- Confirm `Times()` expectations match actual usage; overspecification causes failures.
+- Use `.WillOnce()` and `.WillRepeatedly()` to specify behaviors clearly.
+- Check for side effects or require calls explicitly.
+</Accordion>
+<Accordion title="Tracing Mock Calls">
+
+- Add information in `EXPECT_CALL` statements via streaming `<<` operator to emit contextual messages.
+- Use `SCOPED_TRACE` around helper call sites for easier failure localization.
+- Employ GoogleMock verbose mode to see inspected call traces.
+</Accordion>
+</AccordionGroup>
+
+## Best Practices for Writing and Debugging Death Tests and Mocks
+
+1. **Name test suites containing death tests with the suffix `DeathTest`** to ensure proper execution ordering.
+2. **Avoid side effects inside death test statements**; remember child process execution isolates side-effects.
+3. **Keep death test statements free of `return` and exceptions** unless explicitly tested for death by exception.
+4. **Choose death test style (`fast` or `threadsafe`) carefully** based on your environment’s threading model.
+5. **Prepare and configure mocks with clear expectation cardinalities and default behaviors.**
+6. **Leverage `SCOPED_TRACE` to provide contextual information across nested calls.**
+7. **Use `Mock::AllowLeak()` in death tests if mock objects’ lifespan crosses test boundaries.**
+
+## Further Reading and Related Topics
+
+- [Death Tests: Design and Use Cases](https://github.com/google/googletest/blob/main/docs/concepts/integration-patterns-advanced/death-tests-architecture.md)
+- [Death Assertions Reference](reference/assertions.md#death)
+- [Mocking C++ Objects with GoogleMock](https://github.com/google/googletest/blob/main/docs/gmock_cook_book.md)
+- [Writing Clear and Effective Assertions](https://github.com/google/googletest/blob/main/guides/integration-and-best-practices/writing-effective-assertions.md)
+- [Advanced GoogleTest Topics](docs/advanced.md)
+
+---
+
+### Code Example: Death Test with Mock and Scoped Trace
+
+```cpp
+#include <gtest/gtest.h>
+#include <gmock/gmock.h>
+
+using ::testing::StrictMock;
+using ::testing::Return;
+
+class MyMock {
+ public:
+  MOCK_METHOD(int, Compute, (int), ());
+};
+
+TEST(MyDeathTest, DiesWhenComputeFails) {
+  StrictMock<MyMock> mock;
+  ON_CALL(mock, Compute(::testing::_)).WillByDefault(Return(-1));
+
+  SCOPED_TRACE("Calling Compute with -1 should cause death");
+  ASSERT_DEATH({
+      int val = mock.Compute(-1);
+      if (val < 0) {
+        fprintf(stderr, "Error: negative value\n");
+        abort();
+      }
+  }, "Error: negative value");
+}
+```
+
+This example illustrates layering mock behavior inside a death test while tracing for easy failure diagnosis.
+
+---
+
+## Troubleshooting Checklist
+
+- [ ] Ensure your death test statement triggers termination without `return` or exceptions escaping.
+- [ ] Verify the error message regex matches stderr output using supported regex syntax.
+- [ ] Confirm your test binary is called via a path including directory components for threadsafe death tests.
+- [ ] Use `SCOPED_TRACE` to disambiguate failures within helper functions.
+- [ ] Check threading warnings — minimize active threads before death tests.
+- [ ] For mocks in death tests, call `Mock::AllowLeak()` to prevent false positives from leak detection.
+- [ ] Set expectations on mocked calls with appropriate cardinalities and default actions.
+- [ ] Use verbose logging during complex mock or death test debugging.
+
+<Tip>
+If a death test is unexpectedly passing or failing, try switching your death test style to `threadsafe` to gain more control and clearer debugging signals, especially in multi-threaded environments.
+</Tip>
+
+<Warning>
+Do not put multiple death assertions on the same source code line; this will cause cryptic compilation errors.
+</Warning>
