@@ -1,0 +1,283 @@
+---
+title: "Creating Custom Matchers"
+description: "Guides users through the process of writing their own matchers for specialized assertions. Includes API references for matcher extensions, code samples, and integration guidance for both test and production code."
+---
+
+# Creating Custom Matchers
+
+This guide walks you through creating your own matchers in GoogleMock to extend its verification capabilities beyond built-in matchers. Custom matchers allow you to specify complex validation logic for your mock function arguments with descriptive failure messages, tailored precisely to your testing needs.
+
+---
+
+## Introduction
+
+Matchers serve as predicates that verify whether a function argument meets expected conditions. While GoogleMock provides numerous built-in matchers for standard use cases, real-world tests often require custom logic that is not covered. Writing your own matchers empowers you to:
+
+- Express domain-specific validation rules succinctly and clearly.
+- Enhance test failure diagnostics with meaningful descriptions.
+- Reuse complex matching logic across your test suite.
+
+This page presents a step-by-step approach to quickly write new matcher types using macros and classes, along with practical tips and examples.
+
+---
+
+## Quick Creation Using `MATCHER` Macros
+
+The simplest way to write a custom matcher is to use the `MATCHER` family of macros offered by GoogleMock. These macros handle the boilerplate and let you focus on the matching logic.
+
+### Basic Usage
+
+```cpp
+MATCHER(NameOfMatcher, "Optional description string") {
+  // Return true if 'arg' satisfies the matcher condition.
+  return <bool expression involving 'arg'>;
+}
+```
+
+- `NameOfMatcher` is the matcher name used in your tests.
+- Inside the braces, `arg` represents the value being matched.
+- The optional description string documents what the matcher checks; if omitted, the matcher name is used by default.
+
+#### Example: Divisibility Matcher
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  return (arg % 7) == 0;
+}
+```
+
+You can then write:
+
+```cpp
+EXPECT_CALL(mock, Foo(IsDivisibleBy7()));
+EXPECT_THAT(value, IsDivisibleBy7());
+```
+
+#### Enhancing Failure Messages
+
+Add extra details by streaming info to the `result_listener` argument:
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  if ((arg % 7) == 0) return true;
+  *result_listener << "the remainder is " << (arg % 7);
+  return false;
+}
+```
+
+If a test fails, you'll get a message like:
+
+```
+Value of: some_expression
+Expected: is divisible by 7
+  Actual: 23 (the remainder is 2)
+```
+
+---
+
+## Parameterized Matchers with `MATCHER_P` and Variants
+
+To create matchers that take parameters, use the `MATCHER_P` macro, and for multiple parameters use `MATCHER_P2`, `MATCHER_P3`, etc., up to `MATCHER_P10`.
+
+### Syntax
+
+```cpp
+MATCHER_P(NameOfMatcher, param_name, "Optional description string") {
+  // Use 'arg' for the value being matched and 'param_name' for the parameter.
+  return <bool expression involving 'arg' and 'param_name'>;
+}
+```
+
+#### Example: Absolute Value Matcher
+
+```cpp
+MATCHER_P(HasAbsoluteValue, value, "") {
+  return abs(arg) == value;
+}
+```
+
+Usage:
+
+```cpp
+EXPECT_THAT(some_value, HasAbsoluteValue(10));
+```
+
+The generated failure messages include the parameter:
+
+```
+Value of: some_value
+Expected: has absolute value 10
+  Actual: -9
+```
+
+### Descriptions Incorporating Parameters
+
+You can create descriptive strings that mention parameter values, for example:
+
+```cpp
+MATCHER_P2(InClosedRange, low, hi,
+          absl::StrFormat("%s in range [%s, %s]",
+                          negation ? "isn't" : "is",
+                          PrintToString(low),
+                          PrintToString(hi))) {
+  return low <= arg && arg <= hi;
+}
+```
+
+This produces readable messages automatically including your parameter values.
+
+---
+
+## Implementing Matchers as Classes
+
+For more control and reusability, implement a matcher class conforming to GoogleMock's matcher interface.
+
+### Requirements
+
+Your class must:
+
+- Declare `using is_gtest_matcher = void;`
+- Implement `bool MatchAndExplain(const T& value, std::ostream* listener) const;`
+- Implement `void DescribeTo(std::ostream* os) const;`
+- Implement `void DescribeNegationTo(std::ostream* os) const;`
+
+### Basic Example
+
+Here's a full example for a matcher that verifies if an integer is divisible by 7:
+
+```cpp
+class DivisibleBy7Matcher {
+ public:
+  using is_gtest_matcher = void;
+
+  bool MatchAndExplain(int n, std::ostream* os) const {
+    int remainder = n % 7;
+    if (remainder == 0) return true;
+    if (os) *os << "the remainder is " << remainder;
+    return false;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "is divisible by 7";
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "is not divisible by 7";
+  }
+};
+
+::testing::Matcher<int> DivisibleBy7() {
+  return ::testing::Matcher<int>(new DivisibleBy7Matcher());
+}
+```
+
+Usage:
+
+```cpp
+EXPECT_THAT(value, DivisibleBy7());
+```
+
+### Notes
+
+- Streaming explanations to `os` during `MatchAndExplain` helps users understand partial match failures.
+- Your class does not need to inherit from a base matcher class but must fulfill the interface.
+
+---
+
+## Creating Polymorphic Matchers
+
+Polymorphic matchers can be used to match values of various types.
+
+### Making MatchAndExplain a Template
+
+If your matcher applies to multiple types, make `MatchAndExplain` a function template:
+
+```cpp
+class NotNullMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  template <typename T>
+  bool MatchAndExplain(T* p, std::ostream* os) const {
+    return p != nullptr;
+  }
+
+  void DescribeTo(std::ostream* os) const { *os << "is not NULL"; }
+  void DescribeNegationTo(std::ostream* os) const { *os << "is NULL"; }
+};
+
+NotNullMatcher NotNull() {
+  return NotNullMatcher();
+}
+```
+
+Usage example:
+
+```cpp
+EXPECT_CALL(mock_obj, Foo(NotNull()));
+```
+
+This matcher works with raw and smart pointers of any type.
+
+---
+
+## Composite Matchers
+
+Matchers sometimes take other matchers as parameters. Your matcher can hold sub-matchers and delegate descriptions to them to provide layered, descriptive failure messages.
+
+Example: A matcher that checks distance from a target with a given distance matcher.
+
+## Advanced Matcher Features
+
+- Use `MATCHER*` macros for quick, concise matchers.
+- Implement full matcher interface classes for complex reuse.
+- Use streaming in `MatchAndExplain` to provide failure diagnostics.
+- Provide informative `DescribeTo` and `DescribeNegationTo` methods.
+- Parameterize matchers for flexible, reusable checks.
+
+---
+
+## Best Practices and Tips
+
+- Always ensure your matcher is functionally pure, without side effects.
+- Provide clear and concise failure messages via `DescribeTo`.
+- Use `MATCHER` macros for most cases; switch to manual implementation for reusable or polymorphic matchers.
+- Use parameterized matchers to avoid duplication.
+- Write matchers that consider negation context (`negation` boolean) if you provide custom descriptions.
+
+---
+
+## Troubleshooting
+
+- If failure messages are unclear, enhance your `MatchAndExplain` method with detailed explanations.
+- In case of ambiguous matcher resolution in overloaded functions, use explicit casting or helper functions.
+- If matchers don't compile for certain types, verify correct casting and template usage.
+
+---
+
+## Integration with Expectation Macros
+
+Use your custom matchers inside `EXPECT_CALL` and `EXPECT_THAT` macros:
+
+```cpp
+EXPECT_CALL(mock_obj, Method(CustomMatcher()));
+EXPECT_THAT(value, CustomMatcher());
+```
+
+These seamlessly blend your logic with GoogleMock's infrastructure.
+
+---
+
+## Additional Resources
+
+- For in-depth examples, see the [gMock Cookbook](https://github.com/google/googletest/blob/main/docs/gmock_cook_book.md#writing-new-matchers-quickly).
+- Learn about parameterized matchers and matcher interfaces from the same cookbook.
+- Review built-in matchers in the [Built-in Matchers Reference](https://github.com/google/googletest/blob/main/docs/reference/matchers.md).
+
+---
+
+## Summary
+
+Creating custom matchers in GoogleMock extends your ability to verify complex argument conditions with tailored, descriptive feedback. Start with the `MATCHER` macros for simple cases, move towards crafting full matcher classes for reusable or polymorphic matchers, and always aim for clarity in your descriptions and failure diagnostics.
+
+Explore the extensive matchers ecosystem in GoogleMock and combine them for powerful behavioral specifications in your tests.
