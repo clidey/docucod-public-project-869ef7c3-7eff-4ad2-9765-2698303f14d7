@@ -1,0 +1,221 @@
+---
+title: "Mocking Permissions and Strictness"
+description: "A focused exploration of GoogleMock's permission and strictness model. Learn how NiceMock and StrictMock manage uninteresting calls, control test permissions, and provide fine-grained feedback to support both exploratory and production-grade testing."
+---
+
+# Mocking Permissions and Strictness
+
+GoogleMock offers powerful mechanisms to control how mock objects respond to calls that are not explicitly expected, helping you tailor the behavior, feedback, and test rigor. This page presents a focused exploration of GoogleMock's permission and strictness model, particularly through the specialized wrappers: `NiceMock`, `NaggyMock`, and `StrictMock`. These wrappers define how uninteresting calls—calls to methods without explicit expectations—are handled, balancing between clean tests and strict verification.
+
+---
+
+## Understanding Uninteresting Calls and Strictness
+
+When using a mock class (such as `MockFoo`), calls made to mock methods **without** `EXPECT_CALL` specifications are called *uninteresting calls*. By default, GoogleMock issues warnings about these, since they might indicate gaps in your test coverage or unintended interactions. However, whether these calls cause warnings, errors, or are silently ignored depends on the strictness level of the mock object.
+
+GoogleMock provides three main strictness wrappers to control such behavior:
+
+| Wrapper       | Description                                                      | Uninteresting Call Behavior                      |
+| ------------- | ---------------------------------------------------------------- | ------------------------------------------------ |
+| `NiceMock<T>`   | Subclass of `T` that **suppresses warnings** on uninteresting calls. Useful for exploratory or less stringent tests. | **Suppresses** warnings; uninteresting calls allowed silently. |
+| `NaggyMock<T>`  | Currently the default behavior for `T`. It logs warnings for uninteresting calls. Good balance during development. | **Logs warnings**; uninteresting calls allowed. |
+| `StrictMock<T>` | Subclass of `T` that treats uninteresting calls as **test failures**. Enforces rigorous interaction compliance. | **Fails** the test on uninteresting calls. |
+
+### Key Points on Strictness
+
+- Uninteresting calls **are never errors by default**, but may be warnings.
+- `StrictMock` elevates uninteresting call warnings to errors, causing test failures.
+- Unexpected calls (calls that don't match any `EXPECT_CALL` clauses) are always errors regardless of strictness.
+- Wrappers `NiceMock`, `NaggyMock`, and `StrictMock` affect **only uninteresting calls**, not unexpected calls.
+- These wrappers are subclasses of the mock class `T` and preserve constructor arguments.
+
+## Using Strictness Wrappers
+
+To use these wrappers, simply instantiate your mock object as `NiceMock<MockClass>`, `NaggyMock<MockClass>`, or `StrictMock<MockClass>`. They seamlessly forward all constructor arguments to the base mock class.
+
+```cpp
+#include <gmock/gmock.h>
+using ::testing::NiceMock;
+using ::testing::NaggyMock;
+using ::testing::StrictMock;
+
+class MockExample {
+ public:
+  MOCK_METHOD(void, DoSomething, (), ());
+  MOCK_METHOD(int, GetValue, (int), (const));
+};
+
+// Example test using NiceMock
+TEST(ExampleTest, NiceMockSuppression) {
+  NiceMock<MockExample> nice_mock;
+  EXPECT_CALL(nice_mock, DoSomething());
+  nice_mock.DoSomething();  // No warnings if other methods are called.
+  nice_mock.GetValue(5);    // No warnings despite no expectation.
+}
+
+// Example test using StrictMock
+TEST(ExampleTest, StrictMockFailsOnUninteresting) {
+  StrictMock<MockExample> strict_mock;
+  EXPECT_CALL(strict_mock, DoSomething());
+  strict_mock.DoSomething();
+  strict_mock.GetValue(5);  // Test failure: uninteresting call.
+}
+```
+
+### Common Use Cases
+
+- **NiceMock:** Use for tests where you want to avoid clutter from irrelevant method calls, especially exploratory or early-phase tests.
+- **NaggyMock:** (Default) Use during development to get alerted about unexpected interactions without failing immediately.
+- **StrictMock:** Use for production-grade tests where all mock interactions must be explicitly planned and verified.
+
+> _Tip:_ You can switch a default mock to nice or strict simply by wrapping it, without modifying the mock's class definition.
+
+## How GoogleMock Implements Strictness
+
+Under the hood, each wrapper class `NiceMock<T>`, `NaggyMock<T>`, and `StrictMock<T>` inherits privately from an *impl class* that registers with GoogleMock's Mock framework to control the handling of uninteresting calls.
+
+- `NiceMockImpl` allows uninteresting calls silently.
+- `NaggyMockImpl` warns on uninteresting calls.
+- `StrictMockImpl` treats uninteresting calls as failures.
+
+This mechanism ensures that the mock class `T` is constructed and destructed with the appropriate behavior regarding uninteresting calls.
+
+### Limitations
+
+- Wrappers only affect mock methods declared with the `MOCK_METHOD` macros **directly within** the mock class `T`. Mock methods inherited from base classes might not be affected due to C++ language limitations.
+- Nesting wrappers is not supported. For instance, `NiceMock<StrictMock<MockFoo>>` is undefined behavior.
+- Wrappers may not work as expected if the mock class's destructor is not virtual.
+
+## Behavior in Test Output
+
+Here is the typical behavior of mocks under different strictness modes when an uninteresting call occurs:
+
+| Strictness     | Warning on Uninteresting Call | Test Failure on Uninteresting Call |
+| --------------|-------------------------------|----------------------------------|
+| Raw/NaggyMock | Yes                           | No                               |
+| NiceMock      | No                            | No                               |
+| StrictMock    | N/A                           | Yes                              |
+
+Uninteresting calls on `StrictMock` lead to **non-fatal test failures**, helping you spot overlooked calls early.
+
+## Integrated User Workflow
+
+Imagine you are developing a module with dependencies on interfaces. You write tests with mock objects representing these interfaces. Early on, you don't want your tests polluted with warnings about calls you aren't interested in. You wrap mocks with `NiceMock`.
+
+As your implementation stabilizes, you want to ensure that every call is intentional and verified. You change to `StrictMock`, making sure your tests break if any unplanned call happens.
+
+When debugging tricky issues needing attention to unexpected activity, you might use the default (Naggy) mock to observe warnings without failures.
+
+This flexibility lets you progressively harden your tests while keeping development productive.
+
+## Troubleshooting and Best Practices
+
+- **Q: I see warnings about uninteresting calls even though I set `ON_CALL` or `EXPECT_CALL`. Why?**
+
+  Because `ON_CALL` defines default behavior but does not set an expectation. Uninteresting calls are calls to methods without any `EXPECT_CALL`.
+
+  _Solution:_ Add an `EXPECT_CALL(...).Times(AnyNumber())` if you want to allow calls silently without warnings.
+
+- **Q: Can I nest strictness wrappers?**
+
+  No. Nesting wrappers like `NiceMock<StrictMock<T>>` is not supported and results in undefined behavior.
+
+- **Q: My mock class has non-virtual destructor; behavior is unexpected?**
+
+  Ensure your mock class has a virtual destructor; otherwise, strictness wrappers may malfunction.
+
+- **Q: I want to ignore a few uninteresting calls but still use `StrictMock`. How?**
+
+  Explicitly specify: `EXPECT_CALL(mock, Method(_)).Times(AnyNumber());` to allow those calls without failure.
+
+- **Q: How does strictness affect unexpected calls?**
+
+  Unexpected calls (calls not matching any expectation) always cause test failure regardless of strictness.
+
+## Example Summary
+
+```cpp
+class MockFoo {
+ public:
+  MOCK_METHOD(void, DoThis, ());
+  MOCK_METHOD(int, GetValue, (int), (const));
+};
+
+TEST(MyTest, UsingNiceMock) {
+  NiceMock<MockFoo> mock;
+  EXPECT_CALL(mock, DoThis());
+  mock.DoThis();
+  mock.GetValue(0);  // No warning, ignored.
+}
+
+TEST(MyTest, UsingStrictMock) {
+  StrictMock<MockFoo> mock;
+  EXPECT_CALL(mock, DoThis());
+  mock.DoThis();
+  mock.GetValue(0);  // Test failure: uninteresting call.
+}
+```
+
+## Related Concepts
+
+- See [Mocking Reference](reference/mocking.md) for details on `EXPECT_CALL`, `ON_CALL`, and mock method setup.
+- See [Actions and Expectations](guides/mocking-with-gmock/actions-and-expectations.mdx) for best practice in expectation declaration.
+- See [Strictness and Mock Behavior](api-reference/advanced-mocking-apis/strictness-and-mock-behavior.md) for a deeper dive into strictness modes and related best practices.
+
+
+---
+
+## Diagram: Strictness Wrapper Relationship and Behavior
+
+```mermaid
+classDiagram
+    class MockClass {
+        <<interface>>
+        +MockClass(...)
+    }
+
+    class NiceMock~T~ {
+        +NiceMock(...)
+        <<inherits>> MockClass
+        +Allows uninteresting calls silently
+    }
+
+    class NaggyMock~T~ {
+        +NaggyMock(...)
+        <<inherits>> MockClass
+        +Warns on uninteresting calls
+    }
+
+    class StrictMock~T~ {
+        +StrictMock(...)
+        <<inherits>> MockClass
+        +Fails on uninteresting calls
+    }
+
+    MockClass <|-- NiceMock
+    MockClass <|-- NaggyMock
+    MockClass <|-- StrictMock
+
+    %% Legend
+    class NiceMock,
+          NaggyMock,
+          StrictMock {
+      note top
+        These classes control mock strictness
+      end
+    }
+```
+
+---
+
+<Tip>
+Use `NiceMock` to keep tests uncluttered during development and refactoring, avoiding false alarms from uninteresting calls.
+</Tip>
+
+<Tip>
+Use `StrictMock` to enforce rigorous mocking, guaranteeing no unintended calls slip through in production-level tests.
+</Tip>
+
+<Warning>
+Avoid nesting strictness wrappers or using them on mock classes with non-virtual destructors to prevent undefined or incorrect behaviors.
+</Warning>
