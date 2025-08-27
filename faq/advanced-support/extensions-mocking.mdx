@@ -1,0 +1,191 @@
+---
+title: "How can I extend or customize GoogleTest/GoogleMock?"
+description: "Common approaches for writing custom assertions, matchers, or mock behaviors. Provides pointers to extension points and useful reference documentation."
+---
+
+# How can I extend or customize GoogleTest/GoogleMock?
+
+GoogleTest and GoogleMock provide rich extensibility points to tailor test assertions, argument matching, and mock behavior to the specific needs of your codebase. This page guides you through the common approaches and APIs for writing custom assertions, matchers, mock method behaviors, and other extensions, helping you evolve your tests beyond the built-in capabilities.
+
+---
+
+## Custom Assertions
+
+Custom assertions let you define expressive, reusable checks that improve the clarity and maintainability of your tests. GoogleTest supports custom assertions both as macros and functions:
+
+- **Writing Macros:** Use `ASSERT_*` or `EXPECT_*` macros to write custom assertion macros providing domain-specific checks.
+- **Implementing Functions:** Define functions that return `::testing::AssertionResult` for detailed pass/fail logic and messages.
+
+**Example - Custom Assertion Function:**
+```cpp
+::testing::AssertionResult IsEven(int n) {
+  if (n % 2 == 0) return ::testing::AssertionSuccess();
+  return ::testing::AssertionFailure() << n << " is odd";
+}
+
+TEST(NumberTest, Even) {
+  EXPECT_TRUE(IsEven(4));
+  EXPECT_FALSE(IsEven(5));
+}
+```
+
+This approach gives informative failure messages, improving test diagnostics.
+
+For details, see the [Assertions Reference](https://google.github.io/googletest/reference/assertions.html) and [Custom Assertions and Matchers Guide](guides/advanced_testing_patterns/customizing_assertions_matchers.md).
+
+## Custom Matchers
+
+Custom matchers improve argument validation in mocks and expectations with domain-specific logic. GoogleMock provides several ways to create matchers:
+
+### 1. Using `MATCHER` Macros
+
+- Quick and convenient for many cases.
+- Define using:
+  ```cpp
+  MATCHER(IsDivisibleBy7, "checks divisibility by 7") {
+    return (arg % 7) == 0;
+  }
+  ```
+- Use like:
+  ```cpp
+  EXPECT_CALL(mock, Foo(IsDivisibleBy7()));
+  ```
+- Supports adding custom failure messages for detailed reports.
+
+### 2. Writing Matcher Classes
+
+For complex scenarios or widely reused matchers, implement the matcher interface manually:
+
+- Must define:
+  - `bool MatchAndExplain(const T& value, std::ostream* os) const` for the core logic.
+  - `void DescribeTo(std::ostream* os) const` and `void DescribeNegationTo(std::ostream* os) const` for readable messages.
+- Wrap the class using `testing::Matcher<T>` factory.
+
+**Example:**
+```cpp
+class DivisibleByNMatcher {
+ public:
+  explicit DivisibleByNMatcher(int n) : divisor_(n) {}
+
+  bool MatchAndExplain(int n, std::ostream* os) const {
+    if (n % divisor_ == 0) return true;
+    if (os) *os << "which is not divisible by " << divisor_;
+    return false;
+  }
+
+  void DescribeTo(std::ostream* os) const { *os << "is divisible by " << divisor_; }
+  void DescribeNegationTo(std::ostream* os) const { *os << "is not divisible by " << divisor_; }
+
+ private:
+  const int divisor_;
+};
+
+testing::Matcher<int> DivisibleBy(int n) {
+  return testing::MakeMatcher(new DivisibleByNMatcher(n));
+}
+
+// Usage:
+EXPECT_CALL(mock, Foo(DivisibleBy(5)));
+```
+
+### 3. Polymorphic Matchers
+
+Implement matchers usable with multiple argument types via templates. Use template methods for `MatchAndExplain` and allow seamless type inference.
+
+### Custom matcher creation best practices:
+- Matchers **must be pure functions**: no side-effects or reliance on external state.
+- Provide helpful failure descriptions.
+- Use built-in macros for simple cases, custom classes for complex logic.
+
+More detail and examples can be found in the [gMock Cookbook](docs/gmock_cook_book.md#WritingNewMatchers).
+
+## Custom Actions
+
+Actions describe what a mock method should do when invoked (return values, side effects, state changes). GoogleMock provides the following approaches to define custom actions:
+
+### 1. Using Lambdas or Callables
+
+The simplest way is to supply a lambda or function object to `WillOnce()` or `WillRepeatedly()` clauses:
+
+```cpp
+EXPECT_CALL(mock, Foo(_))
+    .WillOnce([](int x) { return x * 2; });
+```
+
+### 2. Using Action Macros
+
+Legacy macros like `ACTION`, `ACTION_P`, etc., allow concise definition of named actions:
+
+```cpp
+ACTION(IncrementArg0) {++*arg0; return 0;}
+EXPECT_CALL(mock, Foo(_)).WillOnce(IncrementArg0());
+```
+
+### 3. Custom Action Classes
+
+For fine-grained control, implement `testing::ActionInterface<F>` with a templated `Perform()` method matching the mocked function type. Then create the action with `MakeAction()`.
+
+### 4. Polymorphic Actions
+
+Use `MakePolymorphicAction()` along with a template-based implementation class.
+
+**Best Practices:**
+
+- Actions should be thread-safe if mocks are accessed concurrently.
+- Avoid complex side effects if possible.
+- Use `DoAll()` to combine multiple side effects in a single action.
+
+For complete guidance, see the [gMock Cookbook on Actions](docs/gmock_cook_book.md#WritingNewActions) and [Mocking API - Actions](api-reference/mocking-api/setting-expectations-actions.md#actions).
+
+## Custom Cardinalities
+
+GoogleMock allows specifying how many times a mock method is expected to be called via **cardinalities** (e.g., `Times(Exactly(3))`, `AtLeast(1)`). You can extend cardinalities by implementing the `CardinalityInterface` class:
+
+```cpp
+class EvenNumberCardinality : public testing::CardinalityInterface {
+ public:
+  bool IsSatisfiedByCallCount(int count) const override { return count % 2 == 0; }
+  bool IsSaturatedByCallCount(int count) const override { return false; }
+  void DescribeTo(std::ostream* os) const override { *os << "called even number of times"; }
+};
+
+// Convenience function
+testing::Cardinality EvenNumber() { return testing::MakeCardinality(new EvenNumberCardinality); }
+
+EXPECT_CALL(mock, Foo()).Times(EvenNumber());
+```
+
+This empowers you to create expressive call count constraints.
+
+## Extending Mock Behavior Modes
+
+GoogleMock provides mock wrappers for controlling reaction to uninteresting calls: `NiceMock`, `NaggyMock`, and `StrictMock`. To customize this further:
+
+- You can use `Mock::AllowUninterestingCalls()` or `Mock::FailUninterestingCalls()` on specific mock objects.
+- You can customize the `ON_CALL` default actions and `EXPECT_CALL` expectations to fit your validation needs.
+
+## Additional Extension Points and Tips
+
+- **Teaching gMock how to print your types:** Define `PrintTo` functions for your custom types to improve failure message readability.
+- **Mocking non-virtual methods:** Use the high-performance dependency injection recipe from gMock Cookbook.
+- **Mocking free functions:** Adapt your code by wrapping free functions using an interface, enabling easy mocking.
+- **Dealing with overloaded methods:** Use `Const()` and cast matchers to disambiguate overloads.
+- **Using `SafeMatcherCast<T>()`:** To safely cast matcher types in complex type scenarios.
+
+## Reference Links and Further Reading
+
+- [gMock Cookbook](docs/gmock_cook_book.md#WritingNewMatchers) — for detailed recipes on custom matchers and actions
+- [Mocking Reference](docs/reference/mocking.md) — core API details
+- [Assertions Reference](api-reference/core-testing-api/assertions-matchers.md) — crafting assertions
+- [gMock Cheat Sheet](docs/gmock_cheat_sheet.md) — quick start and reminders
+- [Custom Assertions and Matchers Guide](guides/advanced_testing_patterns/customizing_assertions_matchers.md)
+
+---
+
+## Summary
+
+Extending GoogleTest and GoogleMock with custom assertions, matchers, and actions enables you to tailor test behavior validation with domain-specific logic and precise control. GoogleMock’s flexible interfaces let you create reusable components for argument validation and mock method behavior, improving your test clarity, maintainability, and effectiveness.
+
+<Tip>
+When defining custom matchers or actions, ensure they are pure, thread-safe, and provide expressive failure messages to maximize the quality and usability of your tests.
+</Tip>
