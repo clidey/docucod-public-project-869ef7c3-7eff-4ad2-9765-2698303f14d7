@@ -1,0 +1,222 @@
+---
+title: "Extending and Customizing the Mocking API"
+description: "Learn how developers can extend GoogleMock with custom matchers, actions, and advanced setup. This page covers plug-in points and patterns for evolving the testing framework to fit new and legacy codebases."
+---
+
+# Extending and Customizing the Mocking API
+
+GoogleMock offers powerful extension points enabling developers to tailor its behavior for complex testing scenarios and legacy codebases. This guide explores how to extend GoogleMock with custom matchers, actions, and advanced setup patterns, focusing on practical techniques to evolve the mocking framework beyond its defaults.
+
+---
+
+## Understanding the Need for Customization
+
+While GoogleMock provides comprehensive built-in matchers, actions, and behaviors, there are times when your testing needs go beyond what is available out of the box. Custom extensions allow you to:
+
+- Adapt GoogleMock to complex or legacy interfaces with deep domain knowledge.
+- Introduce expressive matchers tailored to specific data structures or business rules.
+- Define actions that execute domain-specific side effects or simulate intricate behavior.
+- Control mock object behavior at a finer granularity.
+
+By designing your extensions carefully, you maintain testability without sacrificing code clarity or maintainability.
+
+---
+
+## Customizing Mock Behavior with Strictness Modifiers
+
+GoogleMock provides built-in wrappers—`NiceMock`, `NaggyMock`, and `StrictMock`—to control how uninteresting calls are handled:
+
+- **NiceMock**: Ignores uninteresting calls without warnings, encouraging more maintainable tests by focusing expectations on what's critical.
+- **NaggyMock** (default behavior): Warns on uninteresting calls but allows them to continue.
+- **StrictMock**: Treats uninteresting calls as failures, enforcing stricter test discipline.
+
+These wrappers inherit constructors from the base mock class, allowing seamless substitution.
+
+### How They Work Internally
+
+Internally, these wrappers register with the GoogleMock core to alter reactions to uninteresting calls via call registry management. This mechanism ensures that the mock class methods run with consistent strictness settings.
+
+### Known Limitations
+
+- They only apply to mock methods created *directly* with the `MOCK_METHOD` macro in the mock class (not inherited).
+- Nesting these wrappers (e.g. `NiceMock<StrictMock<MockFoo>>`) is unsupported and leads to undefined behavior.
+
+### Example Usage
+
+```cpp
+using ::testing::NiceMock;
+using ::testing::NaggyMock;
+using ::testing::StrictMock;
+
+class MockFoo {
+ public:
+  MOCK_METHOD(void, DoThis, (), ());
+};
+
+TEST(FooTest, NiceMockExample) {
+  NiceMock<MockFoo> mock_foo;
+
+  EXPECT_CALL(mock_foo, DoThis());
+  mock_foo.DoThis();  // No warning for other uninteresting calls
+}
+
+TEST(FooTest, StrictMockExample) {
+  StrictMock<MockFoo> strict_foo;
+
+  EXPECT_CALL(strict_foo, DoThis());
+  strict_foo.DoThis();
+  // Any other call will cause test failure
+}
+```
+
+---
+
+## Defining Custom Matchers
+
+GoogleMock lets you define powerful, reusable custom matchers through several mechanisms:
+
+### Simple Functional Matchers (MATCHER and MATCHER_P family)
+
+- `MATCHER(name, description)`: Define unary matchers with human-readable descriptions.
+- `MATCHER_P(name, param, description)`: Define parameterized matchers.
+
+The matcher body returns `true` if the argument matches, `false` otherwise, optionally providing detailed failure messages.
+
+**Example:**
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  return (arg % 7) == 0;
+}
+
+// Usage:
+EXPECT_CALL(mock, Foo(IsDivisibleBy7()));
+```
+
+### Custom Matcher Classes
+
+For more control and polymorphism, implement your own matcher class with the following methods:
+
+- `bool MatchAndExplain(const T& value, std::ostream* os) const`
+- `void DescribeTo(std::ostream* os) const`
+- `void DescribeNegationTo(std::ostream* os) const`
+
+Wrap your class in a factory function returning `Matcher<T>`.
+
+### Polymorphic Matchers
+
+You can design matchers that work with multiple types by making `MatchAndExplain` a template method. This approach lets a single matcher adapt to different argument types seamlessly.
+
+### Practical Tips
+
+- Ensure matchers have no side effects.
+- Provide clear and concise failure descriptions.
+- Use existing matcher combinators (`AllOf`, `AnyOf`, `Not`) to compose complex matchers.
+
+---
+
+## Creating Custom Actions
+
+Actions define what a mock method does when called, such as returning a value or modifying arguments. When built-in actions don't suffice, you can create custom ones.
+
+### Using Callables and Lambdas
+
+Simplest custom actions are lambdas or function objects with the appropriate call signature:
+
+```cpp
+EXPECT_CALL(mock, Foo(_))
+    .WillOnce([](int x) { return x * 2; });
+```
+
+### Legacy Macros (`ACTION`, `ACTION_P`, `ACTION_TEMPLATE`)
+
+These macros help define named actions that can refer to mock call arguments as `arg0`, `arg1`, etc. Use them when you want concise action definitions without explicit function objects.
+
+### Implementing `ActionInterface`
+
+For deep control, implement the `testing::ActionInterface<F>` to define an action applicable to a specific mock function type `F`. This method is more verbose but allows precise customization and reuse.
+
+### Polymorphic Actions
+
+Use `MakePolymorphicAction` to create actions usable on mocks of varying function signatures.
+
+---
+
+## Advanced Setup Patterns
+
+### Delegating to Fakes or Real Objects
+
+You can direct mock calls to call real or fake implementations:
+
+```cpp
+ON_CALL(mock, Method)
+    .WillByDefault([this](Args...) { return real_.Method(Args...); });
+```
+
+This combines delegation with expectation checking, giving more flexible tests.
+
+### Mocking Non-Virtual Methods
+
+For classes without virtual methods, mock with unrelated classes having methods with the same signature and use template-based dependency injection.
+
+### Improving Compilation Performance
+
+Separate the declarations and definitions of mock classes' constructors and destructors into `.h` and `.cc` files to speed up compilation.
+
+---
+
+## Best Practices and Common Pitfalls
+
+- **Use `ON_CALL` sparingly and for default behaviors**; prefer `EXPECT_CALL` for expectation verification.
+- **Avoid over-constraining tests**; your expectations should verify the contract, not the exact implementation.
+- **Use `NiceMock` to reduce noise from uninteresting calls** but be aware it doesn't suppress unexpected call errors.
+- **Use `StrictMock` to enforce strict contract adherence when necessary.**
+- **Always set expectations before invoking mock methods; setting expectations after a call leads to undefined behavior.**
+- **Do not nest strictness wrappers (`NiceMock`, `StrictMock`, `NaggyMock`).**
+- **Be cautious with matchers implementing side effects or calling mocks.**
+- **Prefer lambdas and function objects for complex actions over legacy macros, as they're clearer and better supported by modern C++.**
+
+---
+
+## Troubleshooting and Tips
+
+### Unrecognized Uninteresting Calls
+
+If you see warnings about uninteresting calls, review your usage of `EXPECT_CALL` and consider using `NiceMock` if those are expected and not errors.
+
+### Unexpected Calls Errors
+
+Unexpected calls violate test contract and always result in failures, regardless of strictness wrapper.
+
+### Verbose Output
+
+Use the command-line flag `--gmock_verbose=info|warning|error` to control diagnostic verbosity:
+
+- `info`: Shows all messages, useful for debugging.
+- `warning`: Default; shows warnings and errors.
+- `error`: Shows errors only.
+
+### Memory Management
+
+You can tell GoogleMock to allow leaking a mock object with `Mock::AllowLeak()` to avoid test failures when a mock may be intentionally leaked.
+
+### Verifying and Clearing Expectations Early
+
+Call `Mock::VerifyAndClearExpectations(&mock_obj)` or `Mock::VerifyAndClear(&mock_obj)` to check expectations and clear them before destruction, useful when mocks are shared or used beyond simple test cases.
+
+---
+
+## Summary
+
+Extending GoogleMock by customizing matchers, actions, and setup patterns empowers you to tailor test doubles precisely to your application's domain and complexity. Utilize strictness wrappers judiciously to control uninteresting calls, define expressive custom matchers to capture business logic succinctly, and craft detailed actions to simulate behavior accurately. Following best practices ensures your mocks remain maintainable, performant, and reliable within your test suites.
+
+---
+
+## Further Reading and References
+
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) — recipes for custom matchers and actions.
+- [gMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html) — quick reference for mock class definitions and usage.
+- [Mocking Reference](https://google.github.io/googletest/reference/mocking.html) — detailed API docs for mocks.
+- [Strict, Naggy, and Nice Mocks Concept](concepts/mocking-strategies-extensibility/strictness-and-behavior) — understanding mock strictness.
+
+Explore these to deepen your mastery of GoogleMock's extensibility.
