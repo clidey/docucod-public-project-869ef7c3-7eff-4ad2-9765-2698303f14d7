@@ -1,0 +1,196 @@
+---
+title: "Why are my tests failing unexpectedly?"
+description: "Covers common sources of unexpected or ambiguous test failures, such as matcher usage mistakes, test environment setup errors, and misuse of assertions. Provides diagnostic advice and sample fixes."
+---
+
+# Why Are My Tests Failing Unexpectedly?
+
+When your GoogleTest or GoogleMock tests fail unexpectedly, it can be frustrating and time-consuming to diagnose the root cause. This documentation helps you uncover common reasons behind unexpected test failures, clarifies typical pitfalls such as matcher misuse, environment setup errors, and assertion misapplication, and guides you through concrete examples and practical fixes.
+
+---
+
+## Table of Contents
+
+- [Common Causes of Unexpected Failures](#common-causes-of-unexpected-failures)
+- [Troubleshooting Matcher Misuse](#troubleshooting-matcher-misuse)
+- [Diagnosing Test Environment Problems](#diagnosing-test-environment-problems)
+- [Misuse of Assertions and Tests that Continue Unexpectedly](#misuse-of-assertions-and-tests-that-continue-unexpectedly)
+- [Best Practices to Avoid Test Failures](#best-practices-to-avoid-test-failures)
+- [Additional Diagnostic Tips](#additional-diagnostic-tips)
+
+---
+
+## Common Causes of Unexpected Failures
+
+1. **Incorrect Matchers in EXPECT_CALL or ASSERT_THAT**
+
+   Using an incompatible or too broad/narrow matcher can cause tests to fail because mock methods are either not matched or incorrectly matched. For instance, using `Eq()` on a floating-point value when you meant to use `FloatEq()` can cause equality checks to fail.
+
+2. **Missing or Wrong Setup of Test Environment**
+
+   Tests may rely on shared resources or environments not correctly initialized or torn down, causing subtle failures or flakiness.
+
+3. **Unexpected Calls vs. Uninteresting Calls**
+
+   Unexpected calls violate defined expectations (`EXPECT_CALL`), whereas uninteresting calls occur on mock methods without expectations. Misunderstanding this difference leads to unexpected test results.
+
+4. **Overuse or Misuse of EXPECT_CALL and ON_CALL**
+
+   Mixing these without understanding their intent can lead to too restrictive or too permissive mocks, causing failures or silent misses.
+
+5. **Assertion Misplacement — Fatal Failures Not Aborting Test Early**
+
+   If a fatal assertion fails in a subroutine but test execution continues, it often signals misuse; the test might encounter crashes or misleading results later.
+
+6. **Parameterization and Value-Parameterized Test Setup Issues**
+
+   Missing an instantiation of a parameterized test suite can cause unexpected test failures or no tests running.
+
+---
+
+## Troubleshooting Matcher Misuse
+
+Matchers define the conditions under which mock functions are considered called correctly. Incorrect matcher usage is a leading cause of unexpected test failures.
+
+### Common Errors
+
+- **Wrong Matcher Type:** Using a matcher for a different type than the argument; e.g., matching integers with a string matcher.
+- **Unprotected Commas in Types:** For methods with complex parameter types such as `std::pair` or `std::map`, not using parentheses or type aliases leads to macro parsing errors.
+
+### Diagnosis & Fixes
+
+- Wrap types with commas in parentheses when using `MOCK_METHOD`:
+
+  ```cpp
+  MOCK_METHOD((std::pair<bool, int>), GetPair, ());
+  MOCK_METHOD(bool, CheckMap, ((std::map<int, double>), bool));
+  ```
+
+- Use type aliases to simplify:
+
+  ```cpp
+  using BoolAndInt = std::pair<bool, int>;
+  MOCK_METHOD(BoolAndInt, GetPair, ());
+  using MapIntDouble = std::map<int, double>;
+  MOCK_METHOD(bool, CheckMap, (MapIntDouble, bool));
+  ```
+
+- Ensure matchers in `EXPECT_CALL` are compatible with function signatures.
+
+- Use `SafeMatcherCast<T>(m)` to cast matchers safely when needed.
+
+### Example
+
+```cpp
+EXPECT_CALL(mock_foo, DoThis(SafeMatcherCast<const std::string&>(Eq("hello"))));
+```
+
+For overloaded functions, use `Const()` and explicit matcher types to avoid ambiguity.
+
+---
+
+## Diagnosing Test Environment Problems
+
+Tests often depend on shared resources or environments. Misconfiguration leads to failures that seem unrelated to test logic.
+
+### Issues
+
+- `SetUpTestSuite()` or global environment `SetUp()` failed silently or partially, causing tests to run in a bad state.
+- Shared static data not initialized correctly leading to unpredictable test results.
+- Tests skipping unexpectedly due to `GTEST_SKIP()` in environment setup.
+
+### Diagnosis
+
+- Check test output for environment setup failure messages.
+- Verify ordering and success of all environment and test suite setup functions.
+- Use `RecordProperty` to log environment states for test reporting.
+
+### Fixes
+
+- Ensure all required environments are registered using `AddGlobalTestEnvironment()` before `RUN_ALL_TESTS()`.
+- Confirm that `SetUpTestSuite()` and `TearDownTestSuite()` calls do not contain fatal assertions or early returns.
+- Use explicit test ordering or dependencies if necessary.
+
+---
+
+## Misuse of Assertions and Tests That Continue Unexpectedly
+
+Fatal assertions (`ASSERT_*`) abort the current function, but not the entire test. If a fatal failure occurs deep inside a call stack that returns without aborting the test, the test may continue with invalid state.
+
+### Symptoms
+
+- Segmentation faults or crashes after fatal failures.
+- Tests reporting multiple cascaded failures where the root cause was earlier.
+
+### Solutions
+
+- Use `ASSERT_*` only when it makes sense to abort the current function early.
+- Use `HasFatalFailure()` to detect if a subroutine encountered a fatal failure and return early:
+
+  ```cpp
+  void RunSubroutine() {
+    ASSERT_EQ(1, foo);
+  }
+
+  TEST(FooTest, Bar) {
+    RunSubroutine();
+    if (HasFatalFailure()) return;
+    // Continue only if no fatal failure.
+  }
+  ```
+
+- Consider enabling exceptions for test functions to propagate fatal failures more naturally.
+- Use `ASSERT_NO_FATAL_FAILURE()` wrappers to enforce no fatal failures in called code.
+
+---
+
+## Best Practices to Avoid Test Failures
+
+- Use `ON_CALL()` to specify default behavior and limit `EXPECT_CALL()` to actual expectations to reduce brittleness.
+- Use `NiceMock` to suppress warnings for uninteresting calls when appropriate.
+- Explicitly handle unexpected calls by adding catch-all `EXPECT_CALL(...) .Times(AnyNumber())` expectations.
+- Sequence expectations carefully using `InSequence` or `After` clauses to control call ordering.
+- Mock private or protected methods by declaring mock methods as `public` to avoid access issues.
+- For overloaded methods, carefully distinguish const and non-const versions using `Const()`.
+- Use matchers and actions correctly to mimic production logic and expected behavior.
+
+---
+
+## Additional Diagnostic Tips
+
+- Run tests with `--gmock_verbose=info` to see detailed matching and mock call traces.
+- Enable stack trace depth with `--gtest_stack_trace_depth` to localize failures.
+- Use `SCOPED_TRACE` to add breadcrumbs in complex test flows, making failure sites clearer.
+- When testing asynchronous code, use notifications or synchronization primitives to avoid flaky behavior.
+
+---
+
+## Example: Diagnosing Unexpected Call Failures with Verbose Logging
+
+```cpp
+using ::testing::_;
+using ::testing::Return;
+
+EXPECT_CALL(mock, Foo(5)).WillOnce(Return(true));
+EXPECT_CALL(mock, Foo(_)).Times(AnyNumber()).WillRepeatedly(Return(false));
+
+mock.Foo(4);  // Unexpected call if matches no expectation
+mock.Foo(5);  // Expected call
+```
+
+Running this test with `--gmock_verbose=info` will show which expectation matched, where unexpected calls happened, and what arguments caused the mismatch.
+
+---
+
+## References and Further Reading
+
+- [Matchers Reference](reference/matching.md): Comprehensive guide on argument matchers
+- [Expectations, Actions, and Cardinalities](api-reference/mocking-api/setting-expectations-actions.md): Configuring mock behaviors and call counts
+- [Mock Object and Method Creation](api-reference/mocking-api/mock-creation.md): Defining mocks using `MOCK_METHOD` macro
+- [GoogleMock Cookbook](docs/gmock_cook_book.md): Recipes and best practices
+- [Advanced GoogleTest Topics](docs/advanced.md): Handling assertion failures and debugging
+- [Troubleshooting Common Issues](getting-started/troubleshooting-validation/common-issues.md): Setup and run-time troubleshooting
+
+---
+
+For a holistic understanding of test failures and their management, also consult [Assertions Reference](docs/reference/assertions.md) and [Test Execution and Control](docs/reference/testing.md).
