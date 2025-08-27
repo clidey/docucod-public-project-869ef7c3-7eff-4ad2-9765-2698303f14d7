@@ -1,0 +1,274 @@
+---
+title: "Mocking Patterns and Best Practices"
+description: "Presents best practices, recommended approaches, and typical designs for mock-based testing, including proper setup, teardown, sequencing, and handling corner cases with GoogleMock."
+---
+
+# Mocking Patterns and Best Practices
+
+GoogleMock empowers C++ developers to test interactions between components with fine-grained control. This guide distills practical patterns and best practices for effectively using mock objects, focusing on setup, teardown, ordering, and corner cases in GoogleMock (gMock).
+
+---
+
+## 1. Understanding the Role of Mocks
+
+Mocks are not just about faking implementations—they verify **how** your code interacts with dependencies:
+
+- They specify *which methods* are called.
+- They verify *order* and *frequency* of calls.
+- They check *argument correctness*.
+- They define mock method *behaviors* (return values, side effects).
+
+Fulfilling this role requires managing expectations precisely and avoiding brittle tests.
+
+<Tip>
+Always focus on verifying **interaction contracts**, not implementation details. Over-specifying expectations makes tests fragile and hard to maintain.
+</Tip>
+
+---
+
+## 2. Setting Up Mock Methods Correctly
+
+### Define Mock Classes with `MOCK_METHOD`
+
+For each virtual method to mock:
+
+- Use the `MOCK_METHOD(return_type, method_name, (args), (qualifiers));` macro *inside the public section* of your mock class.
+- Include qualifiers such as `(const, override)` for const methods.
+- Wrap argument or return types with commas in parentheses or use typedefs/using-aliases to avoid parsing errors.
+
+```cpp
+class MockExample {
+public:
+  MOCK_METHOD(void, Foo, (int x), (override));
+  MOCK_METHOD((std::pair<int, int>), GetPair, (), (override));
+  using MapIntDouble = std::map<int, double>;
+  MOCK_METHOD(bool, CheckMap, (MapIntDouble, bool), (override));
+};
+```
+
+### Best Practices
+
+- Always define mock methods in `public:` even if the original methods are protected or private.
+- For const-overloaded methods, mock all relevant overloads to avoid hiding base class methods.
+- If you mock class templates, follow standard `MOCK_METHOD` syntax within the template.
+
+<Note>
+Avoid mocking non-virtual methods directly; instead, consider templating or interface wrapping for compile-time dependency injection.
+</Note>
+
+---
+
+## 3. Managing Expectations and Default Behavior
+
+### Use `ON_CALL` for Default Behavior
+
+- Use `ON_CALL(mock_object, Method(args))` to specify default actions without imposing call expectations.
+- The syntax allows optional `.With()` to match arguments as a tuple.
+- Must conclude with exactly one `.WillByDefault(Action)` clause.
+
+```cpp
+ON_CALL(mock, GetValue(_))
+    .WillByDefault(Return(42));
+```
+
+### Use `EXPECT_CALL` to Set Expectations
+
+- Use `EXPECT_CALL(mock_object, Method(args))` to:
+  - Define behavior
+  - Specify call expectations (frequency, ordering)
+
+- Chain clauses in the defined order:
+  - `.With()` (optional)
+  - `.Times()` (optional, but often recommended)
+  - `.InSequence()` (optional)
+  - `.After()` (optional)
+  - `.WillOnce()` (optional, for specific call actions, multiple allowed)
+  - `.WillRepeatedly()` (optional, for repeated action after all `WillOnce`s)
+  - `.RetiresOnSaturation()` (optional)
+
+```cpp
+EXPECT_CALL(mock, Foo(5))
+    .Times(3)
+    .WillOnce(Return(1))
+    .WillOnce(Return(2))
+    .WillRepeatedly(Return(3));
+```
+
+<Info>
+Omitting `.Times()` triggers automatic cardinality inference based on `.WillOnce()` and `.WillRepeatedly()` clauses.
+</Info>
+
+---
+
+## 4. Ordering Expectations and Calls
+
+### Sequential Ordering with `InSequence`
+
+- Enclose expectation declarations within an `InSequence` scope to enforce strict call order.
+
+```cpp
+{
+  InSequence s;
+  EXPECT_CALL(mock, Initialize());
+  EXPECT_CALL(mock, Process());
+  EXPECT_CALL(mock, Cleanup());
+}
+```
+
+### Partial Order with `Sequence` and `.After()`
+
+- Create `Sequence` objects to label sequences.
+- Assign expectations to one or more sequences via `.InSequence(seq1, seq2)`.
+- Use `.After(expectation)` or `.After(expectation_set)` to specify prerequisite calls.
+
+```cpp
+Sequence seq1, seq2;
+EXPECT_CALL(mock, Start()).InSequence(seq1);
+EXPECT_CALL(mock, Step1()).InSequence(seq1, seq2);
+EXPECT_CALL(mock, Step2()).After(startExpectation);
+```
+
+---
+
+## 5. Handling Corner Cases
+
+### Sticky Expectations and `RetiresOnSaturation`
+
+- By default, GoogleMock expectations are "sticky": they remain active after their call limit is reached, causing failures on excess calls.
+- Use `.RetiresOnSaturation()` with expectations to automatically deactivate them after saturation, enabling overlapping expectations and sequences.
+
+```cpp
+EXPECT_CALL(mock, Method())
+    .Times(2)
+    .RetiresOnSaturation();
+```
+
+### Avoiding Over-specification
+
+- Use catch-all expectations with `.Times(AnyNumber())` and generic matchers to avoid uninteresting call warnings and to allow certain calls without strict verification.
+
+```cpp
+EXPECT_CALL(mock, Method(_)).Times(AnyNumber()).WillRepeatedly(Return(true));
+EXPECT_CALL(mock, Method(42)).Times(1);
+```
+
+### Using Strict, Nice, and Naggy Mocks
+
+- Default mocks are "naggy": they warn on unexpected calls.
+- `NiceMock<T>` suppresses warnings for uninteresting calls.
+- `StrictMock<T>` fails tests on any unexpected or uninteresting calls.
+
+Choose the type according to desired strictness:
+
+```cpp
+NiceMock<MockClass> nice_mock;
+StrictMock<MockClass> strict_mock;
+NaggyMock<MockClass> naggy_mock;
+```
+
+<Warning>
+Beware using strict mocks indiscriminately; they can make tests brittle and require frequent repairs during refactoring.
+</Warning>
+
+---
+
+## 6. Verifying and Cleaning Up Mocks
+
+- Mocks automatically verify expectations upon destruction.
+- Explicitly verify and clear mocks early if needed:
+
+```cpp
+Mock::VerifyAndClearExpectations(&mock_obj);
+Mock::VerifyAndClear(&mock_obj);
+```
+
+- Use `Mock::AllowLeak(&mock_obj)` to suppress leak warnings, e.g., when mocks are deliberately leaked.
+
+---
+
+## 7. Best Practices Summary
+
+- **Set expectations before exercising code:** Avoid defining expectations after the mock has been called or passed to code under test.
+- **Prefer default behaviors with `ON_CALL` for general mock setup, use `EXPECT_CALL` only to verify specific calls.**
+- **Use sequences and `.After()` to manage call order and dependencies explicitly.**
+- **Use `.RetiresOnSaturation()` to prevent expectation stickiness if repeated calls occur.**
+- **Choose mock strictness level to balance test maintenance and error detection.**
+- **Leverage catch-all expectations when a method call is allowed but not verified.**
+
+---
+
+## 8. Illustrative Example
+
+```cpp
+#include <gmock/gmock.h>
+using ::testing::Return;
+using ::testing::_;
+using ::testing::InSequence;
+
+class Interface {
+ public:
+  virtual ~Interface() {}
+  virtual int Calculate(int) = 0;
+  virtual void Reset() = 0;
+};
+
+class MockInterface : public Interface {
+ public:
+  MOCK_METHOD(int, Calculate, (int), (override));
+  MOCK_METHOD(void, Reset, (), (override));
+};
+
+void TestFunction(Interface* obj) {
+  obj->Reset();
+  int a = obj->Calculate(5);
+  int b = obj->Calculate(10);
+  (void)(a + b);
+}
+
+TEST(MockingPatterns, ExampleUsage) {
+  MockInterface mock;
+
+  ON_CALL(mock, Calculate(_)).WillByDefault(Return(0));
+
+  {
+    InSequence seq;
+    EXPECT_CALL(mock, Reset()).Times(1);
+    EXPECT_CALL(mock, Calculate(5)).WillOnce(Return(42)).RetiresOnSaturation();
+    EXPECT_CALL(mock, Calculate(10)).WillOnce(Return(84)).RetiresOnSaturation();
+  }
+
+  TestFunction(&mock);
+}
+```
+
+This example demonstrates setting a default return value, sequencing calls, setting expected calls with return values, and using `.RetiresOnSaturation()` to avoid sticky failures.
+
+---
+
+## 9. Troubleshooting Common Issues
+
+| Issue                                           | Cause & Resolution                                                                                                   |
+|------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
+| Uninteresting call warnings despite `ON_CALL`  | `ON_CALL` sets behavior but no expectation. Use `EXPECT_CALL` to enforce call expectations or use `NiceMock`.         |
+| Expectation failures due to overly strict calls | Confirm sequence and cardinality. Use `.RetiresOnSaturation()` if expectation stickiness is not desired.             |
+| Ambiguous function overload in `EXPECT_CALL`   | Specify argument matchers explicitly or use `using` declarations for hidden overloads.                               |
+| Mock leaks detected                              | Either delete mocks properly or use `Mock::AllowLeak()` to suppress warnings if leaks are intentional.              |
+| Unexpected calls with different arguments       | Check matchers carefully. Run test with `--gmock_verbose=info` for detailed call traces.                            |
+
+<Tip>
+Running tests with `--gmock_verbose=info` reveals detailed matching attempts and call logs, invaluable for debugging.
+</Tip>
+
+---
+
+## 10. Resources
+
+- [GoogleMock Reference: Mocking API](reference/mocking.md)
+- [gMock Cookbook: Recipes for Usage](gmock_cook_book.md)
+- [gMock for Dummies: Beginner Guide](gmock_for_dummies.md)
+- [GoogleTest Primer](overview/getting-started-value/product-intro)
+- [GoogleMock Cheat Sheet](gmock_cheat_sheet.md)
+
+---
+
+This guide fits into the broader GoogleTest ecosystem by focusing tightly on mock usage patterns and best practices, complementing foundational setup and first-test guides.
