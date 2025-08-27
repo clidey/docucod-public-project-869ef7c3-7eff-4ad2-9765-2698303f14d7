@@ -1,0 +1,244 @@
+---
+title: "Universal Value Printers"
+description: "Describes extensible APIs for printing values in assertion and failure messages. Helps users produce readable, actionable diagnostics from test runs involving custom or STL types."
+---
+
+# Universal Value Printers
+
+GoogleTest provides a flexible and extensible mechanism to print values within assertion and failure messages, greatly enhancing the readability and usefulness of test diagnostics. This page describes the universal value printer APIs that help display values of any C++ type, including user-defined classes and STL containers, in an informative and user-friendly way.
+
+---
+
+## Overview
+
+When an assertion fails, GoogleTest prints the values involved to help you quickly understand the source of the failure. These diagnostics rely on the **Universal Value Printers**, which can:
+
+- Print built-in types, STL containers, strings, tuples, smart pointers, and more.
+- Print user-defined types via several customization mechanisms.
+- Handle references, pointers, and arrays with specialized printing.
+- Print raw bytes if no meaningful printer is found.
+
+The printing system is designed to be **extensible** so that you can make your own classes display clean, contextual information in test output rather than unintelligible memory dumps.
+
+## How GoogleTest Prints Values
+
+GoogleTest uses compile-time mechanisms to select the best way to print a value based on its type:
+
+1. **User-Defined `PrintTo()` Function**: If a function with signature `void PrintTo(const T&, std::ostream*)` is defined in the namespace of type `T`, GoogleTest uses it to print.
+
+2. **`operator<<` Overload**: If no `PrintTo()` is found, but `operator<<` to `std::ostream` is defined for `T` or its namespace, GoogleTest uses that.
+
+3. **Abseil Stringify**: When compiled with Abseil support, `AbslStringify()` for your type is used if `PrintTo()` or `operator<<` are absent.
+
+4. **Container Element-Wise Printing**: If `T` is an STL-style container and `PrintTo()` is not defined, contents are printed element-wise (ignoring any `operator<<` for the container itself).
+
+5. **Specialized Printers**: For pointers, tuples, smart pointers, variants, optional, and raw arrays, GoogleTest provides tailored printing logic.
+
+6. **Raw Bytes Fallback**: If none of the above apply, GoogleTest prints the raw bytes of the object in a hex dump style to give some visibility.
+
+## How to Enable Printing for Your Custom Types
+
+To ensure your custom types print meaningful diagnostic messages, define one of the following in your type's namespace:
+
+### 1. Define a `PrintTo()` Function
+
+```cpp
+namespace foo {
+
+class Point {
+ public:
+  int x, y;
+};
+
+void PrintTo(const Point& p, std::ostream* os) {
+  *os << "(" << p.x << ", " << p.y << ")";
+}
+
+} // namespace foo
+```
+
+This function takes the object and an output stream pointer and prints the object in a way suitable for your tests.
+
+### 2. Overload `operator<<` to `std::ostream` for Your Type
+
+```cpp
+namespace foo {
+
+class Point {
+ public:
+  int x, y;
+};
+
+std::ostream& operator<<(std::ostream& os, const Point& p) {
+  return os << "(" << p.x << ", " << p.y << ")";
+}
+
+} // namespace foo
+```
+
+GoogleTest will pick this if no `PrintTo()` exists. However, defining `PrintTo()` takes precedence.
+
+### 3. Define `AbslStringify()` (If Using Abseil)
+
+```cpp
+namespace foo {
+
+class Point {
+ public:
+  int x, y;
+
+  template <typename Sink>
+  friend void AbslStringify(Sink& sink, const Point& p) {
+    absl::Format(&sink, "(%d, %d)", p.x, p.y);
+  }
+
+};
+
+} // namespace foo
+```
+
+If both `PrintTo()` and `AbslStringify()` are defined, `PrintTo()` will be used for GoogleTest output, allowing you to customize test printing without changing how objects stringify in your broader code.
+
+## Printing STL Containers
+
+GoogleTest recognizes STL-style containers (such as `std::vector`, `std::list`, `std::map`, etc.) and prints their elements individually in curly braces:
+
+```none
+{ 1, 2, 3 }
+{ (key1, value1), (key2, value2) }
+```
+
+- The printer will output up to 32 elements, truncating with ellipsis (`...`) if there are more.
+- For maps or associative containers, elements are printed as key-value pairs inside parentheses.
+- If a container type has a specialized `PrintTo()` function, GoogleTest uses that instead.
+
+## Special Handling for References, Pointers, and Arrays
+
+- **References:** GoogleTest prints the address of the object referenced, followed by the value. This helps pinpoint exactly which object was involved in failures.
+
+- **Pointers:** 
+  - For raw character pointers (`char*` and variants), GoogleTest prints both the pointer address and the string pointed to, escaping unprintable characters.
+  - For other pointer types, it prints the pointer value. If possible, user-defined printing of pointer values is respected.
+
+- **Raw Arrays:**
+  - Printed as elements inside curly braces.
+  - Character arrays are printed as string literals, escaping and handling embedded NULs where relevant.
+
+## Support for C++17 Features and Variants
+
+- **`std::optional<T>`:** Printed as `(nullopt)` if empty, or the contained value otherwise.
+
+- **`std::variant<T...>`:** Printed as a tuple like `('type_name(index = k)' with value value)` showing the active variant index and contained value.
+
+- **`std::any`:** If empty, prints `no value`; otherwise prints the type name.
+
+- **`std::string_view`:** Printed as strings, respecting embedded special characters.
+
+- **`std::span`:** Treated similar to containers, printing contained elements.
+
+## Floating-Point and Integral Types
+
+- Floating-point values are printed with precision carefully chosen to reveal subtle differences without overwhelming detail.
+- Integral types, including `__int128_t` on compilers supporting it, are printed as numerical values.
+
+## Usage Examples
+
+### Printing a Value to a String
+
+Use `testing::PrintToString()` to get a string representation of a value:
+
+```cpp
+EXPECT_EQ("(3, 5)", testing::PrintToString(foo::Point{3,5}));
+```
+
+### Using in Custom Failure Messages
+
+```cpp
+TEST(FooTest, CustomPrint) {
+  foo::Point a{1, 2}, b{3, 4};
+  EXPECT_EQ(a, b) << "Mismatch, a = " << testing::PrintToString(a) << ", b = " << testing::PrintToString(b);
+}
+```
+
+This ensures helpful diagnostics if the test fails.
+
+## Internals and Known Limitations
+
+- The universal printer tries printers in order, falling back on raw bytes only as a last resort.
+- There can be minor issues with printing containers where the container iterator type does not match the value type perfectly, but this rarely affects common STL containers.
+
+## Summary
+
+The universal value printer APIs offer:
+
+- Consistent and extensible printing of any type in test diagnostics.
+- Support for user customization to display domain-specific information clearly.
+- Detailed prints for container types and pointers, aiding rapid diagnosis.
+
+By customizing printing for your types, you enhance your tests' clarity and debugging speed.
+
+## Additional Tips and Best Practices
+
+- Prefer defining `PrintTo()` over `operator<<` if you want to customize printing only for tests without impacting generic streaming behavior.
+- If your project uses Abseil, consider defining `AbslStringify()` for uniform stringification.
+- Use `testing::PrintToString()` for building custom failure messages to avoid ambiguous or unreadable output.
+- Remember that references print their address to help differentiate objects; use this feature when you suspect object aliasing issues in tests.
+
+---
+
+## Related Documentation and References
+
+- [GoogleTest Assertions](../core-testing/assertions.md) — Learn how printed values appear in assertion failure messages.
+- [Advanced Guide: Teaching GoogleTest How to Print](../advanced.md#teaching-googletest-how-to-print-your-values) — Detailed guide for advanced printing customization.
+- [Mocks and Matchers](../common_patterns_scenarios/mocking_patterns_and_strategies.mdx) — Understand how printing interacts with mock expectations.
+- [GoogleTest Primer](primer.md) — Overview of writing tests that benefit from clear diagnostics.
+- [API Reference: Assertions](../core-testing/assertions.md) — Full list of assertions and usage examples.
+
+---
+
+## Troubleshooting
+
+<AccordionGroup title="Common Issues with Value Printing">
+<Accordion title="Printed Output is Raw Bytes">
+If you see raw bytes printed instead of meaningful diagnostics, it means no suitable printer was found for the type.
+
+*Solution:* Define `PrintTo()` or `operator<<` for your type to get nicer output.
+</Accordion>
+<Accordion title="Strings Containing Unprintable Characters">
+Strings or character arrays containing unprintable ASCII or invalid UTF-8 sequences print their hex escapes for safety.
+
+*Tip:* Enable the `--gtest_print_utf8` flag to control UTF-8 text output visibility.
+</Accordion>
+<Accordion title="Pointer Printing Confusion">
+Not all pointers are printed as the string they point to. Character pointers print pointer value and pointed string, while others print only the pointer.
+
+*Note:* This behavior avoids misleading diagnostics arising from accidental pointer comparisons.
+</Accordion>
+</AccordionGroup>
+
+---
+
+## Code Example
+
+```cpp
+#include <gtest/gtest.h>
+#include <string>
+
+namespace foo {
+struct Point {
+  int x = 0, y = 0;
+  friend void PrintTo(const Point& p, std::ostream* os) {
+    *os << "(" << p.x << ", " << p.y << ")";
+  }
+};
+}  // namespace foo
+
+TEST(PointTest, Printing) {
+  foo::Point p{3, 4};
+
+  std::string output = testing::PrintToString(p);
+  EXPECT_EQ("(3, 4)", output);
+}
+```
+
+This example shows how to enable friendly printing of your `foo::Point` type by defining `PrintTo()`, and how to use `PrintToString()` to get its string representation for diagnostics.
