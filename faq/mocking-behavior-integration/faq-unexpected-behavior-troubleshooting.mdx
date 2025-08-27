@@ -1,0 +1,219 @@
+---
+title: "Unexpected Behavior & Troubleshooting"
+description: "Helps users troubleshoot confusing or unexpected outcomes when using mocks—like unmet expectations, silent test pass/fail, test flakiness, or call order issues. Provides actionable solutions for real-world problems."
+---
+
+# Unexpected Behavior & Troubleshooting
+
+When using GoogleMock, sometimes your tests may behave in ways that are confusing or unexpected — for example, tests might silently pass or fail without clear reasons, expectations may seem unmet, calls occur out of order, or warnings about uninteresting function calls flood your output. This page helps you understand common causes of such issues and offers practical solutions to diagnose and fix them.
+
+---
+
+## Common Unexpected Behaviors
+
+### 1. Tests Passing or Failing Silently
+
+- **What Happens?**
+  Your test either passes when you expect a failure or fails without an obvious reason.
+
+- **Why Does This Happen?**
+  - Expectations are not set correctly or not set *before* the mock method is invoked.
+  - You might be relying only on `ON_CALL` without corresponding `EXPECT_CALL`s, leading to missing verification.
+  - The mock object stays alive longer or shorter than expected, affecting verification timing.
+
+- **How to Fix?**
+  - Always specify `EXPECT_CALL` *before* exercising code that triggers the mock method. Remember: `EXPECT_CALL` sets expectations for *future* calls, not past ones.
+  - Use `ON_CALL` only for setting default behavior, not for verifying calls.
+  - Confirm that the mock object's destructor is called (or call `Mock::VerifyAndClearExpectations(&mock_obj)` explicitly) to check expectations.
+
+
+### 2. "Uninteresting Function Call" Warnings
+
+- **What Happens?**
+  Warnings appear indicating that a mock method was called without matching any `EXPECT_CALL`.
+
+- **Why?**
+  - The mock method was called, but no expectations were set (`EXPECT_CALL`) for that method.
+  - By default, GoogleMock treats such calls as "naggy": it warns but does not fail the test.
+
+- **How to Fix or Suppress Warnings?**
+  - Add an explicit `EXPECT_CALL(mock, Method(...)).Times(AnyNumber())` to indicate calls are expected but not verified in detail.
+  - Wrap your mock object as a `NiceMock<YourMock>` to suppress warnings for uninteresting calls.
+  - To enforce stricter checks, use `StrictMock<YourMock>`, which treats uninteresting calls as failures.
+
+
+### 3. Unexpected Call Failures
+
+- **What Happens?**
+  Test reports an "Unexpected mock function call" failure, even though you believe your expectations cover the calls.
+
+- **Why?**
+  - The actual arguments do not match any expectation.
+  - The call order specified by sequences or `.After()` clauses is violated.
+  - The expectation has been saturated (called too many times).
+
+- **How to Investigate and Fix?**
+  - Run your test with `--gmock_verbose=info` to see detailed traces of mock calls and which expectations were checked.
+  - Ensure matchers in `EXPECT_CALL` correctly match arguments; remember that gMock tries newer expectations first.
+  - Verify that sequences or ordering constraints correctly represent the call order.
+  - If an expectation should allow any number of calls, add `.Times(AnyNumber())`.
+
+
+### 4. Excessive Calls on a Mock Method
+
+- **What Happens?**
+  A mock method is called more times than allowed by its expectation.
+
+- **Why?**
+  - `EXPECT_CALL` cardinality is less than the number of actual calls.
+  - The explicit actions given with `.WillOnce()` have been exhausted, and no `.WillRepeatedly()` is specified.
+
+- **How to Fix?**
+  - Adjust cardinality using `.Times()` to fit expected usage.
+  - Use `.WillRepeatedly()` to define behavior after `.WillOnce()`s are exhausted.
+  - Use `.RetiresOnSaturation()` to retire expectations after their call limit to avoid conflicts with catch-all expectations.
+
+
+### 5. Sticky Expectations Leading to Upper Bound Violations
+
+- **Explanation:**
+  GoogleMock expectations remain "sticky" by default—they stay active even after being called the maximum number of times. This can lead to upper-bound errors when subsequent calls match a saturated expectation instead of a general one.
+
+- **Resolution:**
+  - Add `.RetiresOnSaturation()` to expectations to make them "unstick" once saturated.
+  - Use `InSequence` or sequences to enforce call order and allow expectations to retire automatically after calls.
+
+
+### 6. Trouble with Overloaded Mock Methods
+
+- **Common Problem:**
+  Ambiguities or compiler errors when mocking or setting expectations on overloaded functions.
+
+- **Solutions:**
+  - Use the exact argument types to disambiguate by wrapping matchers with `Matcher<Type>()` or using typed matchers like `TypedEq<Type>()`.
+  - Use `Const()` to indicate a const-qualified method when mocking.
+  - Bring base class overloads into scope with `using` declarations if needed.
+
+
+### 7. Mock Class Missing Virtual Destructor
+
+- **Symptom:**
+  Memory leaks or heap checker failures when mock objects are deleted.
+
+- **Cause:**
+  Base class (interface) lacks a virtual destructor, causing derived mock class destructors to not be called properly.
+
+- **Fix:**
+  Always declare destructors in mock base classes (interfaces) as `virtual`.
+
+
+## Best Practices for Troubleshooting
+
+### Enable Verbose Logging
+
+Use the `--gmock_verbose=info` command-line flag to get detailed trace of expectation setting and mock calls, including:
+
+- Which mock functions were called
+- Which expectations matched or failed
+- Arguments values and return values
+- Stack traces for call origins
+
+This visibility is invaluable when diagnosing unexpected or silent failures.
+
+### Use `NiceMock`, `NaggyMock`, or `StrictMock` Judiciously
+
+- **`NiceMock<T>`:** Suppresses warnings on uninteresting calls.
+- **`NaggyMock<T>`:** Prints warnings on uninteresting calls (default behavior currently).
+- **`StrictMock<T>`:** Treats uninteresting calls as errors, enforcing strict verification.
+
+Switch mocks to `NiceMock` to reduce noise or `StrictMock` to enforce correctness, depending on your testing phase and needs.
+
+### Verify and Clear Expectations Early if Needed
+
+If a mock object's lifetime is unclear, force verification with:
+
+```cpp
+  Mock::VerifyAndClearExpectations(&mock_obj);
+```
+
+Avoid setting new expectations after verification to prevent undefined behavior.
+
+### Check Your Use of `EXPECT_CALL` and `ON_CALL`
+
+- Use `EXPECT_CALL` when you want to verify *that a call happens*.
+- Use `ON_CALL` to set up default behavior without verifying the call frequency or order.
+
+Remember that uninteresting call warnings appear if a method is called but has no matching `EXPECT_CALL`.
+
+### Check Matching of Arguments
+
+Check that matchers used in expectations properly match the arguments passed. Use placeholders like `_` to avoid over-specification. For complex argument validations, consider building custom matchers or use `.With()` clause for multi-argument matchers.
+
+
+## Scenario Walkthrough: Diagnosing an Unexpected Call
+
+**Situation:** You expect your mock `foo` to be called once with argument `5`, but test fails saying unexpected call occurred.
+
+1. Run the test executable with `--gmock_verbose=info`.
+2. Review output to see all calls and matched expectations.
+3. Confirm if your call matches expectation argument matchers.
+4. If not, adjust matcher or add more specific `EXPECT_CALL`.
+5. If calls are out of order, investigate use of `InSequence` or `.After()`.
+
+
+## Troubleshooting Tips & Tricks
+
+- **Use `.Times(0)` to disallow a call explicitly.**
+
+  ```cpp
+  EXPECT_CALL(mock, Method(_)).Times(0);
+  ```
+
+- **Use `.Times(AnyNumber())` for calls you don't care about but are allowed.**
+
+- **Avoid mixing `EXPECT_CALL` after exercising mocks.** All expectations must be set before calls.
+
+- **When mocking methods returning references, use `ReturnRef()`.**
+
+- **If you see unexpected warnings about uninteresting calls despite `ON_CALL`, consider making the mock `NiceMock` or adding catch-all `EXPECT_CALL`.**
+
+- **If you encounter upper bound or saturation issues, try adding `.RetiresOnSaturation()`.**
+
+- **For complex call ordering, use `Sequence` objects and `.InSequence()` or `.After()`.**
+
+- **If your test is flaky, review how expectations and sequences are set—make sure calls expected in order are not invoked out of order.**
+
+
+## Common Pitfalls and Gotchas
+
+- Don’t assume `EXPECT_CALL` after a call to the mock will verify that call retrospectively.
+- Using `EXPECT_CALL` with overloaded methods requires explicit disambiguation.
+- Nesting `NiceMock`, `NaggyMock`, and `StrictMock` wrappers is unsupported.
+- Mock methods must be defined in the public section for gMock expectations and actions to work.
+- Forgetting a virtual destructor in the interface leads to subtle memory issues.
+- Side effects in `WillOnce()` actions are evaluated at expectation setup, not at runtime. Use lambdas to defer side effects.
+
+
+## Getting Help
+
+If after troubleshooting you still can’t resolve issues:
+
+- Consult the [GoogleMock FAQ](https://google.github.io/googletest/gmock_faq.html) for common questions.
+- Explore the [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) for practical recipes.
+- Review the [Mocking Reference](https://google.github.io/googletest/reference/mocking.html) for detailed API.
+- Use community forums or issue trackers linked from the GoogleTest repository.
+
+
+---
+
+### Quick Reference to Related Material
+
+- [Mocking Reference](reference/mocking.md) — comprehensive API documentation for mocking.
+- [gMock for Dummies](docs/gmock_for_dummies.md) — beginner-friendly introduction to mocking.
+- [Strictness Wrappers (NiceMock, NaggyMock, StrictMock)](api-reference/mocking-apis/strictness-wrappers.mdx) — detailed explanation on controlling mock strictness.
+- [Debugging Test Failures](guides/troubleshooting-and-patterns/debugging-test-failures.mdx) — broader guidance on test debugging.
+
+
+---
+
+By understanding and applying these guidelines, you will gain control over your mock behavior, ensuring your tests are both precise and maintainable, helping uncover bugs efficiently and confidently.
