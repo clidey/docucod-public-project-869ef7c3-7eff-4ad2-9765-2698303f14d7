@@ -1,0 +1,251 @@
+---
+title: "Test Discovery, Registration, and Execution Flow"
+description: "Discover how GoogleTest automatically finds, registers, and runs tests. Dive into the lifecycle of a test—from definition, through registration, to execution—and see how the framework ensures all tests are executed reliably."
+---
+
+# Test Discovery, Registration, and Execution Flow
+
+GoogleTest works to automate discovering, registering, and running your C++ test code with minimal manual intervention. Understanding this process is essential to leveraging the framework effectively and diagnosing issues in your test program.
+
+---
+
+## 1. Test Definition and Automatic Registration
+
+When you write tests in GoogleTest, the framework uses macros like `TEST()`, `TEST_F()`, and `TEST_P()` to declare individual tests. Each of these macros does two important things behind the scenes:
+
+- Defines the test body as regular C++ code.
+- Automatically registers the test with GoogleTest's internal test registry before `main()` runs.
+
+This auto-registration removes the burden of listing every test manually and ensures all test code linked into your binary will be considered for execution.
+
+### Test Macros at a Glance
+
+- `TEST(TestSuiteName, TestName)`: Defines a simple test grouped into the named test suite.
+
+- `TEST_F(TestFixtureName, TestName)`: Defines a test that uses a shared test fixture class, allowing common setup and teardown shared across multiple tests.
+
+- `TEST_P(TestFixtureName, TestName)`: Defines a value-parameterized test where the same test logic runs with multiple parameter values.
+
+Behind the scenes, these macros create subclasses of `testing::Test` (or a suitable fixture class) and register factory functions that instantiate and run these tests.
+
+### Programmatic Registration
+
+Beyond macros, GoogleTest exposes `RegisterTest()` for dynamic test registration. This is useful when test names or parameters are determined at runtime:
+
+```cpp
+::testing::RegisterTest(
+  "MySuite", "MyTest", nullptr, nullptr, __FILE__, __LINE__, []() -> MyFixture* { return new MyFixture(params); });
+```
+
+However, such usages are advanced and should be done before `RUN_ALL_TESTS()` is called.
+
+
+---
+
+## 2. Internal Test Registry: Collection of Test Suites and Tests
+
+GoogleTest maintains a global singleton instance of the `UnitTest` class that holds all registered tests:
+
+- The `UnitTest` object organizes tests into `TestSuite`s.
+- Each `TestSuite` contains multiple `TestInfo` objects, each representing one test.
+
+These classes provide rich APIs to query test metadata:
+
+- Names of test suites and tests.
+- Number of tests to run or skipped tests.
+- Test results and timing information.
+
+You usually interact with these through GoogleTest's console output or when implementing custom event listeners.
+
+
+---
+
+## 3. Lifecycle of Test Execution
+
+When you run a GoogleTest program, typically by calling `RUN_ALL_TESTS()`, the framework orchestrates the following flow:
+
+### Initialization
+
+- Call to `testing::InitGoogleTest(&argc, argv)` parses GoogleTest flags and prepares the environment.
+- All tests registered prior to this are ready to be run.
+
+### Running Tests
+
+- `RUN_ALL_TESTS()` queries the `UnitTest` singleton for all registered tests.
+- Tests are filtered by name or other user flags—only matching tests run.
+- Test suites and tests may run in sequence or randomized order depending on flags.
+
+For each test suite:
+
+1. `SetUpTestSuite()` called once before any test in the suite.
+2. Each test runs:
+   - A fresh test fixture instance is created.
+   - `SetUp()` is called to prepare the fixture.
+   - Test body (the overridden `TestBody()` method) executes.
+   - `TearDown()` is called for cleanup.
+   - The fixture object is destroyed.
+3. `TearDownTestSuite()` executes after all tests in suite finish.
+
+Tests within the suite are independent; state mutations do not leak across tests.
+
+### Test Results and Reporting
+
+- Test results (pass/fail/skip) get recorded in the `TestResult` objects associated with each `TestInfo`.
+- Failures and success messages are captured.
+- Test timing (start time, elapsed time) is logged.
+- Event listeners are notified throughout the process.
+
+Finally, `RUN_ALL_TESTS()` returns `0` for all passing tests, or `1` if any test failed.
+
+
+---
+
+## 4. Event Listener Model: Hooks into Test Execution
+
+GoogleTest provides an event listener API (`TestEventListener`) to hook into the testing lifecycle. Event listeners are invoked at key points, enabling customization or external integration:
+
+- **Program events:** `OnTestProgramStart`, `OnTestProgramEnd`
+- **Iteration events:** `OnTestIterationStart`, `OnTestIterationEnd`
+- **Environment setup/teardown:** `OnEnvironmentsSetUpStart/End`, `OnEnvironmentsTearDownStart/End`
+- **Test suite events:** `OnTestSuiteStart`, `OnTestSuiteEnd`
+- **Individual test events:** `OnTestStart`, `OnTestEnd`, `OnTestDisabled`
+- **Assertion results:** `OnTestPartResult`
+
+Listeners can be added or removed dynamically from the `UnitTest` object's listener list.
+
+### Practical Usage
+
+- Create a subclass of `TestEventListener` or extend `EmptyTestEventListener` overriding only necessary methods.
+- Register your listener before calling `RUN_ALL_TESTS()`.
+- You can suppress or replace the default console output by releasing the default printer listener.
+
+Example snippet in main:
+
+```cpp
+int main(int argc, char** argv) {
+  testing::InitGoogleTest(&argc, argv);
+
+  auto& listeners = testing::UnitTest::GetInstance()->listeners();
+  // Remove default printer
+  delete listeners.Release(listeners.default_result_printer());
+
+  // Add custom listener
+  listeners.Append(new MyCustomListener);
+
+  return RUN_ALL_TESTS();
+}
+```
+
+
+---
+
+## 5. Filtering, Sharding, and Test Execution Control
+
+GoogleTest supports controlling which tests run and in what manner:
+
+- **Test Filtering:**
+  - Use `--gtest_filter=TestSuite.TestName` or wildcard patterns to select subsets of tests.
+  - Negative filters exclude tests.
+
+- **Test Sharding:**
+  - Use environment variables `GTEST_TOTAL_SHARDS` and `GTEST_SHARD_INDEX` to split tests across multiple machines or processes.
+  - Guarantees each test is run in exactly one shard.
+
+- **Test Repetition and Randomization:**
+  - `--gtest_repeat` runs all tests multiple times.
+  - `--gtest_shuffle` randomizes test run order.
+
+These controls help with large test suites, parallel execution, and flaky test detection.
+
+
+---
+
+## 6. Troubleshooting Common Issues in Test Discovery and Execution
+
+### Test Not Discovered or Executed
+
+- Ensure tests are linked correctly and `RUN_ALL_TESTS()` is called.
+- Confirm test names comply with macro requirements (no underscores in `TEST()` names).
+- Verify that the test binary was built with GoogleTest macros included.
+- Remember that tests disabled with `DISABLED_` prefix will not run unless overridden with `--gtest_also_run_disabled_tests`.
+
+### Registration Timing
+
+- Tests must be registered before calling `RUN_ALL_TESTS()`. Dynamic tests registered afterward won’t be run.
+
+### Filtering Issues
+
+- Check filter syntax and patterns.
+- Use `--gtest_list_tests` to view all registered tests.
+
+### Environment Setup
+
+- Global and suite-level setup should not fail; fatal failures or skips in setup can halt tests.
+
+### Custom Listeners Misbehavior
+
+- Ensure listeners raising failures or throwing exceptions do so only in permitted methods (avoid throwing inside `OnTestPartResult`).
+
+
+---
+
+## 7. Illustrative Mermaid Diagram: Test Registration and Execution Flow
+
+```mermaid
+flowchart TD
+  subgraph Test Definition
+    A[User writes TEST/TEST_F/TEST_P macro] --> B[GoogleTest creates Test classes and factory functions]
+    B --> C[Automatic Registration in UnitTest singleton]
+  end
+
+  subgraph Pre-Execution
+    D[Main calls InitGoogleTest()] --> E[Parses flags and sets up environment]
+    E --> F[RUN_ALL_TESTS() invoked]
+  end
+
+  subgraph Execution Loop
+    F --> G[TestSuite iteration]
+    G --> H[Call SetUpTestSuite()]
+    H --> I[Test iteration]
+    I --> J[Create fixture instance]
+    J --> K[Call SetUp()]
+    K --> L[Run TestBody()]
+    L --> M[Call TearDown()]
+    M --> N[Destroy fixture]
+    N --> O[Next test or exit]
+    O --> P[Call TearDownTestSuite()]
+  end
+
+  subgraph Event Notifications
+    F --> Q[TestProgramStart]
+    G --> R[TestSuiteStart]
+    I --> S[TestStart]
+    L --> T[TestPartResult]
+    L --> U[TestEnd]
+    G --> V[TestSuiteEnd]
+    F --> W[TestProgramEnd]
+  end
+
+  Q & R & S & T & U & V & W --> X[Event listeners notified]
+
+  %% Styling
+  classDef boxed fill:#eef,stroke:#88f,stroke-width:1px;
+  class TestDefinition,A,B,C boxed;
+  class PreExecution,D,E,F boxed;
+  class ExecutionLoop,G,H,I,J,K,L,M,N,O,P boxed;
+  class EventNotifications,Q,R,S,T,U,V,W,X boxed;
+```
+
+---
+
+## Additional Resources
+
+- [GoogleTest Primer](primer.md) — Learn to write your first tests.
+- [Testing Reference](reference/testing.md) — Deep dive on test macros and APIs.
+- [Advanced GoogleTest Topics](advanced.md) — Explore advanced features like parameterized and typed tests.
+- [Test Execution API](api-reference/testing-apis/test-execution-api.mdx) — For controlling and filtering tests programmatically.
+- [Event Listener API](reference/testing.md#TestEventListener) — For customizing test behavior during execution.
+
+---
+
+Harness GoogleTest’s powerful automated registration and execution flow to write scalable and maintainable C++ tests efficiently. Master these concepts for better test isolation, reporting, and control.
