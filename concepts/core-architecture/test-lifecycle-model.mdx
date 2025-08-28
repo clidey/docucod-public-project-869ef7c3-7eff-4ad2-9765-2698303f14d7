@@ -1,241 +1,237 @@
 ---
-title: "Test Lifecycle & Execution Model"
-description: "Understand how GoogleTest manages test discovery, setup, execution, and teardown. Learn how test cases are defined, registered, and run, and see how GoogleTest implements the xUnit pattern for structured, repeatable testing."
+title: "Test Lifecycle and Execution Model"
+description: "Dive into the end-to-end lifecycle of a test within GoogleTest: from discovery and test fixture setup through execution, assertion handling, and teardown. Understand how test runs are managed, how results are reported, and the role of main entry points in orchestrating tests across platforms."
 ---
 
-# Test Lifecycle & Execution Model
+# Test Lifecycle and Execution Model
 
-GoogleTest employs a clear, structured lifecycle and execution model rooted in the xUnit architecture to enable scalable, robust C++ testing. This guide helps you understand how GoogleTest manages test discovery, test registration, setup, execution, and teardown, ensuring your tests are organized, repeatable, and straightforward to run.
-
----
-
-## Overview: How GoogleTest Runs Your Tests
-
-When you write tests in GoogleTest using macros like `TEST()` or `TEST_F()`, GoogleTest automatically registers them for execution. The typical flow when running tests looks like this:
-
-1. **Initialization:**  You call `testing::InitGoogleTest(&argc, argv);` to initialize the framework. This parses GoogleTest-specific command-line flags and prepares the environment.
-
-2. **Test Registration:**
-   - Each test defined via the `TEST()` or `TEST_F()` macros creates an internal `TestInfo` object.
-   - `TestInfo` objects are grouped into `TestSuite`s (formerly called TestCases), each representing a collection of related tests.
-
-3. **Test Execution:**
-   - Invoking `RUN_ALL_TESTS()` starts the test run.
-   - GoogleTest iterates through each `TestSuite` and then through each `TestInfo` (test) within it.
-   - Before a `TestSuite`'s tests run, GoogleTest calls `SetUpTestSuite()` for any global setup.
-   - For each test:
-     - A fresh test fixture object is created.
-     - The fixture's `SetUp()` method is executed.
-     - The test body (`TestBody()`) runs.
-     - The fixture's `TearDown()` method runs.
-     - The fixture object is destroyed.
-   - After all tests in a `TestSuite` have run, `TearDownTestSuite()` is called.
-
-4. **Reporting:**
-   - GoogleTest tracks individual test results, including passes, failures, and skips.
-   - Event listeners receive notifications on test start, test part result (assertions), test end, and suite start/end.
-   - Reporting outputs (console, XML, JSON) are generated based on these events.
-
-5. **Finalization:**
-   - The aggregated test results determine the program's exit code.
-   - Global test environments' `SetUp()` and `TearDown()` are called before and after test iteration(s).
+GoogleTest offers a comprehensive, managed lifecycle that encompasses all stages of test execution: from initial discovery of test cases through fixture setup, running test bodies, assertion handling, teardown, and result reporting. This model is designed to give developers reliable, repeatable test runs with rich diagnostics and integration-friendly event hooks.
 
 ---
 
-## Test Components and Their Roles
+## 1. High-Level Test Execution Flow
 
-### Test
+### 1.1 Test Discovery and Registration
 
-- Represents an individual test.
-- Derived from the abstract `testing::Test` class or a fixture subclass.
-- Defines `SetUp()`, `TearDown()`, and the test logic in `TestBody()`.
-- Each test runs in isolation with a fresh fixture instance.
+Tests are automatically registered when declared with macros (e.g., `TEST`, `TEST_F`, `TEST_P`) or dynamically registered via `RegisterTest()`. Each test belongs to a test suite (formerly "test case"), enabling logical grouping. Internally, GoogleTest stores these as `TestInfo` objects within `TestSuite` containers.
 
-### TestInfo
+During test discovery:
+- Tests are indexed and filtered according to user-provided patterns and flags.
+- Disabled tests (named with `DISABLED_` prefix) are generally excluded unless overridden by flags.
+- Sharding variables (`GTEST_TOTAL_SHARDS` and `GTEST_SHARD_INDEX`) determine if a test belongs to the current shard and thus should run.
 
-- Contains metadata about a test, such as its name and test suite.
-- Holds the factory to create the test fixture instance.
-- Manages the test result storage.
+### 1.2 Test Environment Setup
 
-### TestSuite
+Before tests execute, global `Environment` objects registered via `AddGlobalTestEnvironment()` have their `SetUp()` method called sequentially. This occurs prior to any test suite or test execution and can be repeated if tests are rerun.
 
-- A named collection of tests, grouping logically related tests.
-- Has associated lifecycle callbacks: `SetUpTestSuite()` and `TearDownTestSuite()` for shared setup/teardown.
-- Tracks which tests should run, their order, and aggregated results.
+### 1.3 Test Suite Setup
 
-### UnitTest
+For each test suite selected to run, its static `SetUpTestSuite()` function is called once before any tests in the suite run, allowing expensive shared resource initialization.
 
-- Singleton representing the entire test program.
-- Manages all test suites, global environments, and event listeners.
-- Responsible for coordinating test filtering, sharding, iteration, and result collection.
+### 1.4 Individual Test Execution
 
-### Environment
+Each test follows this lifecycle:
 
-- Represents global set-up and tear-down for the entire run (e.g., initializing resources before any test).
-- Registered via `AddGlobalTestEnvironment()`.
+1. Create a fresh test fixture object.
+2. Invoke the test fixture's instance `SetUp()` method.
+3. Run the test code in the `TestBody()` implementation.
+4. Capture assertion results during test execution.
+5. Call the test fixture's instance `TearDown()` method.
+6. Delete the fixture object.
 
-### TestEventListener
+If a fatal failure occurs (e.g., via `ASSERT_*`), execution of the current test stops immediately. Non-fatal failures (`EXPECT_*`) allow the test to continue but mark it as failed.
 
-- Interface for hooking into the test flow.
-- Methods correspond to lifecycle events such as test start/end, assertion results, environments setup/teardown.
-- Users can implement listeners to customize output or integrate with external systems.
+Users can also skip tests at runtime using `GTEST_SKIP()`, which marks tests as skipped without failure.
 
----
+### 1.5 Test Suite Teardown
 
-## Defining and Registering Tests
+After all tests in a suite complete, the static `TearDownTestSuite()` method is called, releasing shared resources.
 
-You write tests using macros like `TEST()`, `TEST_F()`, or advanced forms like `TEST_P()`:
+### 1.6 Global Environment Teardown
 
-- `TEST(TestSuiteName, TestName)`: Defines a basic test function.
-- `TEST_F(TestFixture, TestName)`: Defines a test using a test fixture class.
-- Each macro internally registers the test with GoogleTest before `main()` runs.
+Finally, after all suites run, global `Environment` objects have their `TearDown()` methods called in reverse registration order.
 
-GoogleTest internally creates `TestInfo` instances for each test and groups them into `TestSuite`s, automatically handling duplicates or naming conflicts.
+### 1.7 Test Iterations and Repeat
+
+GoogleTest supports repeating test executions (via the `--gtest_repeat` flag) with all setup and teardown phases repeated as specified. Test shuffling and randomized seeding enable detection of test interdependencies.
 
 ---
 
-## Test Execution Flow
+## 2. Test States and Results
 
-GoogleTest runs tests with these logical steps:
+### 2.1 Test Outcome Tracking
 
-1. **TestSuites Enumeration:**
-   - GoogleTest iterates over all registered `TestSuite`s.
-   - The order is stable and sorted lexicographically by source file and line number.
+Each test's result is stored in a `TestResult` object containing:
+- Assertion outcomes (`TestPartResult`), including file, line, and message.
+- Execution timings: start timestamp and elapsed time in milliseconds.
+- Test properties recorded via `RecordProperty()`.
 
-2. **Global Set-Up:**
-   - Runs registered `Environment` objects' `SetUp()` methods before tests.
-   - Then calls each `TestSuite`'s `SetUpTestSuite()` method.
+Tests can have four high-level result states:
+- **Success:** No failures.
+- **Non-fatal failure:** Some assertions failed but test continues.
+- **Fatal failure:** Execution aborted due to a critical assertion.
+- **Skipped:** Explicitly skipped at runtime.
 
-3. **Running Tests in a TestSuite:**
-   For each test in the suite:
-   - The test fixture object is created.
-   - `SetUp()` is called to prepare the fixture.
-   - `TestBody()` executes the actual test code.
-   - `TearDown()` cleans up.
-   - The fixture object is deleted.
+### 2.2 Aggregates
 
-4. **Global Tear-Down:**
-   - Each `TestSuite`'s `TearDownTestSuite()` is called after all its tests run.
-   - Finally, all `Environment`s' `TearDown()` methods are invoked, in reverse order.
-
-5. **Result Aggregation and Reporting:**
-   - Each test produces a `TestResult` containing assertion results, timing, and properties.
-   - Aggregated results for tests and suites determine pass/fail status.
-   - Event listeners contribute to reporting and custom handling.
-
-6. **Repeat, Shuffle, and Sharding:**
-   - Flags such as `--gtest_repeat` can cause tests to repeat multiple times.
-   - Tests and suites might be shuffled randomly with `--gtest_shuffle`.
-   - Sharding environment variables split test execution across machines as appropriate.
+Test suite and program results are aggregates of contained tests. They track counts such as passed, failed, skipped, and disabled. GoogleTest's console and XML/JSON output summarize these aggregates.
 
 ---
 
-## Test Fixture Lifecycle Details
+## 3. Event Listeners and Hooks
 
-GoogleTest enforces that each test runs inside its own fresh test fixture instance for isolation:
+GoogleTest implements a rich observer pattern via the `TestEventListener` interface, allowing users to track test lifecycle events for:
+- Test program start/end
+- Test iterations
+- Global environment setup/teardown
+- Test suite setup/start/end
+- Individual test start, assertion results, end
 
-- **Creation:** GoogleTest creates a new instance of the test fixture for every test.
-- **SetUp:** `SetUp()` method is called after construction.
-- **TestBody:** The actual test logic runs.
-- **TearDown:** After `TestBody()`, `TearDown()` is called regardless of test outcome.
-- **Destruction:** The fixture object is deleted after `TearDown()`.
+Users can create custom listeners by subclassing either `TestEventListener` (interface) or `EmptyTestEventListener` (empty default methods). These can be registered with `UnitTest::listeners().Append()`.
 
-This cycle guarantees that tests do not affect each other's state.
+### Listener Event Ordering
+- `On*Start()` methods are invoked in registration order.
+- `On*End()` methods are called in reverse order to allow framing output.
 
-Additionally, `SetUpTestSuite()` and `TearDownTestSuite()` static methods allow resource sharing across all tests in a suite, useful for expensive setup.
-
----
-
-## Handling Test Results and Failures
-
-GoogleTest tracks detailed results per test and per assertion:
-
-- Individual assertions create `TestPartResult`s with types:  success, non-fatal failure, fatal failure, or skipped.
-- Fatal failures abort the current test method early but do NOT stop the overall test program.
-- Non-fatal failures allow tests to continue to reveal multiple issues.
-- Skipped tests are supported via the `GTEST_SKIP()` macro.
-- Test results include start time, elapsed time, properties, and failure metadata.
-
-All test results propagate up to the `TestSuite` and `UnitTest` summaries.
+By customizing listeners, users can tailor output formats, integrate with other tools, or perform profiling and diagnostics.
 
 ---
 
-## Event Listener API: Monitoring and Customizing Test Execution
+## 4. Main Entry Points
 
-GoogleTest offers an event listener interface allowing users to hook into test lifecycle events:
+### 4.1 `InitGoogleTest()`
 
-- Listen for program start and end events.
-- Monitor test suite and test start/end.
-- Receive callbacks for each assertion result.
-- Observe setup and teardown of global environments.
+This function initializes GoogleTest state, parsing command-line flags (like filters, repeat counts, output modes) and configuring the internal test registry and listeners. This must be called before `RUN_ALL_TESTS()`.
 
-This API enables custom reporters, logging enhancements, or integration with external tools.
+### 4.2 `RUN_ALL_TESTS()`
 
-Example:
+Called from `main()` to execute all registered tests. It:
+- Runs global environment setup.
+- Executes all test suites and their tests respecting filters and sharding.
+- Runs teardowns in reverse order.
+- Reports summary results.
+- Returns `0` on success, `1` if any test failed.
+
+Users should ensure not to ignore the return value and only call this once.
+
+---
+
+## 5. Practical Tips and Best Practices
+
+- **Group Tests using Test Suites:** Use test suites (`TEST()`) and fixtures (`TEST_F()`) for well-organized, repeatable tests.
+- **Use Setup/TearDown for Shared Resources:** To avoid costly setup per test, use `SetUpTestSuite()` and `TearDownTestSuite()`.
+- **Use Event Listeners for Custom Reporting:** To customize output or integrate test results with external tools.
+- **Leverage Skipping:** Use `GTEST_SKIP()` in setup or tests to conditionally skip functionality.
+- **Manage Assertion Failures:** Understand difference between fatal (`ASSERT_*`) and non-fatal (`EXPECT_*`) to control test flow.
+- **Filter Tests and Manage Sharding:** Use `--gtest_filter` and environment vars for selective test runs and parallelization.
+
+---
+
+## 6. Example: Writing a Custom TestEventListener
 
 ```cpp
-class SimplePrinter : public ::testing::EmptyTestEventListener {
+class MyListener : public testing::EmptyTestEventListener {
  public:
-  void OnTestStart(const ::testing::TestInfo& test_info) override {
-    std::cout << "Starting " << test_info.test_suite_name() << "." 
-              << test_info.name() << std::endl;
+  void OnTestStart(const testing::TestInfo& test_info) override {
+    printf("Starting test %s.%s\n", test_info.test_suite_name(), test_info.name());
+  }
+  void OnTestPartResult(const testing::TestPartResult& result) override {
+    if (result.failed()) {
+      printf("Failure: %s at %s:%d\n", result.summary(),
+             result.file_name(), result.line_number());
+    }
+  }
+  void OnTestEnd(const testing::TestInfo& test_info) override {
+    printf("Finished test %s.%s%s\n", test_info.test_suite_name(), test_info.name(),
+           test_info.result()->Passed() ? " (PASSED)" : " (FAILED)");
   }
 };
-...
+
 int main(int argc, char** argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  ::testing::UnitTest::GetInstance()->listeners().Append(new SimplePrinter);
+  testing::InitGoogleTest(&argc, argv);
+  testing::UnitTest::GetInstance()->listeners().Append(new MyListener);
   return RUN_ALL_TESTS();
 }
 ```
 
----
-
-## Advanced Execution Controls
-
-GoogleTest supports a variety of command-line flags and features to customize test execution:
-
-- **Filtering**: Run subsets of tests by names with `--gtest_filter`.
-- **Disabling**: Prefix test or suite names with `DISABLED_` to skip them.
-- **Repetition**: Repeat tests multiple times for flaky test diagnosis with `--gtest_repeat`.
-- **Fail-Fast**: Stop running tests at first failure with `--gtest_fail_fast`.
-- **Shuffling**: Randomize order of tests with `--gtest_shuffle` and set seeds with `--gtest_random_seed`.
-- **Sharding**: Distribute tests across machines via environment variables `GTEST_TOTAL_SHARDS` and `GTEST_SHARD_INDEX`.
+This listener prints custom messages on test start, any assertion failure, and test end.
 
 ---
 
-## Summary of Key Classes and Concepts
+## 7. Diagram: Test Execution Lifecycle Overview
 
-| Concept     | Purpose                                                            |
-|-------------|--------------------------------------------------------------------|
-| `Test`      | Base class for all tests; users subclass or use macros that derive from it.
-| `TestInfo`  | Metadata and management for individual tests.
-| `TestSuite` | Collection of related tests; supports shared setup/teardown.
-| `UnitTest`  | Singleton controlling the entire test program lifecycle.
-| `Environment` | Global setup and teardown independent of any single test suite.
-| `TestEventListener` | Interface to listen to lifecycle events during test execution.
+```mermaid
+flowchart TD
+  Start([Start Test Program]) --> Init[InitGoogleTest()]
+  Init --> RegisterTests[Discover & Register Tests]
+  RegisterTests --> FilterTests[Filter Tests & Apply Sharding]
+  FilterTests --> PreEnvSetup[Call Global Envs: SetUp()]
+  PreEnvSetup --> ForEachSuite[For each Test Suite to Run]
+
+  subgraph Suite_Loop
+    ForEachSuite --> SuiteSetup[SetUpTestSuite()]
+    SuiteSetup --> ForEachTest[Test Run: For each Test in Suite]
+
+    subgraph Test_Loop
+      ForEachTest --> TestFixtureCtor[Create Fixture Object]
+      TestFixtureCtor --> FixtureSetup[Fixture::SetUp()]
+      FixtureSetup --> RunTest[TestBody() Execution]
+      RunTest --> FixtureTearDown[Fixture::TearDown()]
+      FixtureTearDown --> FixtureDelete[Delete Fixture]
+    end
+
+    ForEachTest --> TestResults[Record TestResult]
+    TestResults --> OnFailure{Fatal Failure?}
+    OnFailure -- Yes --> SkipRemaining[Skip Remaining Tests if fail-fast]
+    OnFailure -- No --> ForEachTest
+
+    SkipRemaining --> SuiteTearDown[TearDownTestSuite()]
+    ForEachTest -- All Done --> SuiteTearDown
+    SuiteTearDown --> ForEachSuite
+  end
+
+  ForEachSuite -- All Suites Done --> PostEnvTearDown[Call Global Envs: TearDown()]
+  PostEnvTearDown --> Report[Report Results to Listeners & Output]
+  Report --> End([End Test Program])
+```
 
 ---
 
-## Practical Tips and Best Practices
+## 8. Troubleshooting Common Lifecycle Issues
 
-- **Isolate tests:** Use fresh fixtures for each test to avoid unintended interactions.
-- **Group logically:** Organize related tests into suites that mirror your code structure.
-- **Leverage fixtures:** Use `SetUpTestSuite()` for expensive shared resources.
-- **Watch failures:** Understand failure types (fatal vs non-fatal) and use assertions accordingly.
-- **Use event listeners:** Customize test run reporting and integrate with CI systems.
-- **Control execution flow:** Use filtering, repetition, and disabling to manage test runs efficiently.
+- **Tests Not Running:** Check filtering flags (`--gtest_filter`) and sharding environment variables.
+- **No Tests Discovered:** Verify tests are linked and registered correctly.
+- **Setup/TearDown Not Called:** Ensure proper override spelling and accessibility (`public static` for suite setup).
+- **Test Skipped Unexpectedly:** Check usage of `GTEST_SKIP()` and environment constraints.
 
----
-
-## References and Next Steps
-
-- [Test Case Structure & Lifecycle](../api-reference/gtest-core-apis/test-case-structure-and-lifecycle)
-- [Running & Validating Tests](../getting-started/first-test-validation/running-and-validating-tests)
-- [Event Listener API Sample (Sample9)](sample9_unittest.cc)
-- [Test Macros Documentation](../docs/reference/testing.md#TEST)
-- [Advanced Test Utilities](../api-reference/gtest-core-apis/advanced-test-utilities)
 
 ---
 
-This foundational understanding of the GoogleTest lifecycle will empower you to write, manage, and execute tests effectively, ensuring reliable and maintainable C++ testing workflows.
+For detailed API reference and advanced use cases, consult the [GoogleTest Primer](https://google.github.io/googletest/primer.html) and [Testing Reference](docs/reference/testing.md).
+
+# Additional Reading
+- [Test Macros and Fixtures](#)
+- [Test Lifecycle and Environment Control](#)
+- [Integration with Build Tools and CI](https://github.com/google/googletest/blob/main/docs/overview/integration-ecosystem/integration-with-build-and-ci.md)
+- [Scaling and Maintaining Large Test Suites](https://github.com/google/googletest/blob/main/docs/guides/integration-best-practices/scaling-maintaining-tests.md)
+
+---
+
+### Callouts
+
+<Check>
+Make sure to call `::testing::InitGoogleTest()` before `RUN_ALL_TESTS()` to initialize flags and test registry.
+</Check>
+
+<Warning>
+Avoid mixing `TEST` and `TEST_F` in the same test suite; all tests in a suite must use the same fixture class.
+</Warning>
+
+<Tip>
+Register custom test event listeners to tailor output for specialized needs such as GUI reports, custom logs, or resource leak detection.
+</Tip>
+
+<Note>
+`GTEST_SKIP()` can be used in test body or setup methods to skip test execution at runtime without failure.
+</Note>
+
