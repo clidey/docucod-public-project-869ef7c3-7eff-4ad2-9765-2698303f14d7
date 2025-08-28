@@ -1,0 +1,255 @@
+---
+title: "Custom Assertions and Matchers"
+description: "How to implement user-defined assertions and matchers to address advanced verification needs and express domain-specific test logic."
+---
+
+# Custom Assertions and Matchers
+
+Advanced verification often demands that your tests express domain-specific logic or validate conditions beyond simple built-in checks. This page guides you on how to implement custom assertions and matchers in GoogleTest and GoogleMock, empowering you to write expressive, precise, and reusable verification code tailored to your application’s unique needs.
+
+---
+
+## Why Create Custom Assertions and Matchers?
+
+Built-in assertions cover many common cases, but real-world testing frequently requires:
+
+- Verifying complex properties or invariants specific to your domain.
+- Composing smaller checks into semantically meaningful assertions.
+- Improving test readability with expressive failure messages.
+- Reducing boilerplate by encapsulating repetitive checks.
+
+By defining custom assertions and matchers, you can write tests that communicate intent clearly and detect subtle bugs effectively.
+
+---
+
+## Custom Assertions: Predicate Assertions with Detailed Messages
+
+A *custom assertion* is typically a function you write that returns a `testing::AssertionResult`. This result indicates success or failure and can include a detailed, human-readable message that explains why the assertion passed or failed.
+
+### Writing a Custom Assertion Function
+
+Your function should return `AssertionSuccess()` if the condition holds, or `AssertionFailure()` with a detailed message if it does not.
+
+### Example: Checking Mutual Primality
+
+```cpp
+#include <gtest/gtest.h>
+
+// Returns true if m and n share no common divisors other than 1.
+bool MutuallyPrime(int m, int n) {
+  // Implement the logic, e.g., Euclidean algorithm
+  while (n != 0) {
+    int t = n;
+    n = m % n;
+    m = t;
+  }
+  return m == 1;
+}
+
+// A custom assertion returning AssertionResult.
+testing::AssertionResult AssertMutuallyPrime(const char* m_expr, const char* n_expr, int m, int n) {
+  if (MutuallyPrime(m, n))
+    return testing::AssertionSuccess();
+
+  return testing::AssertionFailure() << m_expr << " and " << n_expr << " (" << m << " and " << n
+       << ") are not mutually prime.";
+}
+
+// Usage in a test
+TEST(MathTest, TestMutualPrimality) {
+  EXPECT_PRED_FORMAT2(AssertMutuallyPrime, 3, 4);  // Passes
+  EXPECT_PRED_FORMAT2(AssertMutuallyPrime, 6, 8);  // Fails with custom message
+}
+```
+
+### When to Use Custom Assertions
+
+Use these when you want the most readable and informative failure message for
+complex conditions that do not map well to simple boolean checks.
+
+---
+
+## Custom Matchers: Extending GoogleMock’s Expressiveness
+
+Matchers encapsulate the logic that decides whether a given argument fulfills
+some criteria. Custom matchers enable you to express elaborate validation rules
+clearly and concisely.
+
+A matcher produces a **true/false** result indicating a match and, upon failure,
+provides a descriptive explanation.
+
+---
+
+### Defining Custom Matchers Quickly with the `MATCHER` Macros
+
+GoogleMock provides convenient macros to write custom matchers without boilerplate.
+
+#### `MATCHER` Macro
+
+Defines a parameter-less, polymorphic matcher.
+
+```cpp
+MATCHER(IsDivisibleBy7, "Checks if a number is divisible by 7") {
+  return (arg % 7) == 0;
+}
+
+// Usage:
+EXPECT_CALL(mock, Foo(IsDivisibleBy7()));
+EXPECT_THAT(value, IsDivisibleBy7());
+```
+
+#### Adding Custom Failure Messages
+
+Provide a descriptive string or output additional details streaming into
+`result_listener`:
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  if ((arg % 7) == 0) return true;
+  *result_listener << "The remainder is " << (arg % 7);
+  return false;
+}
+```
+
+#### `MATCHER_P` and Beyond
+
+Parameterized matchers take arguments, enabling fine-tuned validation:
+
+```cpp
+MATCHER_P(InClosedRange, bound, "Checks if value in closed range") {
+  return arg >= 0 && arg <= bound;
+}
+
+EXPECT_THAT(value, InClosedRange(10));
+```
+
+Support for up to 10 parameters with `MATCHER_P2`, `MATCHER_P3`, .. `MATCHER_P10`.
+
+---
+
+### Defining Custom Matcher Classes Manually
+
+For more explicit control, you can write a matcher class implementing:
+
+- `bool MatchAndExplain(const T& value, std::ostream* os)` (or use a
+  `MatchResultListener` for richer info)
+- `void DescribeTo(std::ostream* os)`
+- `void DescribeNegationTo(std::ostream* os)`
+
+The class must typedef `using is_gtest_matcher = void;`.
+
+Example:
+
+```cpp
+class IsFooMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  bool MatchAndExplain(const Foo& foo, std::ostream* os) const {
+    bool matches = foo.bar + foo.baz == expected_sum_;
+    if (!matches && os) {
+      *os << "bar + baz = " << (foo.bar + foo.baz);
+    }
+    return matches;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "has bar + baz equal to " << expected_sum_;
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "does not have bar + baz equal to " << expected_sum_;
+  }
+
+  explicit IsFooMatcher(int expected_sum) : expected_sum_(expected_sum) {}
+
+ private:
+  int expected_sum_;
+};
+
+::testing::Matcher<const Foo&> IsSumEqual(int n) {
+  return ::testing::MakeMatcher(new IsFooMatcher(n));
+}
+```
+
+### Using Your Matcher
+
+```cpp
+Foo foo{1, 4};
+EXPECT_THAT(foo, IsSumEqual(5));
+```
+
+---
+
+### Polymorphic Matchers
+
+You can write polymorphic matchers that work for multiple types by templating
+`MatchAndExplain`.
+
+Example from `NotNull()` matcher:
+
+```cpp
+class NotNullMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  template <typename T>
+  bool MatchAndExplain(T* p, std::ostream*) const { return p != nullptr; }
+
+  void DescribeTo(std::ostream* os) const { *os << "is not NULL"; }
+  void DescribeNegationTo(std::ostream* os) const { *os << "is NULL"; }
+};
+
+inline testing::PolymorphicMatcher<NotNullMatcher> NotNull() {
+  return testing::MakePolymorphicMatcher(NotNullMatcher());
+}
+```
+
+---
+
+## Tips and Best Practices
+
+- **Use expressive messages**: Always provide meaningful explanations in your
+  custom assertions and matchers to simplify debugging.
+- **Keep matchers pure**: Matchers must have no side effects.
+- **Reuse matchers**: Assign complex matchers or actions to variables to avoid
+  recalculations and improve readability.
+- **Use lambda expressions for custom actions**: Leverage C++ lambdas in
+  `WillOnce` or `WillRepeatedly` for convenient inline behavior customization.
+- **Prefer matchers over raw predicates**: They yield richer diagnostic output.
+- **Use `EXPECT_PRED_FORMAT*` for custom formatting** when predicate functions
+  are insufficient.
+
+---
+
+## Troubleshooting
+
+- If your matcher fails with obscure template errors, check that it uses the
+  proper interface (`MatchAndExplain`, `DescribeTo`, typedef).
+- Avoid using assertions inside matchers that generate side effects; matchers
+  are invoked multiple times unpredictably.
+- When dealing with overloaded mock methods, disambiguate calls with
+  `Const()` or explicit casts.
+- For matchers involving pointers, handle null pointers explicitly.
+
+---
+
+## Additional Resources
+
+- [GoogleTest Assertions Reference](reference/assertions.md)
+- [GoogleMock Matchers Reference](reference/matchers.md)
+- [gMock Cookbook - Writing New Matchers](gmock_cook_book.md#NewMatchers)
+- [Expressive Assertions and Custom Matchers Guide](/guides/advanced_testing_patterns/using_matchers_assertions)
+- [GoogleTest Primer](primer.md) for foundational testing knowledge
+
+---
+
+By mastering custom assertions and matchers, you unlock the power to articulate even the most nuanced test expectations in your C++ projects, ensuring your tests are as expressive and robust as your production code demands.
+
+---
+
+<Info>
+This page focuses exclusively on extending GoogleTest and GoogleMock with
+user-defined assertions and matchers to solve advanced verification needs. For
+related topics, consult the Getting Started guides and core API references.
+</Info>

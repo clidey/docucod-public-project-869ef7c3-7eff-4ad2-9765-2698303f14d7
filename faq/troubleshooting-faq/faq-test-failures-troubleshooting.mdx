@@ -1,0 +1,279 @@
+---
+title: "My test fails unexpectedly—how do I debug it?"
+description: "Practical steps for debugging failing or flaky tests, including how to interpret assertion output, check for test environment issues, and use test event listeners for richer diagnostics."
+---
+
+# How to Debug Failing or Flaky Tests
+
+When a test unexpectedly fails or behaves inconsistently, the debugging process can be frustrating without clear visibility into what went wrong. This guide equips you with practical strategies and tools in GoogleTest to interpret assertion failures, identify environmental problems, and use advanced diagnostic methods like test event listeners to understand and resolve test issues.
+
+---
+
+## 1. Understanding Assertion Failures
+
+### What Does a Failed Assertion Mean?
+
+An assertion failure indicates that an expected condition was not met during a test. GoogleTest assertions come in two flavors:
+
+- **EXPECT_***: A nonfatal failure; the test continues execution to report more issues.
+- **ASSERT_***: A fatal failure; aborts the current test function immediately.
+
+When a failure occurs, GoogleTest prints detailed output including:
+
+- The source file and line number.
+- The assertion expression that failed.
+- The expected and actual values, if applicable.
+
+Understanding these messages is your first step to pinpoint the test's root cause.
+
+### Using Predicate Assertions for Clearer Messages
+
+Sometimes `EXPECT_TRUE()` or `ASSERT_TRUE()` tests complex conditions that produce opaque failure messages. GoogleTest offers predicate assertion macros (`EXPECT_PRED*`) and the rich `::testing::AssertionResult` class to write predicates that provide informative failure messages.
+
+Example predicate function:
+```cpp
+// Predicate that reports why a number is not even.
+testing::AssertionResult IsEven(int n) {
+  if ((n % 2) == 0) 
+    return testing::AssertionSuccess();
+  else
+    return testing::AssertionFailure() << n << " is odd";
+}
+
+// Usage in test:
+EXPECT_TRUE(IsEven(value));
+```
+
+Failed output clearly indicates why the predicate failed, helping your debugging.
+
+### Using SCOPED_TRACE to Add Context
+
+When a helper function with assertions is called multiple times, failures can be hard to trace back. Use `SCOPED_TRACE` to add extra context:
+
+```cpp
+SCOPED_TRACE("Processing element " << i);
+helperFunction(data[i]);
+```
+
+This appends the trace message to failure output, clarifying which invocation failed.
+
+---
+
+## 2. Diagnosing Test Environment Issues
+
+### Check for Test Setup and TearDown Problems
+
+Inspect your fixture's `SetUp()` and `TearDown()` functions as many failures or flakiness stem from:
+
+- Incorrect or incomplete initialization.
+- Side effects leaking between tests.
+- Resources that are not properly cleaned.
+
+Since GoogleTest creates a fresh fixture instance per test, failures here influence only the current test but may reveal nondeterministic bugs.
+
+### Using SetUpTestSuite and TearDownTestSuite Correctly
+
+For expensive shared resources, GoogleTest supports per-test-suite setup and teardown.
+
+Ensure you:
+
+- Define `static void SetUpTestSuite()` and `static void TearDownTestSuite()` in your fixture.
+- Properly allocate and release shared resources.
+- Guard against multiple calls in inheritance scenarios to avoid leaks.
+
+Mismanagement here can introduce shared mutable state bugs causing test flakiness.
+
+### Utilize Global Environments for Broad Setup
+
+If your test depends on global configurations or system-wide state, subclass `::testing::Environment` and register the environment using `AddGlobalTestEnvironment()`.
+
+This helps isolate environment problems from individual tests.
+
+---
+
+## 3. Using Test Event Listeners for Rich Diagnostics
+
+GoogleTest provides an event listener API to monitor test execution and failures more granularly.
+
+### Creating a Custom Event Listener
+
+Subclass `testing::EmptyTestEventListener` and override callbacks you need, such as:
+
+- `OnTestStart()`: Called before each test.
+- `OnTestPartResult()`: Called after each assertion.
+- `OnTestEnd()`: Called after each test.
+
+Example:
+
+```cpp
+class DebugEventListener : public testing::EmptyTestEventListener {
+public:
+  void OnTestStart(const testing::TestInfo& test_info) override {
+    std::cout << "Starting: " << test_info.test_suite_name() << "." << test_info.name() << std::endl;
+  }
+
+  void OnTestPartResult(const testing::TestPartResult& result) override {
+    if (result.failed()) {
+      std::cout << "Failure at " << result.file_name() << ":" << result.line_number() << std::endl;
+      std::cout << result.summary() << std::endl;
+    }
+  }
+
+  void OnTestEnd(const testing::TestInfo& test_info) override {
+    std::cout << "Finished: " << test_info.test_suite_name() << "." << test_info.name() << std::endl;
+  }
+};
+```
+
+### Registering the Listener
+
+Add your listener in `main()` before running tests:
+
+```cpp
+int main(int argc, char** argv) {
+  testing::InitGoogleTest(&argc, argv);
+  testing::TestEventListeners& listeners = testing::UnitTest::GetInstance()->listeners();
+  delete listeners.Release(listeners.default_result_printer());  // Remove default console output
+  listeners.Append(new DebugEventListener());
+  return RUN_ALL_TESTS();
+}
+```
+
+This replaces the default output with your custom diagnostic information for deeper insights.
+
+### Important Listener Notes
+
+- You cannot generate failures inside `OnTestPartResult()` as it causes recursion.
+- Listeners processing results should be appended before those which may generate failures.
+
+---
+
+## 4. Handling Flaky Tests: Repeating and Shuffling
+
+### Repeating Tests
+
+Some flaky tests fail intermittently due to timing issues or environment variability.
+
+Run tests multiple times with `--gtest_repeat=N` to help reproduce failures.
+
+Example:
+
+```shell
+./my_test --gtest_repeat=1000 --gtest_break_on_failure
+```
+
+This repeats tests 1000 times and breaks on failure, allowing for debugging.
+
+To avoid repeating global environment setup/teardown, set `--gtest_recreate_environments_when_repeating=false`.
+
+### Shuffling Test Execution
+
+Run tests in a randomized order with `--gtest_shuffle` to discover inter-test dependencies causing flakiness.
+
+Seed is printed after a run to reproduce failure order:
+
+```shell
+./my_test --gtest_shuffle --gtest_random_seed=12345
+```
+
+---
+
+## 5. Propagating Fatal Failures and Checking for Failures
+
+### Fatal Assertions Abort the Current Function Only
+
+Using `ASSERT_*` macros generates fatal failures that abort the *current function*, not the entire test.
+
+This can result in subtle bugs if a subroutine fails but the outer test continues and causes crashes.
+
+Example problem:
+
+```cpp
+void Helper() {
+  ASSERT_EQ(1, 2);  // aborts Helper(), but test continues
+  ... // code that should not run if ASSERT fails
+}
+
+TEST(MyTest, Test) {
+  Helper();
+  ... // may crash
+}
+```
+
+### Solutions for Proper Failure Propagation
+
+GoogleTest offers mechanisms to handle this situation:
+
+- Use `ASSERT_NO_FATAL_FAILURE(Helper())` to ensure no fatal failure occurred inside the call.
+- Use `HasFatalFailure()` after calling the subroutine to decide whether to proceed.
+
+Example:
+
+```cpp
+TEST(MyTest, Test) {
+  Helper();
+  if (testing::Test::HasFatalFailure()) return;
+  ... // safe to continue
+}
+```
+
+- Alternatively, throw an exception from an event listener to abort the test suite early.
+
+---
+
+## 6. Logging Additional Diagnostic Information
+
+You can embed custom key-value properties to be included in XML or JSON test reports using `RecordProperty()`.
+
+Example:
+
+```cpp
+TEST(MyTest, RecordsProperties) {
+  ::testing::Test::RecordProperty("LoadTimeMs", 42);
+}
+```
+
+This information appears in XML reports for further analysis or in CI dashboards.
+
+---
+
+## 7. Practical Tips
+
+- **Always call `testing::InitGoogleTest` before `RUN_ALL_TESTS()`** to correctly initialize flags.
+- **Use `RUN_ALL_TESTS()` return value** as your `main()` return to signal test success or failure.
+- **Avoid fatal assertions in constructors/destructors**; use `SetUp`/`TearDown` instead.
+- Enable detailed logging of mock calls using `--gmock_verbose=info` to investigate unexpected calls.
+
+---
+
+## 8. Common Scenarios & Troubleshooting
+
+<AccordionGroup title="Common Debugging FAQs">
+<Accordion title="My test is failing but I don’t see useful information. How can I get more details?">
+Use `EXPECT_PRED_FORMAT*` or custom predicate functions that return `AssertionResult` to produce more detailed failure messages. Also consider adding `SCOPED_TRACE` to add context in subroutine calls.
+</Accordion>
+<Accordion title="Tests behave inconsistently or fail only sometimes (flaky). How to debug?">
+Run your tests repeatedly with `--gtest_repeat` to catch intermittent failures. Use `--gtest_shuffle` to discover hidden test dependencies. Investigate shared resources and global states that may cause nondeterministic test outcomes.
+</Accordion>
+<Accordion title="How to use Event Listeners to diagnose failing tests?">
+Define a subclass of `EmptyTestEventListener` overriding relevant callbacks to log test progress and failures in your own format. Register it before `RUN_ALL_TESTS()` and optionally suppress the default printer to avoid mixed output.
+</Accordion>
+<Accordion title="I get segmentation faults after an ASSERT_* failure in a helper function. Why?">
+`ASSERT_*` only aborts the current function, so the caller continues and may access invalid data. Use `ASSERT_NO_FATAL_FAILURE` to check sub-function assertions, or check `HasFatalFailure()` before continuing.
+</Accordion>
+</AccordionGroup>
+
+---
+
+## 9. References & Further Reading
+
+- [Assertion Macros and Custom Predicates](../reference/assertions.md)
+- [Writing Custom Matchers](../gmock_cook_book.md#NewMatchers)
+- [Event Listeners API Guide](../advanced.md#extending-google-test-by-handling-test-events)
+- [Dealing with Flaky Tests](../advanced.md#running-test-programs-advanced-options)
+- [Test Fixtures and Shared Resources](../concepts/architecture-overview/test-abstractions.md)
+
+
+---
+
+By mastering these debugging techniques, you can dramatically reduce the time spent diagnosing failing or flaky tests and develop more robust test suites with clearer diagnostics and reproducible results.
