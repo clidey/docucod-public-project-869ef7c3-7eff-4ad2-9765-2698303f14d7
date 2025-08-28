@@ -1,0 +1,250 @@
+---
+title: "Death Tests: Testing Code That Should Crash or Exit"
+description: "Safely test code paths that are expected to terminate the process, such as asserts or exit calls. Covers death test syntax, platform considerations, and best practices."
+---
+
+# Death Tests: Testing Code That Should Crash or Exit
+
+## Overview
+This guide teaches you how to write and use death tests safely in GoogleTest. Death tests verify that specific code paths terminate the program, typically by triggering assertions, calling `exit()`, or crashing.
+
+It covers:
+
+- How to write death tests using provided macros
+- Understanding platform-specific considerations and death test styles
+- Best practices to avoid common pitfalls
+
+## Prerequisites
+- GoogleTest installed and properly configured
+- Familiarity with writing basic tests using `TEST()` or `TEST_F()` macros
+- Basic understanding of the behavior of your program under failure conditions (such as asserts or exit scenarios)
+
+## Expected Outcome
+By following this guide, you'll be able to write robust death tests that check that your code fails or exits as expected. This will improve confidence in critical failure handling and consistency checks in your code.
+
+## Time Estimate
+Around 15–30 minutes, depending on your familiarity with GoogleTest and death tests.
+
+## Difficulty Level
+Intermediate. Death tests involve spawning subprocesses and can have platform-specific nuances.
+
+---
+
+## Writing Death Tests
+
+Death tests execute code that must trigger abnormal termination, such as a process exit, a signal (e.g., segmentation fault), or `abort()`. Since the main process would stop with such code, death tests run the code in a child process and verify the termination behavior.
+
+### Core Macros
+Use the following macros inside your test cases to write death tests:
+
+| Macro           | Description |
+|-----------------|-------------|
+| `ASSERT_DEATH(statement, matcher)` | Asserts that *`statement`* terminates the process with a nonzero exit status, and that the `stderr` output matches *`matcher`*. Fails and aborts the current test if not.
+| `EXPECT_DEATH(statement, matcher)` | Same as `ASSERT_DEATH`, but if it fails the test continues.
+| `ASSERT_EXIT(statement, predicate, matcher)` | Asserts that *`statement`* terminates the process with an exit status satisfying *`predicate`*, and `stderr` output matches *`matcher`*.
+| `EXPECT_EXIT(statement, predicate, matcher)` | Same as `ASSERT_EXIT` but nonfatal.
+| `EXPECT_DEBUG_DEATH(statement, matcher)` | In debug builds, behaves like `EXPECT_DEATH`. In non-debug builds, just executes *`statement`* without checking for death.
+
+### Matcher and Predicate Parameters
+- The **matcher** parameter can be a string interpreted as a regular expression to match against the child process's standard error output.
+- The **predicate** parameter (used in `ASSERT_EXIT` and `EXPECT_EXIT`) is a callable that takes the exit code and returns `true` if it matches expectations. GoogleTest provides common predicates:
+  - `::testing::ExitedWithCode(code)` — matches process exit with exact exit code
+  - `::testing::KilledBySignal(signal_number)` — matches termination via signal
+
+### Writing a Basic Death Test Example
+```cpp
+TEST(MyDeathTest, AssertsCorrectly) {
+  ASSERT_DEATH(
+    { MyFunctionThatShouldDie(); },
+    "Assert failed");  // Matches output with "Assert failed"
+}
+
+TEST(MyDeathTest, ExitsWithCode0) {
+  EXPECT_EXIT(
+    { std::exit(0); },
+    ::testing::ExitedWithCode(0),
+    "Success message");
+}
+```
+
+### Compound Statements
+You can put multiple statements inside the death test macro by enclosing them in braces:
+
+```cpp
+ASSERT_DEATH({
+  int x = 42;
+  MyFunctionThatShouldDie(x);
+}, "Expected error message");
+```
+
+
+## Platform Considerations and Death Test Styles
+
+Death tests require spawning subprocesses to isolate code that may terminate unexpectedly.
+
+### Death Test Styles (Controlled by `--gtest_death_test_style`)
+
+- **threadsafe** (recommended default): The child process _re-executes_ the entire test binary and runs only the death test. This is safer for multi-threaded environments but slower.
+- **fast**: The child process executes the death test immediately after the fork without re-executing the binary. This runs faster but may be unsafe in multi-threaded contexts.
+
+GoogleTest selects a default style, and you may change it via:
+
+```cpp
+GTEST_FLAG_SET(death_test_style, "threadsafe");
+```
+
+or the command-line flag:
+
+```
+--gtest_death_test_style=threadsafe
+```
+
+### Platform Differences
+
+- **Linux/macOS/Unix:** Both styles supported; `clone()` (Linux) or `fork()` used.
+- **Windows:** Always uses a thread-safe style by re-executing the test binary.
+- **Fuchsia:** Similar to Windows, uses thread-safe executions.
+
+### Thread Safety
+Since some platforms may run multiple threads, death tests emit warnings if multiple threads are detected at a death test point. The threadsafe approach helps avoid subtle bugs due to forking in a multi-threaded process.
+
+
+## Best Practices and Common Pitfalls
+
+### 1. Name Test Suites Containing Death Tests With `DeathTest`
+GoogleTest runs test suites ending with `DeathTest` before other suites. This isolates death tests early, avoiding interference with other tests.
+
+Example:
+```cpp
+TEST(MyClassDeathTest, DiesWhenNull) {
+  ASSERT_DEATH(MyClass().DoSomething(nullptr), "NULL pointer");
+}
+```
+
+### 2. Avoid `return` and Exceptions in Death Tests
+- If your death test code returns from the current function or throws an exception, the death test is considered a failure.
+- Avoid using fatal assertions (`ASSERT_*`) that cause returns inside death tests unless intended.
+
+### 3. Beware of Side Effects
+- Side effects (e.g., modifying memory) in death tests execute in the child process and do *not* affect the parent process.
+- To avoid issues with heap checkers or leaks, consider freeing memory outside death tests or disable leak detectors for those tests.
+
+### 4. Avoid Multiple Death Tests on the Same Line
+GoogleTest macros for death tests cannot be used multiple times on the same source line due to macro expansion constraints.
+
+### 5. Use Proper Matchers and Predicates
+- Make sure your regexp matcher matches the expected error output exactly.
+- Use `ExitedWithCode` or `KilledBySignal` predicates with `EXPECT_EXIT` for precise exit code or signal checks.
+
+### 6. Test Both `ASSERT_DEATH` and `EXPECT_DEATH`
+- Use `ASSERT_DEATH` when you want to abort the test on failure.
+- Use `EXPECT_DEATH` to continue running subsequent tests even if this death test fails.
+
+### 7. Debugging Death Tests
+- You can temporarily set `--gtest_break_on_failure` to cause the debugger to break on failures.
+- Investigate test output for matching errors or unexpected child process behavior.
+
+
+## Advanced Usage
+
+### Using `EXPECT_DEBUG_DEATH`
+This macro behaves like `EXPECT_DEATH` in debug builds (typically with `NDEBUG` not defined). In release builds, the statement is executed normally without expecting death.
+
+Example:
+```cpp
+EXPECT_DEBUG_DEATH(
+  FunctionThatLogsFatalError(),
+  "fatal error message"
+);
+```
+
+### Custom Exit Predicates
+You can provide your own predicate callable for more fine-grained control.
+
+Example:
+```cpp
+bool KilledBySIGHUP(int exit_code) {
+  return WIFSIGNALED(exit_code) && WTERMSIG(exit_code) == SIGHUP;
+}
+
+EXPECT_EXIT(CallThatSendsSIGHUP(), KilledBySIGHUP, "signal received");
+```
+
+### Combining with Matchers
+Matchers from GoogleMock can be used in death tests to verify the child's stderr output with complex conditions.
+
+Example:
+```cpp
+EXPECT_DEATH(
+  CallFunctionThatCrashes(),
+  testing::ContainsRegex("invalid argument")
+);
+```
+
+
+## Troubleshooting & Tips
+
+### Common Issues
+- **Test does not die:** Confirm that the code under test actually calls `exit()`, `abort()`, or crashes.
+- **Mismatch in error message:** Verify the regular expression is correct and matches the actual stderr output.
+- **Test times out:** Ensure that no other threads or blocking calls prevent the test child process from terminating.
+- **Multiple threads warning:** Switch to `threadsafe` style for better isolation.
+
+### Useful Tips
+- Use `ASSERT_EXIT` / `EXPECT_EXIT` for precise exit code checks.
+- Launch death tests in isolated test suites named `*DeathTest`.
+- Employ `SCOPED_TRACE` to add context within complex death test bodies.
+
+
+## Example Walkthrough
+
+```cpp
+#include <gtest/gtest.h>
+
+// Code under test
+void CrashIfNull(void* p) {
+  if (p == nullptr) {
+    fprintf(stderr, "Fatal error: null pointer\n");
+    std::abort();
+  }
+}
+
+TEST(CrashDeathTest, CrashesOnNullPointer) {
+  ASSERT_DEATH(CrashIfNull(nullptr), "null pointer");
+}
+
+TEST(CrashDeathTest, DoesNotCrashOnValidPointer) {
+  int x = 42;
+  CrashIfNull(&x);  // No death expected, so not a death test
+  SUCCEED();
+}
+
+TEST(NormalExitDeathTest, ExitsWithZero) {
+  EXPECT_EXIT(std::exit(0), ::testing::ExitedWithCode(0), "");
+}
+```
+
+
+## Key Regular Expression Syntax Notes
+GoogleTest supports a subset of POSIX extended regex on Unix-like systems or a simplified regex on Windows/macOS:
+
+- Supports literal characters, character classes like `\d`, `\w`, `.`
+- Supports quantifiers: `?`, `*`, `+`
+- Supports anchors: `^` and `$`
+
+Unsupported features include grouping `()`, alternation `|`, and curly brace quantifiers (`{n,m}`).
+
+
+## Additional Resources
+- [Assertions Reference](reference/assertions.md#death) — full reference on death test assertions
+- [Advanced GoogleTest Topics](docs/advanced.md#death-tests) — detailed explanations and tips
+- [GoogleTest Primer](docs/primer.md) — introduction to testing with GoogleTest
+
+
+## Summary
+Death tests in GoogleTest let you verify that code paths terminate the process as expected due to errors or asserts. By isolating such code in subprocesses, they safely check for program abnormal termination and error messages. Using macros like `ASSERT_DEATH` and `EXPECT_EXIT` with appropriate matchers and predicates ensures your error handling is tested thoroughly and reliably.
+
+
+---
+
+**Note:** For further help with writing your first tests or understanding assertions, please consult the 'Writing and Running Your First Test' and 'Assertions Reference' guides.

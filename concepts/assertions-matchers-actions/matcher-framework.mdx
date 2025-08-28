@@ -1,0 +1,383 @@
+---
+title: "Matcher Framework and Value Checking"
+description: "Discover the powerful matcher system that enables expressive, readable, and flexible value comparisons in assertions and mocked expectations. Learn about polymorphic matchers, custom matchers, and extensibility hooks."
+---
+
+# Matcher Framework and Value Checking
+
+Discover the powerful matcher system that enables expressive, readable, and flexible value comparisons in assertions and mocked expectations. Learn about polymorphic matchers, custom matchers, and extensibility hooks.
+
+---
+
+## Introduction to Matchers
+
+Matchers lie at the heart of GoogleMock's ability to verify that values in tests meet expected conditions. They enable you to specify *what* properties you expect from argument values or return values in mock method calls, going far beyond simple equality.
+
+Matchers help you express conditions like "this integer is even," "this pointer is not null," or "this container has exactly these elements," in a clear, readable way.
+
+This page guides you through understanding the matcher framework, focusing on how to create, use, and extend matchers effectively.
+
+---
+
+## Core Matcher Concepts
+
+### What is a Matcher?
+
+A *matcher* is a predicate-like object that checks whether a value satisfies some condition. It also knows how to describe itself for useful error messages when tests fail.
+
+For example:
+
+```cpp
+EXPECT_CALL(mock_foo, Bar(IsEven()));
+EXPECT_THAT(value, StartsWith("Hello"));
+```
+
+These use matchers `IsEven()` and `StartsWith()` to express expectations about the arguments and values.
+
+### Polymorphic Matchers
+
+Matchers in GoogleMock are polymorphic. This means one matcher can be used to check values of multiple types.
+
+For example, `IsEven()` can be used to match ints, longs, or any type where `% 2` works and results in a boolean:
+
+```cpp
+EXPECT_CALL(obj, Func(IsEven()));  // Func can take int, long, etc.
+EXPECT_THAT(4L, IsEven());
+```
+
+This flexibility is achieved via type inference by the compiler, which supplies the matched value's type (`arg_type`) contextually.
+
+### Parameterized Matchers
+
+Many matchers accept parameters to express specific conditions. GoogleMock provides macros like `MATCHER_P` to help you quickly define parameterized matchers:
+
+```cpp
+MATCHER_P(HasAbsoluteValue, value, "") {
+  return abs(arg) == value;
+}
+
+EXPECT_THAT(x, HasAbsoluteValue(10));
+```
+
+The parameter `value` can be any type that makes sense for the matcher logic.
+
+Multiple parameters are supported through macros like `MATCHER_P2`, `MATCHER_P3`, and so forth, allowing you to write expressive matchers with multiple inputs.
+
+### Descriptions and Failure Messages
+
+Matchers provide description strings that make test failure messages clear and human-friendly.
+
+For example, if the `IsEven()` matcher fails:
+
+```
+Value of: some_expression
+Expected: is even
+  Actual: 7
+```
+
+You can override or customize the description string to better fit your matcher, especially for parameterized matchers that output dynamic descriptions reflecting parameters and negations.
+
+---
+
+## Writing Custom Matchers
+
+GoogleMock offers several ways to define new matchers when the built-in ones don't meet your testing needs.
+
+### Using the `MATCHER` Macros
+
+The easiest way to create custom matchers is with the `MATCHER` family of macros.
+
+- `MATCHER(name, description_string)` for matchers without parameters.
+- `MATCHER_P(name, param_name, description_string)` for single-parameter matchers.
+- `MATCHER_Pk` for multiple parameters.
+
+Inside the matcher body, you can inspect `arg` (the value being matched) and use `result_listener` to stream additional failure information.
+
+Example:
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  if (arg % 7 == 0) return true;
+  *result_listener << "the remainder is " << (arg % 7);
+  return false;
+}
+```
+
+Usage:
+
+```cpp
+EXPECT_THAT(x, IsDivisibleBy7());
+```
+
+This will explain failure and success clearly.
+
+### Implementing MatcherInterface Directly
+
+For advanced cases with complex typing or where better compiler errors are desired, implement a class with the matcher interface:
+
+```cpp
+class MyMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  bool MatchAndExplain(const T& value, MatchResultListener* listener) const;
+  void DescribeTo(std::ostream* os) const;
+  void DescribeNegationTo(std::ostream* os) const;
+};
+
+Matcher<T> MakeMyMatcher(...params...) {
+  return Matcher<T>(new MyMatcher(...params...));
+}
+```
+
+This approach gives you precise control but requires more effort.
+
+### Polymorphic Matcher Implementation
+
+To create matchers that work across multiple types, use templates to define `MatchAndExplain` as a method template accepting arbitrary types.
+
+Example for `NotNull()` matcher matching any pointer type:
+
+```cpp
+class NotNullMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  template <typename T>
+  bool MatchAndExplain(T* p, MatchResultListener* /*listener*/) const {
+    return p != nullptr;
+  }
+
+  void DescribeTo(std::ostream* os) const { *os << "isn't NULL"; }
+  void DescribeNegationTo(std::ostream* os) const { *os << "is NULL"; }
+};
+
+PolymorphicMatcher<NotNullMatcher> NotNull() {
+  return MakePolymorphicMatcher(NotNullMatcher());
+}
+```
+
+This yields a matcher that seamlessly works across all pointer types.
+
+---
+
+## Built-in Matchers Overview
+
+GoogleMock supplies a rich set of built-in matchers:
+
+- **Wildcard matcher** `_`: matches anything.
+- **Comparison matchers**: `Eq`, `Ne`, `Lt`, `Le`, `Gt`, `Ge`.
+- **String matchers**: `StrEq`, `StrCaseEq`, `HasSubstr`, `StartsWith`, `EndsWith`.
+- **Pointer matchers**: `IsNull()`, `NotNull()`, `Pointee(m)`.
+- **Container matchers**: `Contains(m)`, `ElementsAre(...)`, `UnorderedElementsAre(...)`, `SizeIs(m)`, `Each(m)`.
+- **Tuple/Pair matchers**: `Pair(m1, m2)`, `Key(m)`, `Property(&Class::Method, m)`, `Field(&Class::field, m)`.
+
+These allow you to express simple through to very complex conditions compactly and readably.
+
+---
+
+## Combining and Modifying Matchers
+
+### Logical Combinators
+
+You can build compound matchers by combining simpler matchers:
+
+- `AllOf(m1, m2, ...)` matches if all nested matchers match.
+- `AnyOf(m1, m2, ...)` matches if any nested matcher matches.
+- `Not(m)` matches if the inner matcher does not match.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Foo(AllOf(Ge(10), Le(20))));
+EXPECT_THAT(str, Not(StartsWith("Ignore")));
+```
+
+### Multi-Argument Matchers for Mock Methods
+
+When you want to assert conditions on multiple arguments together, use the `With()` clause along with matchers on tuples:
+
+```cpp
+EXPECT_CALL(mock, Func(_, _))
+      .With(Lt());  // The first argument less than the second.
+```
+
+You can also select specific arguments to match using `Args<N1, N2, ...>(matcher)`.
+
+---
+
+## Using Matchers in Tests
+
+Matchers primarily appear inside `EXPECT_CALL` or `EXPECT_THAT` macros.
+
+- Use `EXPECT_CALL(mock_obj, MethodName(matcher1, matcher2, ...))` to specify expectations on mock method arguments.
+- Use `EXPECT_THAT(actual_value, matcher)` for general assertions with expressive failure messages.
+
+Always combine matchers to articulate precise expectations.
+
+Example:
+
+```cpp
+using ::testing::StartsWith;
+using ::testing::NotNull;
+EXPECT_CALL(foo, Bar(NotNull()));
+EXPECT_THAT(text, StartsWith("Error"));
+```
+
+---
+
+## Safe Matcher Casting
+
+GoogleMock supports static type safety by requiring matchers types to precisely match argument types. However, sometimes types can differ in ways that are safe to allow (e.g., `int` vs `long`).
+
+Use `SafeMatcherCast<T>(m)` to convert a matcher `m` to type `Matcher<T>` safely, provided:
+
+1. The type `T` can be implicitly converted to the type expected by matcher `m`.
+2. Conversions are lossless where relevant.
+3. Reference and const-ness rules are respected.
+
+Example:
+
+```cpp
+Matcher<Base*> base_matcher = ...;
+EXPECT_CALL(mock, Func(SafeMatcherCast<Derived*>(base_matcher)));
+```
+
+Use this feature carefully to avoid subtle bugs.
+
+---
+
+## Advanced Composite Matchers
+
+GoogleMock supports building matchers that operate on containers, tuples, and variants.
+
+Examples include:
+
+- `ElementsAre(m1, m2, ...)` to check a container's elements in order.
+- `UnorderedElementsAre(m1, m2, ...)` to check elements ignoring order.
+- `Pointwise(pair_matcher, container)` to check corresponding pairs of elements.
+- `Optional(matcher)` for `optional<>`-type values.
+- `VariantWith<T>(matcher)` for variants.
+
+These matchers allow expressive, precise verification of collections and complex structures.
+
+---
+
+## Extensibility Hooks
+
+Besides the `MATCHER` macros and manual matcher interface implementation, GoogleMock provides polymorphic matchers, and utilities like `MakePolymorphicMatcher` to build expressive new matchers easily.
+
+You can also override or extend matcher descriptions, streaming failure explanations to aid debugging.
+
+When complex explanations are needed, use the `MatchResultListener` to append messages during match evaluation, improving test feedback.
+
+---
+
+## Summary
+
+The matcher framework is a foundational mechanism in GoogleMock enabling expressive, readable, flexible verification of values and arguments in tests. Understanding and leveraging polymorphic matchers, safe casting, parameterization, and custom matcher creation empower you to write clearer and more maintainable tests.
+
+Explore the `MATCHER` macros for quick custom matchers, and dive deeper with manual matcher interface implementation for full control. Use the rich built-in matchers for common cases, and combine them to craft precise assertions.
+
+---
+
+<AccordionGroup title="Common Matcher Patterns and Usage">
+<Accordion title="Creating a Simple Matcher with MATCHER">
+
+To create a simple matcher:
+
+```cpp
+MATCHER(IsEven, "") {
+  return (arg % 2) == 0;
+}
+
+// Use:
+EXPECT_CALL(mock, Func(IsEven()));
+EXPECT_THAT(value, IsEven());
+```
+
+</Accordion>
+<Accordion title="Creating a Parameterized Matcher">
+
+Define with `MATCHER_P`:
+
+```cpp
+MATCHER_P(HasAbsoluteValue, value, "") {
+  return abs(arg) == value;
+}
+
+EXPECT_THAT(x, HasAbsoluteValue(10));
+```
+
+</Accordion>
+<Accordion title="Combining Matchers">
+
+Combine multiple matchers using:
+
+- `AllOf(m1, m2, ...)`: All must match.
+- `AnyOf(m1, m2, ...)`: Any must match.
+- `Not(m)`: Negates matcher.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Func(AllOf(Ge(5), Ne(10))));
+```
+
+</Accordion>
+<Accordion title="Matching Container Elements">
+
+Use:
+
+- `ElementsAre(...)`: match elements in order.
+- `UnorderedElementsAre(...)`: match elements ignoring order.
+- `Contains(m)`: container contains at least one matching element.
+
+Example:
+
+```cpp
+EXPECT_THAT(vec, ElementsAre(1, _, 3));
+```
+
+</Accordion>
+<Accordion title="Matching Pointer Arguments">
+
+Use these to assert properties of pointers:
+
+- `IsNull()`: matches any null pointer.
+- `NotNull()`: matches any non-null pointer.
+- `Pointee(m)`: matches pointer whose pointee matches matcher m.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Func(Pointee(Ge(5))));
+```
+
+</Accordion>
+<Accordion title="Safe Casting of Matchers">
+
+If types differ but are compatible, use `SafeMatcherCast<T>(m)` to cast:
+
+```cpp
+// Cast a matcher of Base* to Derived* safely
+EXPECT_CALL(mock, Method(SafeMatcherCast<Derived*>(base_ptr_matcher)));
+```
+
+</Accordion>
+</AccordionGroup>
+
+---
+
+### See Also
+
+- [MATCHER Macro and Custom Matcher Creation](https://github.com/google/googletest/blob/main/docs/gmock_cook_book.md#newmatchers)
+- [Matchers Reference](reference/matchers.md)
+- [EXPECT_CALL Usage and Argument Matchers](docs/reference/mocking.md#EXPECT_CALL)
+- [SafeMatcherCast API](docs/reference/mocking.md#SafeMatcherCast)
+- [Assertions Reference](docs/reference/assertions.md#EXPECT_THAT)
+
+---
+
+<Source url="https://github.com/google/googletest" paths={[{"path": "googlemock/include/gmock/gmock-matchers.h", "range": "1-1120"}]} />
+
