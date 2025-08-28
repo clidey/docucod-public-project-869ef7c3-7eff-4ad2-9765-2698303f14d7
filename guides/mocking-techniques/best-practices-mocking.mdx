@@ -1,0 +1,229 @@
+---
+title: "Best Practices for Mocking and Expectations"
+description: "Guidelines and patterns for writing maintainable and expressive mocks. Learn how to choose between NiceMock, StrictMock, and NaggyMock wrappers, and when to use actions, matchers, and cardinalities efficiently."
+---
+
+# Best Practices for Mocking and Expectations
+
+This guide empowers you to write clear, maintainable, and effective mocks with GoogleMock. It helps you decide when and how to use mock wrappers like `NiceMock`, `StrictMock`, and `NaggyMock`, craft expectations with actions, matchers, and cardinalities, and develop tests resilient to change while verifying meaningful interactions.
+
+---
+
+## 1. Choosing the Right Mock Wrapper: NiceMock, StrictMock, or NaggyMock
+
+### What Are Mock Wrappers?
+GoogleMock provides three primary wrappers to control how your mocks react to calls that have no explicit expectations (called *uninteresting calls*):
+
+- **NiceMock<T>**: Suppresses warnings for uninteresting calls. Useful when you want cleaner test output without noise from calls that you don't care about.
+- **NaggyMock<T>** (default): Prints warnings on uninteresting calls, helping you notice unexpected interactions.
+- **StrictMock<T>**: Treats uninteresting calls as test failures, enforcing strict interaction contracts.
+
+### When to Use Each Wrapper
+
+- **Use `NiceMock`** when your test only cares about a few specific interactions but allows other calls silently. This leads to cleaner and more maintainable tests with fewer false alarms.
+
+- **Use `NaggyMock`** while developing or debugging tests when you want GoogleMock to notify you about any unanticipated mock method calls so you can decide if they are intentional.
+
+- **Use `StrictMock`** only when you want to guarantee that every call to the mock is explicitly expected. Overusing strict mocks can make tests brittle and hard to maintain.
+
+### Practical Guidance
+- Currently, mocks behave as `NaggyMock` by default. The GoogleMock team plans to switch this to `NiceMock` for better maintainability.
+- You can make a mock object "nice" or "strict" easily by declaring it as `NiceMock<MockClass>` or `StrictMock<MockClass>`. They subclass your mock class and inherit its constructors, so you can pass any constructor arguments transparently.
+
+```cpp
+using ::testing::NiceMock;
+using ::testing::StrictMock;
+// Construct a nice mock that calls MockFoo(int, const char*).
+NiceMock<MockFoo> nice_foo(5, "hello");
+
+// Construct a strict mock that calls MockFoo().
+StrictMock<MockFoo> strict_foo;
+```
+
+### Caveats
+- Wrappers only affect mock methods defined directly in the mock class using `MOCK_METHOD`. Inherited mock methods or nested wrappers are not supported.
+- The destructor of the mocked class should be virtual for correct behavior.
+
+<Warning>
+Avoid mixing multiple wrappers on the same mock class (e.g., `NiceMock<StrictMock<MockFoo>>`), as nested wrappers are unsupported.
+</Warning>
+
+---
+
+## 2. Writing Expectations with Clarity and Precision
+
+Effective and maintainable tests depend on well-specified expectations. Follow these guidelines:
+
+### 2.1 Use `EXPECT_CALL` to Specify Must-Happen Calls
+`EXPECT_CALL` sets expectations on your mock methods about how, when, and with what arguments they are called.
+
+
+- Limit expectations to what matters to the test intent. Over-specification leads to brittle tests.
+- Avoid setting expectations on every method in the mock—use `ON_CALL` or let them be uninteresting if you don’t care about them.
+
+### 2.2 Use Matchers Effectively
+
+Matchers specify how to match call arguments:
+
+- Use simple matchers like `_` (wildcard) when argument values are irrelevant.
+- Use specific matchers (`Eq()`, `Ge()`, `NotNull()`, `Contains()`, etc.) when the argument must meet certain criteria.
+- Combine matchers with `AllOf()`, `AnyOf()`, or custom predicates as needed.
+
+### Example
+```cpp
+EXPECT_CALL(mock, SendData(Ge(0), _));  // Expects first arg >= 0, any second
+EXPECT_CALL(mock, Log(StrEq("error"), _));  // Exact match on first arg
+```
+
+### 2.3 Cardinalities: Control How Many Times Methods Are Called
+
+Specify how many times you expect a method to be called with `Times()`:
+
+- Use `Times(Exactly(n))` or `Times(n)` for precise call counts.
+- Use `Times(AnyNumber())` for methods that can be called multiple or zero times.
+- Use `Times(AtLeast(n))` or `Times(AtMost(n))` for fuzzy cardinalities.
+
+GoogleMock infers cardinality if you omit `Times()`:
+- If you use `WillOnce()` *n* times and no `WillRepeatedly()`, cardinality is `Times(n)`.
+- If you use `WillRepeatedly()`, cardinality is `Times(AtLeast(n))`.
+
+### Pitfall to Avoid
+```cpp
+int n = 0;
+EXPECT_CALL(mock, Foo()).WillRepeatedly(Return(n++));  // Wrong: n++ evaluated once
+```
+Here `n++` is evaluated once when setting expectation, not on each call. Instead, use lambdas:
+```cpp
+EXPECT_CALL(mock, Foo()).WillRepeatedly([&n]() { return n++; });
+```
+
+### 2.4 Ordering Expectations
+
+By default, call expectations can be matched in any order.
+
+To enforce call order:
+
+- Use the `InSequence` object to define a strict order within its scope.
+- Use the `.After()` clause to specify that an expectation must be matched after other expectations.
+- Use multiple `Sequence` objects and `.InSequence()` for partial orders.
+
+Example:
+```cpp
+Sequence s1, s2;
+EXPECT_CALL(mock, A()).InSequence(s1, s2);
+EXPECT_CALL(mock, B()).InSequence(s1);
+EXPECT_CALL(mock, C()).InSequence(s2);
+```
+
+The above implies call order: A before B, and A before C; B and C order undefined.
+
+### 2.5 Use `.RetiresOnSaturation()` to Retire Expectations
+Without it, expectations in a sequence remain active after their call count is reached, often causing conflicts. Use `.RetiresOnSaturation()` for higher maintainability when the expectation can expire after being met.
+
+---
+
+## 3. Setting Default Behavior with `ON_CALL`
+
+Many mock methods don’t require explicit expectations every time they are called. Use `ON_CALL` to specify default behaviors:
+
+- `ON_CALL(mock, Method(args)).WillByDefault(action);` sets the default action executed whenever the method is called without an explicit matching `EXPECT_CALL`.
+- Does not set an expectation; does not fail if uncalled.
+
+Example:
+```cpp
+ON_CALL(mock, GetData(_))
+    .WillByDefault(Return(42));
+```
+
+Use `ON_CALL` for routine behavior shared by many tests, and reserve `EXPECT_CALL` for calls you want to verify.
+
+---
+
+## 4. Using Actions to Customize Mock Behavior
+
+Actions determine what happens when a mock method is called.
+
+### Common Action Types
+- `Return(value)` — returns a value.
+- `ReturnRef(variable)` — returns a reference.
+- `Invoke(func)` — calls a real function or a lambda.
+- `DoAll(action1, action2, ...)` — performs multiple actions sequentially.
+- `SetArgPointee<N>(value)` — sets the value pointed to by the N-th argument.
+
+### Best Practices
+- Use lambdas or `Invoke()` when your action logic is complex or when you want to return fresh objects on each call.
+- Chain actions with `DoAll()` when you need to combine side effects and returns.
+
+Example:
+```cpp
+EXPECT_CALL(mock, Transform(_))
+    .WillOnce(DoAll(SetArgPointee<0>(100), Return(true)));
+```
+
+---
+
+## 5. Tips for Maintainable and Robust Tests
+
+### 5.1 Avoid Overspecification
+
+Only expect what matters explicitly. Avoid requiring parameters or call orders that your system under test should not depend on.
+
+### 5.2 Use Sequences Wisely
+
+Order calls when the correctness depends on it. Avoid strict ordering for unrelated calls.
+
+### 5.3 Namespaces and `using` Declarations
+
+To improve readability, declare frequently used GoogleTest symbols once per file:
+```cpp
+using ::testing::Return;
+using ::testing::_;
+```
+
+### 5.4 Verify Mocks Explicitly if Needed
+
+Mocks automatically verify expectations on destruction. For heap-allocated mocks or delayed verification, use:
+```cpp
+Mock::VerifyAndClearExpectations(&mock_object);
+```
+
+### 5.5 Handle Uninteresting Calls Appropriately
+
+- Use `NiceMock` to ignore uninteresting calls.
+- Use `NaggyMock` to warn about them.
+- Use `StrictMock` to fail on uninteresting calls.
+
+---
+
+## 6. Common Pitfalls and Troubleshooting
+
+| Issue | Solution |
+|-|-|
+| Uninteresting call warnings clutter output | Use `NiceMock` or add a catch-all `EXPECT_CALL` with `Times(AnyNumber())` for that method.
+| Too many or too few `WillOnce` actions for expected call count | Ensure the number of `WillOnce` matches or is less than calls expected; use `WillRepeatedly` for infinite calls.
+| Unexpected call despite `ON_CALL` set | `ON_CALL` does not set expectations; add `EXPECT_CALL` if call must be verified.
+| Test fails due to order violations | Use `InSequence` or `After` clauses to specify expected order.
+| Compiler issues with mock methods taking types with commas | Wrap complex types in extra parentheses or use type aliases in mocks.
+
+---
+
+## 7. Summary
+
+Adopt the right mock wrapper for your test objectives: `NiceMock` for quiet toleration, `NaggyMock` for warnings while developing, and `StrictMock` for strict enforcement. Use `EXPECT_CALL` to express explicit behaviors and `ON_CALL` for defaults. Specify matchers and cardinalities thoughtfully to balance test strictness and flexibility. Define ordering when relevant, and use `.RetiresOnSaturation` for managing sticky expectations.
+
+A well-crafted mock defines test contracts clearly, leading to maintainable, robust test suites that highlight real behavioral contracts and reduce maintenance pain.
+
+---
+
+## 8. Additional Resources
+
+- [GoogleMock Cheat Sheet](https://google.github.io/googletest/gmock_cheat_sheet.html) — Quick reference for macros and idioms.
+- [Mocking Reference](https://google.github.io/googletest/reference/mocking.html) — Detailed syntax and semantics.
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html) — Recipes and advanced usage.
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html) — Beginner-friendly guide.
+
+---
+
+<Info>
+Strong adherence to these guidelines ensures high-value tests that are easier to write, maintain, and diagnose. Choose mock wrappers deliberately, specify expectations with purpose, and leverage actions and matchers to shape your tests with confidence.
+</Info>
