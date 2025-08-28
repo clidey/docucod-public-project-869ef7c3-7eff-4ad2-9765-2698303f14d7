@@ -1,0 +1,324 @@
+---
+title: "Creating Custom Assertions and Matchers"
+description: "Step-by-step instructions for defining your own assertions and matchers to express domain-specific test logic cleanly. Covers best practices for extending the testing framework without sacrificing readability or maintainability."
+---
+
+# Creating Custom Assertions and Matchers
+
+This guide will walk you through defining your own custom assertions and matchers in GoogleTest and GoogleMock. Custom matchers allow you to express domain-specific test logic cleanly, improve readability, and maintainability of your tests. You’ll learn practical, step-by-step instructions for creating various kinds of matchers, best practices to keep your tests expressive and robust, and tips for troubleshooting common pitfalls.
+
+---
+
+## Why Create Custom Matchers?
+
+Custom matchers let you:
+
+- **Express intent clearly:** Instead of writing verbose checks inline, give a name to complex conditions.
+- **Reuse validation logic:** Encapsulate checks to avoid duplication across tests.
+- **Improve error messages:** Provide descriptive failure messages tailored to your domain.
+
+Consider this example:
+
+```cpp
+EXPECT_THAT(foo.GetValue(), Eq(42));
+```
+
+What if the condition is more complex, say, checking if a container has exactly 3 positive even numbers? Writing that inline directly inside the test can be cumbersome and hard to read. Instead, defining a custom matcher like `Has3PositiveEvenNumbers()` simplifies your test and clarifies your intent.
+
+---
+
+## Prerequisites
+
+Before creating custom assertions and matchers, you should:
+
+- Have basic familiarity with GoogleTest and GoogleMock frameworks.
+- Understand built-in assertions (`EXPECT_*`, `ASSERT_*`, `EXPECT_THAT`) and matchers (`Eq()`, `Gt()`, `_` etc.).
+- Know how to write basic mock classes and set expectations in GoogleMock.
+
+Refer to [Getting Started: Your First Test](https://google.github.io/googletest/gmock_for_dummies.html#getting-started) and the [GoogleTest Primer](primer.md) if you need foundational knowledge.
+
+---
+
+## Overview of Custom Matcher Creation
+
+There are several approaches for defining custom matchers, ordered here by complexity and flexibility:
+
+| Approach                              | Use When                                    |
+|-------------------------------------|---------------------------------------------|
+| **MATCHER / MATCHER_P macros**       | Quick and flexible matchers with simple logic|
+| **Monomorphic Matcher Classes**      | When you need more control for one type       |
+| **Polymorphic Matcher Classes**      | When matcher should work for multiple types   |
+| **Composite Matchers**                | To build matchers out of other matchers       |
+| **Cardinalities and Actions**        | For advanced matching and controlling call behavior |
+
+This guide focuses on starting with `MATCHER` macros and then progresses into writing your own matcher classes for advanced use cases.
+
+---
+
+## Defining Simple Custom Matchers with `MATCHER` Macros
+
+GoogleMock provides the `MATCHER` and `MATCHER_P` macros to quickly define simple custom matchers with minimal boilerplate.
+
+### MATCHER Macro
+
+```cpp
+MATCHER(IsEven, "") {
+  return (arg % 2) == 0;
+}
+```
+
+- `IsEven` is the matcher name.
+- The lambda body returns a `bool` indicating whether the argument matches.
+- `arg` is the value passed to the matcher.
+- The empty string `""` is an optional description.
+
+#### Usage
+
+```cpp
+EXPECT_CALL(mock, Foo(IsEven()));
+EXPECT_THAT(value, IsEven());
+```
+
+If the assertion fails, GoogleTest automatically generates a readable message:
+
+```
+Value of: value
+Expected: is even
+  Actual: 7
+```
+
+### MATCHER_P Macro (Parameterized Matchers)
+
+You can add parameters for more flexible matchers.
+
+```cpp
+MATCHER_P(IsDivisibleBy, n, "") {
+  return (arg % n) == 0;
+}
+```
+
+Usage:
+
+```cpp
+EXPECT_THAT(value, IsDivisibleBy(3));
+```
+
+It’ll print the parameter in failure messages:
+
+```
+Expected: is divisible by 3
+``` 
+
+### Tips for MATCHER Macros
+
+- Use `*result_listener << "message";` inside the matcher body to add custom failure explanations.
+- You can use `EXPECT_...` macros inside to simplify conditions with clear errors.
+
+Example with additional failure message:
+
+```cpp
+MATCHER(IsPrime, "") {
+  if (arg < 2) {
+    *result_listener << "which is less than 2";
+    return false;
+  }
+  for (int i = 2; i * i <= arg; ++i) {
+    if (arg % i == 0) {
+      *result_listener << "which is divisible by " << i;
+      return false;
+    }
+  }
+  return true;
+}
+```
+
+---
+
+## Defining Monomorphic Matcher Classes
+
+For more control or reusability, define a class implementing the matcher interface.
+
+### Matcher Interface
+
+Your class should:
+
+- Define `using is_gtest_matcher = void;` (marker).
+- Implement:
+  - `bool MatchAndExplain(const T& value, std::ostream* listener) const` to check matching.
+  - `void DescribeTo(std::ostream* os) const` to describe matcher.
+  - `void DescribeNegationTo(std::ostream* os) const` to describe negation.
+
+### Example: DivisibleBy7 Matcher
+
+```cpp
+class DivisibleBy7Matcher {
+ public:
+  using is_gtest_matcher = void;
+
+  explicit DivisibleBy7Matcher(int divisor) : divisor_(divisor) {}
+
+  bool MatchAndExplain(int n, std::ostream* os) const {
+    if (n % divisor_ == 0) return true;
+    if (os) *os << "with remainder " << (n % divisor_);
+    return false;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "is divisible by " << divisor_;
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "is not divisible by " << divisor_;
+  }
+
+ private:
+  const int divisor_;
+};
+
+::testing::Matcher<int> DivisibleBy7(int divisor) {
+  return ::testing::Matcher<int>(new DivisibleBy7Matcher(divisor));
+}
+```
+
+### Usage
+
+```cpp
+EXPECT_THAT(value, DivisibleBy7(7));
+```
+
+---
+
+## Defining Polymorphic Matcher Classes
+
+When your matcher should work with multiple types, make `MatchAndExplain()` a template.
+
+### Example: NotNull Matcher
+
+```cpp
+class NotNullMatcher {
+ public:
+  using is_gtest_matcher = void;
+
+  template <typename T>
+  bool MatchAndExplain(T* pointer, std::ostream* /*os*/) const {
+    return pointer != nullptr;
+  }
+
+  void DescribeTo(std::ostream* os) const {
+    *os << "is not null";
+  }
+
+  void DescribeNegationTo(std::ostream* os) const {
+    *os << "is null";
+  }
+};
+
+inline ::testing::PolymorphicMatcher<NotNullMatcher> NotNull() {
+  return ::testing::MakePolymorphicMatcher(NotNullMatcher());
+}
+```
+
+### Usage
+
+```cpp
+EXPECT_CALL(mock, Foo(NotNull()));
+```
+
+---
+
+## Creating Composite Matchers
+
+You can compose existing matchers to express more complex logic.
+
+For example, `AllOf()`, `AnyOf()`, and `Not()` combine matchers logically.
+
+Example:
+
+```cpp
+EXPECT_THAT(value, AllOf(Ge(5), Le(10), Ne(7)));
+```
+
+When implementing your own composite matcher, store sub-matchers as `Matcher<T>` and
+call their `DescribeTo()` and `MatchAndExplain()` methods.
+
+See existing examples in `gmock-matchers.h` for detailed patterns.
+
+---
+
+## Using Matchers in Assertions
+
+GoogleTest’s `EXPECT_THAT` and `ASSERT_THAT` macros accept matchers:
+
+```cpp
+EXPECT_THAT(value, StartsWith("Hello"));
+EXPECT_THAT(container, ElementsAre(1, 2, 3));
+```
+
+Use your custom matchers to improve expressiveness:
+
+```cpp
+EXPECT_THAT(foo, DivisibleBy7(7));
+```
+
+---
+
+## Best Practices for Custom Matchers
+
+- **Keep matchers pure:** The matcher must have no side effects and be functionally pure.
+- **Provide clear descriptions:** Use `DescribeTo()` and `DescribeNegationTo()` for meaningful messages.
+- **Use `result_listener` / output stream:** To explain match failure details clearly.
+- **Prefer polymorphic matchers** if your matcher can apply to multiple types.
+- **Leverage built-in matchers** inside your matchers if possible to simplify logic.
+
+---
+
+## Troubleshooting Common Issues
+
+- **Matcher not called:** Ensure matchers are passed by value or wrapped correctly.
+- **Unclear failure messages:** Improve `DescribeTo()` or add details in `MatchAndExplain()`.
+- **Incorrect overload ambiguity:** Use `SafeMatcherCast<T>()` to disambiguate matcher types.
+- **Side effects:** Avoid calling mock methods inside matcher predicates.
+- **Compilation errors:** Verify types, template parameters, and parentheses in complex macros.
+
+---
+
+## Advanced Topics
+
+### Writing New Cardinalities
+
+Cardinalities control how many times an expectation is allowed to be called.
+You can write custom cardinality classes inheriting from `CardinalityInterface`.
+
+### Writing New Actions
+
+For customized mock results or side effects, implement your own action by:
+
+- Defining a callable (lambda or functor) with signature matching your mock method.
+- Using `ACTION`, `ACTION_P` macros or implement `ActionInterface`.
+
+Actions allow you to specify complex behavior on mock calls.
+
+---
+
+## Next Steps & Related Documentation
+
+- [gMock Cookbook](docs/gmock_cook_book.md): Practical recipes for mocking, matchers, and actions.
+- [Matchers Reference](api_reference/matchers_assertions/builtin_matchers): Details on built-in matchers.
+- [Assertions Reference](docs/reference/assertions.md): How to assert with matchers in GoogleTest.
+- [Mocking Reference](docs/reference/mocking.md): Core mocking macros and classes.
+- [Advanced Testing Patterns](googletest-guides/advanced-testing-patterns/custom-assertions.md): Extending testing with custom constraints.
+
+---
+
+## Resources
+
+- Official gMock documentation: https://google.github.io/googletest/gmock_cook_book.html
+- Examples and tutorials included with GoogleTest source code
+
+---
+
+## Summary
+
+Custom assertions and matchers empower you to express complex testing logic succinctly, with clear intent and robust failure diagnostics. Starting from quick `MATCHER` macros to full matcher and action classes, you can tailor GoogleTest and GoogleMock to your domain's testing needs.
+
+Use best practices to keep your matchers pure and descriptive, and integrate them seamlessly with your test expectations and assertions.
