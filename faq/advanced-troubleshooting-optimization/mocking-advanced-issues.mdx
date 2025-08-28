@@ -1,0 +1,227 @@
+---
+title: "Advanced Mocking Questions"
+description: "Addresses advanced scenarios and edge cases when using GoogleMock, such as complex expectation handling, strict/nice/naggy mocks, and troubleshooting subtle mocking failures."
+---
+
+# Advanced Mocking Questions in GoogleMock
+
+This FAQ addresses advanced scenarios and edge cases when working with GoogleMock. It covers complex expectation handling, the use of strict, nice, and naggy mocks, and troubleshooting subtle mocking failures to help you master GoogleMock’s powerful capabilities.
+
+---
+
+### 1. Understanding Complex Expectation Handling
+
+#### How do I control the number of times a mock method can be called with different return values on each call?
+
+You use chained `.WillOnce()` calls followed optionally by a single `.WillRepeatedly()`. For example:
+
+```cpp
+EXPECT_CALL(mock_obj, GetValue())
+    .WillOnce(Return(1))       // 1st call returns 1
+    .WillOnce(Return(2))       // 2nd call returns 2
+    .WillRepeatedly(Return(3)); // All later calls return 3
+```
+
+*Important*: When you use multiple `.WillOnce()` clauses without `.Times()`, GoogleMock infers the call count equals the number of `.WillOnce()` calls. Adding `.Times()` explicitly overrides this inference.
+
+#### How can I specify expectations that calls occur in a specific order or partial order?
+
+- Use the `InSequence` helper to enforce a strict order of calls within a scope:
+
+```cpp
+{
+  InSequence seq;
+  EXPECT_CALL(mock_obj, FirstCall());
+  EXPECT_CALL(mock_obj, SecondCall());
+}
+```
+
+- For partial ordering where some calls must precede others but some orderings can be flexible, create `Sequence` objects and assign expectations to one or more sequences:
+
+```cpp
+Sequence s1, s2;
+EXPECT_CALL(mock_obj, A()).InSequence(s1, s2);  // A must precede B and C
+EXPECT_CALL(mock_obj, B()).InSequence(s1);
+EXPECT_CALL(mock_obj, C()).InSequence(s2);
+```
+
+- Alternatively, specify prerequisites explicitly using `.After()`:
+
+```cpp
+Expectation e1 = EXPECT_CALL(mock_obj, Init());
+EXPECT_CALL(mock_obj, Execute()).After(e1);
+```
+
+#### What does `.RetiresOnSaturation()` do?
+
+This clause causes an expectation to become inactive (retire) once it reaches its upper bound of expected calls. This is useful when you want overlapping expectations but want one to give way to another after being fulfilled.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock_obj, SetValue(7))
+    .Times(2)
+    .RetiresOnSaturation();
+EXPECT_CALL(mock_obj, SetValue(_)).Times(AnyNumber());
+```
+
+After two calls with argument `7`, the first expectation retires, and further calls match the second expectation.
+
+---
+
+### 2. Using Nice, Naggy, and Strict Mocks
+
+GoogleMock offers three mocking modes to handle uninteresting calls differently.
+
+| Mock Type   | Uninteresting Call Behavior               | Use Case                             |
+|-------------|------------------------------------------|------------------------------------|
+| **NiceMock**  | Suppresses warnings entirely             | When uninteresting calls are expected and warnings are distracting |
+| **NaggyMock** | Prints warnings on uninteresting calls  | Default mode during development to detect unconsidered calls      |
+| **StrictMock**| Treats uninteresting calls as test failures | When you want to catch *all* unexpected interactions strictly    |
+
+To use these, wrap your mock class with the wrapper:
+
+```cpp
+NiceMock<MockClass> nice_mock;
+NaggyMock<MockClass> naggy_mock;
+StrictMock<MockClass> strict_mock;
+```
+
+**Important:**
+- These only affect *uninteresting calls* (calls to methods with no expectations). Unexpected calls (calls violating existing expectations) always cause errors.
+- They only work correctly for mock methods defined directly with `MOCK_METHOD` inside your mock class.
+- `StrictMock` and `NiceMock` may behave unexpectedly if your mock’s destructor is not virtual.
+
+**Best Practice:** 
+- Use `NiceMock` for routine tests to reduce noise.
+- Use `NaggyMock` (default) for initial test development to detect unexpected calls.
+- Use `StrictMock` sparingly, as it may cause brittle tests that fail on harmless refactors.
+
+---
+
+### 3. Troubleshooting Subtle Mocking Failures
+
+#### Why am I getting warnings about "Uninteresting mock function call" even though I set `ON_CALL`?
+
+`ON_CALL` sets default behavior but does *not* mark an expectation that a call *must* occur. If you don’t have `EXPECT_CALL` for a mock method but the method is called, GoogleMock prints a warning about an uninteresting call.
+
+To suppress this warning:
+
+- Use `NiceMock` on the mock object.
+- Or add a "catch-all" expectation with `EXPECT_CALL(mock, Method(_)).Times(AnyNumber())`.
+
+Avoid blindly adding `EXPECT_CALL` without `.Times()` as it can make tests fragile and hard to maintain.
+
+#### How can I debug why an expectation is not satisfied or why calls don’t match my expectations?
+
+Run your test with `--gmock_verbose=info`. This makes GoogleMock print detailed traces of all mock calls, expectations evaluated, arguments passed, and decisions made.
+
+Additionally, check for:
+
+- Use of argument matchers that don't match actual call arguments.
+- Cardinality mismatch: expected call counts vs actual calls.
+- Ordering constraints not met.
+- Retired expectations unexpectedly active.
+
+#### I have multiple expectations on the same method but some are shadowed and never matched. What's going on?
+
+GoogleMock matches mock calls to expectations *in reverse order*; the last defined matching expectation wins. To ensure your more specific expectations are matched, place them *after* any catch-all or general expectations.
+
+Example:
+
+```cpp
+EXPECT_CALL(mock, Foo(_)).Times(AnyNumber());  // catch-all
+EXPECT_CALL(mock, Foo(42)).Times(1);          // more specific
+```
+
+Here, calls with argument 42 will match the second expectation.
+
+#### What if I get excessive call errors?
+
+This means a mock method was called more times than expected by the .Times() clause. To fix:
+
+- Increase the allowed times in `.Times()` or adjust `.WillOnce()`/`.WillRepeatedly()` clauses.
+- Use `.RetiresOnSaturation()` if you want expectations to deactivate after their limit.
+- Check the test logic calling the mock is not invoking the method unexpectedly.
+
+#### Why does GoogleMock report some expectations failed multiple times?
+
+GoogleMock prints errors at the moment a violation happens and also when the mock object destructs. They refer to different points in time but might appear similar; this is expected.
+
+#### I want to test that a mock object is destructed at the right time. How?
+
+You cannot mock destructors directly. Instead, add a `MOCK_METHOD(void, Die, ());` to your mock class and invoke it from the destructor:
+
+```cpp
+class MockFoo : public Foo {
+ public:
+  MOCK_METHOD(void, Die, ());
+  ~MockFoo() override { Die(); }
+};
+```
+
+Now set expectations on `Die()` to assert destruction timing.
+
+---
+
+### 4. Advanced Tips and Best Practices
+
+#### Defining Mock Methods With Commas in Arguments or Return Types
+
+Wrap return or argument types containing commas in extra parentheses or use type aliases:
+
+```cpp
+using BoolAndInt = std::pair<bool, int>;
+MOCK_METHOD(BoolAndInt, GetPair, ());
+```
+
+#### Mocking Overloaded Methods
+
+Define mock methods for each overload explicitly. To avoid hiding base class methods, use `using Base::Method;` in your mock class.
+
+#### Delegating Calls to Real or Fake Objects
+
+You can delegate default actions to a real or fake implementation inside your mock, combining mock verification with realistic behavior:
+
+```cpp
+ON_CALL(*this, Method(_)).WillByDefault([this](Args... args) {
+  return real_object.Method(std::forward<Args>(args)...);
+});
+```
+
+#### Moving Expectation Setup Out of the Test Body
+
+Set default actions with `ON_CALL` in the test fixture’s `SetUp()` or mock constructor, and restrict `EXPECT_CALL` usage in tests to only what you want to verify. This keeps tests maintainable and less brittle.
+
+#### Beware Sticky Expectations
+
+Expectations remain active even after they’ve been satisfied up to their call count unless `.RetiresOnSaturation()` is used or they are part of a sequence. Without retiring, subsequent calls that match a saturated expectation cause failures.
+
+---
+
+### 5. Summary of Clauses and Their Use in `EXPECT_CALL` and `ON_CALL`
+
+| Clause                  | Description                                    | Usage Notes                             |
+|-------------------------|------------------------------------------------|----------------------------------------|
+| `.With(matcher)`        | Additional matcher on all arguments as a tuple | At most once; must be first clause      |
+| `.Times(cardinality)`   | How many times the call is expected             | At most once; inferred if omitted       |
+| `.InSequence(sequences)`| Specifies sequences the call participates in    | Can appear multiple times                |
+| `.After(expectations)`  | Specifies pre-requisite expectations            | Can appear multiple times                |
+| `.WillOnce(action)`     | Action performed on a single matching call      | Multiple allowed                        |
+| `.WillRepeatedly(action)`| Action for all remaining calls after WillOnce   | At most once; sets call count lower bound|
+| `.RetiresOnSaturation()`| Retires expectation after upper bound reached  | At most once; last clause                |
+
+---
+
+### References and Further Reading
+
+- [GoogleMock Mocking Reference](reference/mocking.md)
+- [gMock Cookbook](https://google.github.io/googletest/gmock_cook_book.html)
+- [gMock for Dummies](https://google.github.io/googletest/gmock_for_dummies.html)
+- [gMock Cheat Sheet](reference/gmock_cheat_sheet.md)
+- [Nice, Naggy & Strict Mocks](reference/googlemock-api/nice-strict-mocks.md)
+- [Using GoogleMock ON_CALL and EXPECT_CALL](reference/googlemock-api/setting-expectations.md)
+
+---
+
+This FAQ equips you with the detailed understanding necessary to harness GoogleMock effectively in complex and edge-case scenarios, helping you write robust, maintainable, and precise C++ tests.

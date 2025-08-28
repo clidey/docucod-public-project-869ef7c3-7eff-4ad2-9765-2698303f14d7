@@ -1,0 +1,295 @@
+---
+title: "Custom Assertions & Extending Matchers"
+description: "See how GoogleTest and GoogleMock allow defining custom assertions and composable matchers. Understand best practices and internal extension points for adapting the test framework to complex or domain-specific cases."
+---
+
+# Custom Assertions & Extending Matchers
+
+GoogleTest and GoogleMock empower you to go beyond the built-in assertions and matchers by allowing you to create 
+custom assertions and matchers tailored to your specific domain and testing needs. This page helps you understand how to define powerful, expressive, and composable checks that improve test clarity, debuggability, and maintainability.
+
+---
+
+## Why Extend Assertions and Matchers?
+
+Standard assertions like `EXPECT_EQ` or `ASSERT_TRUE` are effective for many tests. However, real-world scenarios often require:
+
+- Verifying complex invariants or properties that involve multiple values or objects
+- Producing failure messages that clearly explain why a check failed, with contextual information
+- Expressing rich domain semantics directly in your tests for readability
+- Reusing complex validation logic with composability and parameterization
+
+Custom assertions and matchers fill these gaps by letting you encapsulate complex logic and generate user-friendly, informative diagnostics.
+
+---
+
+## Defining Custom Assertions
+
+Custom assertions in GoogleTest revolve around *predicate assertions*. Unlike simple boolean assertions (e.g., `EXPECT_TRUE(condition)`), these allow attaching detailed messages automatically and can print internal states or calculated diagnostics.
+
+### Using Predicate Assertion Macros
+
+GoogleTest offers a family of predicate macros:
+
+- `EXPECT_PRED1(pred, val1)` through `EXPECT_PRED5(pred, val1, ..., val5)` 
+  - Use when `pred` is a function or functor returning a `bool`.
+- `EXPECT_PRED_FORMAT1(pred_formatter, val1)` through `EXPECT_PRED_FORMAT5(pred_formatter, val1, ..., val5)` 
+  - Use when `pred_formatter` returns a `testing::AssertionResult` for richer diagnostics.
+
+Corresponding `ASSERT_` versions exist (`ASSERT_PRED*`) that abort the current test function on failure.
+
+### Writing a Predicate Function (Boolean Return)
+
+A predicate function can be any callable returning `bool`. The arguments can be any test values you want to validate together.
+
+Example:
+
+```cpp
+// Returns true if n is even.
+bool IsEven(int n) {
+  return (n % 2) == 0;
+}
+...
+EXPECT_PRED1(IsEven, value);  // Checks if value is even.
+```
+
+Limitations:
+- On failure, only shows "predicate returned false", no explanation.
+
+### Writing a Predicate-Formatter Function (AssertionResult Return)
+
+For richer failure messages, define a predicate that returns `testing::AssertionResult`. This allows streaming detailed failure explanations.
+
+Example:
+
+```cpp
+testing::AssertionResult IsEven(int n) {
+  if ((n % 2) == 0) {
+    return testing::AssertionSuccess();
+  } else {
+    return testing::AssertionFailure() << "the value " << n << " is odd";
+  }
+}
+...
+EXPECT_PRED_FORMAT1(IsEven, value);
+```
+
+This will produce output like:
+
+```
+Value of: value
+  Actual: false (the value 3 is odd)
+Expected: true
+```
+
+This approach also helps with `EXPECT_FALSE` or `ASSERT_FALSE` by optionally providing messages for success.
+
+### Writing Predicate-Formatter Functors
+
+You can use functors with `operator()` templates returning `AssertionResult` to make predicates polymorphic:
+
+```cpp
+struct IsEvenFunctor {
+  template <typename T> testing::AssertionResult operator()(T n) const {
+    if ((n % 2) == 0) return testing::AssertionSuccess();
+    return testing::AssertionFailure() << n << " is odd";
+  }
+};
+
+EXPECT_PRED_FORMAT1(IsEvenFunctor(), value);
+```
+
+### Common Usage Tips
+
+- Always evaluate arguments **once** inside your predicates.
+- Stream sufficient context (values, differences) in failures for easy debugging.
+- Prefer `AssertionResult`-based predicates when failure explanation matters.
+- Use `EXPECT_PRED_FORMAT*` variants if argument types do not support streaming.
+
+---
+
+## Using gMock Matchers as Assertions
+
+GoogleMock matchers extend predicate assertions by allowing *composable, polymorphic matchers* in both mock expectations and test assertions.
+
+### The `EXPECT_THAT` / `ASSERT_THAT` Macros
+
+Instead of writing complex boolean expressions, you write:
+
+```cpp
+EXPECT_THAT(actual_value, Matcher);
+ASSERT_THAT(actual_value, Matcher);
+```
+
+where `Matcher` can be any standard or custom gMock matcher.
+
+Example:
+
+```cpp
+EXPECT_THAT(value, StartsWith("Hello"));
+EXPECT_THAT(value, MatchesRegex("\d{3}-\d{2}-\d{4}"));
+ASSERT_THAT(value, AllOf(Gt(5), Lt(10)));
+```
+
+This syntax reads like English, produces detailed failure messages, and supports rich composition.
+
+---
+
+## Defining Custom Matchers with `MATCHER` Macros
+
+For most custom matchers, use the provided macro family to quickly define matchers:
+
+- `MATCHER(name, description) { ... }`
+- `MATCHER_P(name, param, description) { ... }`
+- `MATCHER_P2(name, p1, p2, description) { ... }`
+
+... up to `MATCHER_P10` for matchers with up to 10 parameters.
+
+### Basic Matcher Example
+
+```cpp
+MATCHER(IsDivisibleBy7, "") {
+  return (arg % 7) == 0;
+}
+
+EXPECT_THAT(n, IsDivisibleBy7());
+```
+
+Description strings control printed messages; if empty, matcher name generates default description.
+
+### Advanced Matcher with Custom Description and Explanation
+
+```cpp
+MATCHER_P(InClosedRange, low, high, 
+          absl::StrCat(negation ? "isn't" : "is", " in range [", 
+                       PrintToString(low), ", ", PrintToString(high), "]")) {
+  if (arg >= low && arg <= high) {
+    return true;
+  }
+  *result_listener << "which is " << arg << ", out of range";
+  return false;
+}
+```
+
+### Important Matcher Concepts
+
+- `arg` is the value being matched.
+- `result_listener` is the stream for diagnostic explanations.
+- `negation` is a boolean indicating if the matcher is negated.
+- Matchers are polymorphic and resolve argument types at use site.
+
+### Tips for Writing Matchers
+
+- Make them pure functions with no side effects.
+- Provide clear, helpful failure messages.
+- Use `SafeMatcherCast` to handle compatible argument types.
+- Leverage existing matchers for composing new matchers.
+
+---
+
+## Writing Matcher Classes Manually (Advanced)
+
+For more control or advanced use cases, implement matcher classes supporting these methods:
+
+```cpp
+class MyMatcher {
+ public:
+  using is_gtest_matcher = void; // Marks as a matcher
+
+  template <typename T>
+  bool MatchAndExplain(const T& value, std::ostream* listener) const;
+
+  void DescribeTo(std::ostream* os) const;
+  void DescribeNegationTo(std::ostream* os) const;
+};
+```
+
+Use `MakePolymorphicMatcher(MyMatcher())` to get a polymorphic matcher.
+
+---
+
+## Best Practices and Common Pitfalls
+
+- Avoid hitting uncopyable objects in matchers unless using references explicitly.
+- Provide meaningful description strings for the negated form too.
+- Keep matchers stateless and purely functional.
+- Use `EXPECT_PRED_FORMAT*` or `EXPECT_THAT` for more readable and informative tests.
+- Matchers and custom assertions can be layered and composed to build complex validation with clear failure semantics.
+
+---
+
+## Troubleshooting Custom Assertions and Matchers
+
+### Common Issues
+
+- **Silent failures or unclear messages:** Prefer using predicate-formatters or gMock matchers to get detailed diagnostics.
+- **Multiple evaluations of arguments:** Use careful argument handling; arguments in predicate assertions are evaluated once.
+- **Incorrect matcher application:** Verify matcher types and use SafeMatcherCast or explicit template instantiations if compilation fails.
+- **Side effects in matchers:** Violates matcher purity and can cause unpredictable test behavior.
+
+### Tips
+
+- Use provided examples to prototype and iteratively refine your matchers.
+- Test custom matchers standalone in simple EXPECT_THAT expressions before integrating.
+- Leverage streaming to the `result_listener` in predicate functions to explain failures.
+
+---
+
+## Summary
+
+By mastering custom assertions and matchers, you can express complex test expectations clearly and maintainably. GoogleTest and GoogleMock's flexible APIs, including predicate assertions and the matcher framework, provide the foundation to write expressive, domain-specific test checks that enhance test diagnoses and prevent fragile or opaque tests.
+
+---
+
+## Further Reading and Links
+
+- [GoogleTest Assertions Reference](reference/assertions.md)
+- [GoogleTest Advanced Topics - Predicate Assertions](docs/advanced.md#predicates)
+- [gMock Matchers Reference](reference/matchers.md)
+- [Writing Custom Matchers and Actions](guides/advanced-features-and-patterns/writing-custom-matchers-and-actions.md)
+- [GoogleMock Cookbook](gmock_cook_book.md)
+- [Effective Mocking with GoogleMock Guide](guides/advanced-features-and-patterns/effective-mocking.md)
+
+---
+
+## Example: Defining and Using a Custom Matcher
+
+```cpp
+// Define a custom matcher to check if a number is even.
+MATCHER(IsEven, "checks if a number is even") {
+  return (arg % 2) == 0;
+}
+
+// Usage inside a test
+TEST(FooTest, EvenCheck) {
+  int value = 4;
+  EXPECT_THAT(value, IsEven()) << "Value should be even";
+}
+```
+
+This will generate clear failure messages explaining if the condition fails.
+
+---
+
+## Example: Writing a Predicate-Formatter Assertion
+
+```cpp
+// More informative predicate
+testing::AssertionResult IsPrime(int n) {
+  if (n <= 1) {
+    return testing::AssertionFailure() << n << " is not prime";
+  }
+  for (int i = 2; i * i <= n; ++i) {
+    if (n % i == 0) {
+      return testing::AssertionFailure() << n << " is divisible by " << i;
+    }
+  }
+  return testing::AssertionSuccess();
+}
+
+TEST(PrimeTest, CheckPrime) {
+  EXPECT_PRED_FORMAT1(IsPrime, 9);  // Failure with explanation
+}
+```
+
+---
