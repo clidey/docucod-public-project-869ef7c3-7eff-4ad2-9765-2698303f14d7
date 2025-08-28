@@ -1,260 +1,220 @@
 ---
-title: "Debugging Test Failures and Flaky Tests"
-description: "Learn strategies for diagnosing and resolving test failures, debugging crashes, and chasing flaky or inconsistent outcomes. Provides tips for leveraging assertion output, logs, and test isolation."
+title: "Interpreting and Fixing Test Failures"
+description: "Decode test output and assertion messages to efficiently diagnose and resolve unexpected test failures, including both fatal and non-fatal errors."
 ---
 
-# Debugging Test Failures and Flaky Tests
+# Interpreting and Fixing Test Failures
 
-GoogleTest is a powerful C++ testing framework designed to give you clear insight into the behavior of your code. When tests fail or produce inconsistent (flaky) results, understanding the root causes is essential for reliable test suites and stable builds. This documentation page guides you through strategies for diagnosing test failures, handling crashes, and chasing flaky or intermittent test issues.
+When running your tests using GoogleTest, encountering failures is inevitable at some point. Understanding how to interpret these failures and efficiently diagnose their causes will accelerate your debugging and improve test quality.
+
+This guide walks you through the workflow of analyzing test failures — from decoding the test output and assertion messages to practical steps for fixing both fatal and non-fatal errors.
 
 ---
 
 ## 1. Understanding Test Failures
 
-### 1.1 Types of Test Failures
+### 1.1 Types of Failures
 
-- **Fatal Failures**: Triggered by `ASSERT_*` and `FAIL()` macros. These abort the current function immediately. For example, `ASSERT_EQ(x, y)` causes the test function to stop if the assertion fails.
+GoogleTest reports two primary types of assertion failures:
 
-- **Nonfatal Failures**: Triggered by `EXPECT_*` and `ADD_FAILURE()`. Execution continues after these, allowing multiple failures to be reported within the same test.
+- **Fatal Failure**: A failure that immediately aborts the current function. Macros starting with `ASSERT_` or explicit `FAIL()` generate these. When a fatal failure occurs, the remaining statements in the test body are skipped.
 
-- **Test Skips**: Using `GTEST_SKIP()`, you can programmatically skip tests based on runtime conditions.
+- **Non-Fatal Failure**: A failure that does not abort the test function. Macros starting with `EXPECT_` or `ADD_FAILURE()` generate these. The test continues running, allowing multiple issues to be detected in one run.
 
-### 1.2 Interpreting Failure Messages
+### 1.2 Test Failure Output Format
 
-Every failure includes detailed messages: the source file and line, expressions involved, and an optional user-provided message. GoogleTest also attempts to show actual vs expected values including diffs for strings or containers.
+When a failure occurs, GoogleTest prints details in a consistent format to help identify the problem:
 
-```cpp
-EXPECT_EQ(foo, bar) << "Check foo and bar equality";
+```none
+/path/to/source_file.cc:line_number: Failure
+Value of: expression
+  Actual: actual_value
+Expected: expected_value
+Additional message (if provided)
+
+Stack trace:
+  ...details...
 ```
 
-When this fails, the output surfaces critical information about the failure location and why it failed.
+- **Source location**: The exact file and line where the failure happened.
+- **Expression and Values**: The assertion expression, showing actual vs expected values.
+- **Messages**: Any user-provided message via streaming into the assertion.
+- **Stack trace** (optional): Provides the call stack at failure to pinpoint context.
 
-### 1.3 Getting More Context: Using `SCOPED_TRACE`
-
-When failures occur deep inside helper functions called repeatedly, it can be hard to know from which call site the failure originated. Use `SCOPED_TRACE(message)` to add contextual traces to failure messages:
-
-```cpp
-void Helper(int i) {
-  SCOPED_TRACE(testing::Message() << "Iteration " << i);
-  EXPECT_TRUE(SomeCondition());
-}
-
-TEST(MyTestSuite, Works) {
-  for (int i = 0; i < 5; ++i) {
-    Helper(i);
-  }
-}
-```
-
-Failures inside `Helper` then report which iteration they belong to.
+These details let you locate the source and reason for the failure quickly.
 
 ---
 
-## 2. Diagnosing Crashes and Fatal Failures
+## 2. Common Failure Scenarios and How to Fix Them
 
-### 2.1 Using Assertion Macros Correctly
+### 2.1 Assertion Failures due to Value Mismatches
 
-- Fatal assertion macros (`ASSERT_*` and `FAIL()`) must only be used in `void`-returning functions.
-- Avoid returning values inside statements expected to fail fatally.
-- Consider splitting complex logic into functions where assertions can be placed sensibly.
+- **Problem**: An assertion like `EXPECT_EQ(actual, expected)` fails because `actual != expected`.
+- **Fix**: Check the test input and the logic producing `actual`. Confirm if the test expectations are correct and update either the code or the test accordingly.
+- **Tip**: Use GoogleTest's rich assertion messages and streaming to add custom diagnostic details.
 
-### 2.2 Checking for Fatal Failures in Subroutines
+### 2.2 Disabled Tests
 
-GoogleTest doesn’t propagate fatal failures like exceptions. If a fatal failure happens inside a function, that function returns early but the calling test continues executing.
+- Tests or test suites prefixed with `DISABLED_` are excluded from runs.
+- **Check**: If a failing test is unexpectedly skipped, verify its name doesn't start with `DISABLED_`.
+- **Enable**: Remove the prefix or run all disabled tests with the flag `--gtest_also_run_disabled_tests`.
 
-To catch this, check `HasFatalFailure()` after such calls:
+### 2.3 Parameterized Tests Not Instantiated
+
+- If you define a value-parameterized test (`TEST_P`) but forget to instantiate it with `INSTANTIATE_TEST_SUITE_P`, GoogleTest will generate a failing synthetic test.
+- **Fix**: Add an instantiation via `INSTANTIATE_TEST_SUITE_P(...)` in your test source file.
+- **Suppress warning**: Use `GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(test_suite_name);` if intentional.
+
+### 2.4 Fatal Failures in Setup or TearDown
+
+- Failures in `SetUp()`, `SetUpTestSuite()`, `TearDown()`, or `TearDownTestSuite()` abort the related tests or entire test suites.
+- **Investigate**: Review the code inside these methods for possible assertion failures or exceptions.
+- **Fix**: Ensure proper setup conditions and cleanup; avoid aborting in these methods unless necessary.
+
+### 2.5 Exceptions and Signals
+
+- By default, GoogleTest catches exceptions and treats them as failures.
+- Use the flag `--gtest_catch_exceptions=0` to disable catching and allow debugging.
+- For signals or fatal errors, enable signal handlers with `--gtest_install_failure_signal_handler` where supported.
+
+### 2.6 Non-Deterministic or Flaky Tests
+
+- Use `--gtest_repeat=N` to run tests multiple times to catch intermittent failures.
+- Enable test shuffling with `--gtest_shuffle` to surface order dependencies.
+- Use `--gtest_fail_fast` to stop on first failure when iterating.
+
+---
+
+## 3. Using GoogleTest APIs for Diagnosing Failures
+
+### 3.1 Accessing Test and Test Suite Context
+
+At runtime inside your test code, you can query GoogleTest for information about the current test.
 
 ```cpp
-void Subroutine() {
-  ASSERT_EQ(1, 2);
-  // Control will return here before caller notices.
-}
-
-TEST(FooTest, Bar) {
-  Subroutine();
-  if (HasFatalFailure()) return;
-  // Rest of test...
-}
-```
-
-Or use `ASSERT_NO_FATAL_FAILURE(statement)` which asserts that `statement` does not produce fatal failures.
-
-### 2.3 Turning Failures into Exceptions
-
-For some test frameworks or debugging scenarios, you may want fatal failures to throw exceptions. You can add a listener that throws on fatal failures:
-
-```cpp
-class ThrowOnFailureListener : public testing::EmptyTestEventListener {
-  void OnTestPartResult(const testing::TestPartResult& result) override {
-    if (result.type() == testing::TestPartResult::kFatalFailure) {
-      throw testing::AssertionException(result);
-    }
-  }
-};
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  testing::UnitTest::GetInstance()->listeners().Append(new ThrowOnFailureListener);
-  return RUN_ALL_TESTS();
+const testing::TestInfo* test_info = testing::UnitTest::GetInstance()->current_test_info();
+if (test_info) {
+  std::cout << "Running test: " << test_info->test_suite_name()
+            << "." << test_info->name() << std::endl;
 }
 ```
 
----
+This lets you add detailed runtime diagnostics or handle error recording programmatically.
 
-## 3. Investigating Flaky Tests
+### 3.2 Recording Additional Properties
 
-### 3.1 What Are Flaky Tests?
-
-Flaky tests are tests that unpredictably pass or fail without code changes. They often stem from dependencies on external states, timing issues, or test order dependencies.
-
-### 3.2 Strategies to Tackle Flakiness
-
-- **Repeat Tests:** Use `--gtest_repeat=N` to run tests multiple times to increase failure reproduction chances.
-- **Randomize Test Order:** Use `--gtest_shuffle` and observe the random seed printed to reproduce order-related issues.
-- **Use `SCOPED_TRACE` with loops:** Helps identify which iteration or input caused failure.
-- **Check for Shared State or Side Effects:** Avoid global states altered by tests, or ensure proper cleanup.
-
-### 3.3 Test Isolation Tips
-
-- Each test runs in a fresh fixture instance to avoid state leakage.
-- Use `SetUpTestSuite()` and `TearDownTestSuite()` only for truly shared, read-only or stateless resources.
-- Avoid dependencies between tests (no test should depend on the outcome of another).
-
----
-
-## 4. Capturing Assertion Failures in Test Code
-
-### 4.1 Testing That a Statement Fails
-
-When writing tests to check your own test helpers or GoogleTest extensions, you often want to assert that a statement produces a failure. Use the macros:
-
-- `EXPECT_FATAL_FAILURE(statement, "message substring")`
-- `EXPECT_NONFATAL_FAILURE(statement, "message substring")`
-
-These verify that the statement triggers exactly one fatal/nonfatal failure whose message contains the specified substring.
-
-For example:
+You can log key/value pairs related to the current test using:
 
 ```cpp
-EXPECT_FATAL_FAILURE(ASSERT_EQ(1, 2), "Expected equality of these values");
+testing::Test::RecordProperty("key", "value");
 ```
 
-### 4.2 Catching Failures in Multithreaded Code
+These will be included in XML (or JSON) test reports generated with the `--gtest_output` flag, aiding in later analysis.
 
-GoogleTest also provides `_ON_ALL_THREADS` versions:
+### 3.3 Checking for Failures in Subroutines
 
-- `EXPECT_FATAL_FAILURE_ON_ALL_THREADS`
-- `EXPECT_NONFATAL_FAILURE_ON_ALL_THREADS`
+If you call a helper function inside a test that may emit fatal failures, the test function continues normally unless you check for failures explicitly.
 
-to catch failures occurring in other threads.
-
-**Note**: Local variables cannot be used inside these macros due to macro expansion limits.
-
----
-
-## 5. Using Test Properties and Logs for Diagnosis
-
-### 5.1 Recording Additional Test Properties
-
-Use `RecordProperty("key", value)` inside tests or fixtures to log extra data that gets included in the XML output.
-
-For example:
+Use `HasFatalFailure()` to detect if any fatal failure has occurred in the current test's thread:
 
 ```cpp
-TEST(MyTest, LogsProperties) {
-  RecordProperty("MyKey", 42);
-  EXPECT_TRUE(DoWork());
+if (testing::Test::HasFatalFailure()) {
+  return;  // Stop test execution early after failure
 }
 ```
 
-These properties help correlate failures with additional context.
+This simulates exception-like control flow and prevents crashes due to failed preconditions.
 
-### 5.2 Streaming Messages in Assertions
+### 3.4 Using `EXPECT_NO_FATAL_FAILURE` and `ASSERT_NO_FATAL_FAILURE`
 
-Custom failure messages can be streamed into any assertion using `<<`:
-
-```cpp
-EXPECT_EQ(1, result) << "Returned unexpected value for input: " << input_data;
-```
-
-They help pinpoint failure scenarios without extra print statements.
-
----
-
-## 6. Debugging Workflow Summary
-
-<Steps>
-<Step title="Run Tests with Detailed Output">
-Use GoogleTest’s default or verbose output to spot failing tests and review assertion messages including file and line information.
-</Step>
-<Step title="Re-run Failing Test only">
-Run tests matching the filter for targeted debugging: `--gtest_filter=TestSuiteName.TestName`
-</Step>
-<Step title="Add SCOPED_TRACE for Context">
-Wrap suspicious code blocks or loop iterations with `SCOPED_TRACE` to identify exact cause points.
-</Step>
-<Step title="Repeat and Shuffle to Reproduce">
-Use `--gtest_repeat` and `--gtest_shuffle` with the printed seed to identify flaky tests.
-</Step>
-<Step title="Record Properties for Additional Info">
-Add `RecordProperty` calls to track variables, thresholds, or conditions leading to failure.
-</Step>
-<Step title="Catching Failures in Helpers">
-Use `EXPECT_FATAL_FAILURE` or analogous macros in test utilities to ensure proper failure reporting.
-</Step>
-<Step title="Enable Break-on-Failure or Exceptions">
-Use `--gtest_break_on_failure` or add a listener throwing on failures to pause in debugger or propagate exceptions.
-</Step>
-</Steps>
-
----
-
-## 7. Common Pitfalls and Best Practices
-
-- **Fatal Assertions in Non-Void Functions:** Don’t place `ASSERT_*` in functions returning a value.
-- **Mixing Test Fixtures:** Tests in the same suite must use the same fixture class; mixing `TEST` and `TEST_F` or different fixtures causes unexpected failures.
-- **Dangling References in Parameterized Tests:** When using `INSTANTIATE_TEST_SUITE_P` with lambdas/functors, capture parameters carefully.
-- **Avoiding Test Ordering Dependencies:** Tests must be independent and fully isolated.
-- **Clearing Test Results in Long-Running Loops:** Protect against stale state causing false failures.
-
----
-
-## 8. Getting More Help
-
-- Consult the [Testing Reference](../reference/testing.md) for detailed API information.
-- Use [Effective Assertions and Matchers](../guides/testing-patterns/effective-assertions.mdx) for advanced assertion techniques.
-- Review test output validation examples in `googletest-output-test_.cc`.
-- Join community forums or the GoogleTest GitHub repository discussions for support.
-
----
-
-For a broader context on writing robust tests, explore the [Structuring and Organizing Tests](../guides/testing-patterns/structuring-tests.mdx) and [Mocking Best Practices](../guides/testing-patterns/mocking-best-practices.mdx).
-
----
-
-**Example: Using `EXPECT_FATAL_FAILURE` to test a failing assertion**
+These macros let you verify that a statement or block executes without any fatal failures:
 
 ```cpp
-#include "gtest/gtest-spi.h"
-
-TEST(MyInternalTest, FailsWhenValueIsIncorrect) {
-  EXPECT_FATAL_FAILURE(
-    ASSERT_EQ(0, 1),
-    "Expected equality of these values"
-  );
-}
+EXPECT_NO_FATAL_FAILURE(SomeFunction());
+ASSERT_NO_FATAL_FAILURE(SomeFunction());
 ```
 
-This test verifies that `ASSERT_EQ(0,1)` generates a fatal failure with the expected message.
+They help test complex subroutines and custom helper functions that use assertions internally.
 
 ---
 
-**Example: Repeating and Shuffling Tests to Catch Flakes**
+## 4. Diagnosing Common Pitfalls
 
-```shell
-./my_tests --gtest_repeat=100 --gtest_shuffle
-```
+### 4.1 Misuse of ASSERT_* in Constructors or Destructors
 
-Watch output for the random seed, rerun with `--gtest_random_seed=XYZ` to reproduce.
+- Fatal assertions (`ASSERT_*`) cannot be used safely in constructors or destructors.
+- Instead, perform setup in `SetUp()` and teardown in `TearDown()` methods.
+- Fatal assertions in constructors/destructors only abort the constructor/destructor, possibly leaving objects partially constructed or destructed.
+
+### 4.2 Mixing Test Fixtures in the Same Suite
+
+- All tests in the same test suite must use the same test fixture class.
+- Mixing `TEST()` and `TEST_F()` macros or different fixtures leads to runtime errors.
+- Fix by aligning your fixture usage and test macros consistently within a suite.
+
+### 4.3 Incorrect Use of Value-Parameterized Tests
+
+- Tests declared with `TEST_P()` must be instantiated with `INSTANTIATE_TEST_SUITE_P()`.
+- Forgetting to instantiate causes all the parameterized tests to be silently ignored or produce synthetic failures.
 
 ---
+
+## 5. Practical Steps To Debug Failures
+
+Use this workflow when you get test failures:
+
+1. **Check failure output**: Identify the file, line, test name, and exact assertion that failed.
+2. **Read the assertion message**: Understand the actual vs expected values and any custom messages.
+3. **Consult the stack trace** if available for call context.
+4. **Verify test input and environment**: Confirm test setup and inputs to reproduce issue.
+5. **Run failing test in isolation**: Use `--gtest_filter=TestSuite.TestName` to reduce noise.
+6. **Add diagnostic logging or tracing**: Use `SCOPED_TRACE` to add context.
+7. **Review test code around failure point**: Look for logical errors or missed preconditions.
+8. **Use GoogleTest utilities**: Leverage APIs like `HasFatalFailure()`, `RecordProperty()`, and assertion macros.
+9. **Iterate fixes and rerun tests** until failure is resolved.
+
+---
+
+## 6. Troubleshooting and Tips
+
+### 6.1 Suppressing Help and List Tests Output
+
+- If tests don’t run and only help text appears, make sure you called `InitGoogleTest(&argc, argv)` before `RUN_ALL_TESTS()`.
+
+### 6.2 Parsing and Using Filters
+
+- Use `--gtest_filter` flag to run a subset of tests matching specific patterns.
+- Use `-` to exclude tests.
+
+### 6.3 Repeating and Shuffling Tests
+
+- Re-run tests multiple times with `--gtest_repeat` to catch flaky failures.
+- Shuffle test execution order with `--gtest_shuffle` to discover ordering dependencies.
+
+### 6.4 Handling Disabled Tests
+
+- Prefix test names or suites with `DISABLED_` to temporarily disable them.
+- Use `--gtest_also_run_disabled_tests` to run disabled tests as needed.
+
+### 6.5 Enabling Stack Traces
+
+- Adjust stack trace depth using `--gtest_stack_trace_depth` flag.
+- Enable internal stack frames with `--gtest_show_internal_stack_frames` to debug framework internals.
+
+### 6.6 Using Break-On-Failure and Throw-On-Failure
+
+- Flags `--gtest_break_on_failure` and `--gtest_throw_on_failure` enable debugging aids on assertion failures.
+
+---
+
+## 7. Helpful Resources
+
+- Full API documentation for test assertions: [Assertions Reference](reference/assertions.md)
+- Guides on writing and running tests: [GoogleTest Primer](docs/primer.md) and [Testing Reference](docs/reference/testing.md)
+- Advanced tips on assertions and test lifecycle: [Advanced GoogleTest Topics](docs/advanced.md)
+- Examples for parameterized and typed tests: [Value and Type-Parameterized Tests](api-reference/advanced-testing/value-type-parameterized-tests.mdx)
+- Managing events and custom listeners: [Test Event Listeners](api-reference/core-test-api/test-lifecycle-and-environment.mdx)
+
+---
+
+**Remember:** Effective test failure responses combine understanding failure messages, leveraging GoogleTest's comprehensive API, and adopting best practices for test isolation and diagnostics. This process transforms failures from setbacks into valuable feedback that leads to robust, reliable code.
