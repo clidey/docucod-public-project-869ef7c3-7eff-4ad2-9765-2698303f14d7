@@ -1,0 +1,231 @@
+---
+title: "Performance Optimization and Anti-Patterns"
+description: "Advice on writing fast and reliable tests, avoiding common performance pitfalls, and optimizing test execution for CI environments. Includes practical profiling tips and tactics to prevent flakiness and excessive runtime."
+---
+
+# Performance Optimization and Anti-Patterns
+
+GoogleTest helps you write reliable and fast C++ tests. However, certain coding patterns and practices can inadvertently degrade test performance and reliability, especially in continuous integration (CI) environments where test suites are large and run frequently. This guide provides practical advice to write efficient tests, avoid common pitfalls, and optimize test execution without sacrificing test coverage or robustness.
+
+---
+
+## 1. Understanding Test Performance
+
+### Why Optimize Tests?
+- **Fast feedback loop:** Developers get quicker results, improving productivity.
+- **CI efficiency:** Reduces build times and resource consumption.
+- **Avoid flaky tests:** Performance issues sometimes cause nondeterministic failures.
+
+### Common Causes of Test Slowdown
+- Expensive setup or teardown in fixtures.
+- Heavy use of global or shared resources without caching.
+- Large or redundant test data sets.
+- Inefficient assertions or excessive logging.
+- Tests causing thread contention or deadlocks.
+
+---
+
+## 2. Writing Efficient Tests
+
+### Step 1: Profile Your Tests
+
+Before optimizing blindly, identify bottlenecks.
+
+- Use timing macros to measure per-test duration:
+
+  ```cpp
+  auto start = std::chrono::steady_clock::now();
+  // Run test code
+  auto end = std::chrono::steady_clock::now();
+  std::cout << "Duration: "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count()
+            << " ms\n";
+  ```
+
+- On CI, aggregate slow test reports.
+- Identify tests or fixtures with unusually high runtime.
+
+### Step 2: Simplify Test SetUp and TearDown
+
+- Use the **fixture constructor** instead of `SetUp()` when initialization is simple and non-failable.
+- Avoid expensive operations in `SetUp()` or `TearDown()`. For such operations:
+  - Share the resource as a `static` member with `SetUpTestSuite()` and `TearDownTestSuite()`.
+  - Cache results and reuse across tests.
+
+Example of per-test-suite shared resource:
+
+```cpp
+class FooTest : public ::testing::Test {
+ protected:
+  static std::unique_ptr<Resource> shared_resource_;
+
+  static void SetUpTestSuite() {
+    shared_resource_ = std::make_unique<Resource>(/* expensive init */);
+  }
+
+  static void TearDownTestSuite() {
+    shared_resource_.reset();
+  }
+};
+
+std::unique_ptr<Resource> FooTest::shared_resource_ = nullptr;
+```
+
+### Step 3: Limit Test Scope and Data Size
+
+- Test only the minimal data necessary to verify the behavior.
+- Avoid redundant test cases testing identical logic with large datasets.
+- Use *value-parameterized tests* to reduce boilerplate and improve coverage efficiently.
+
+### Step 4: Use Efficient Assertions
+
+- Use `ASSERT_*` when test cannot continue meaningfully after failure to avoid wasted runtime.
+- Use `EXPECT_*` for nonfatal checks when you want to report multiple failures.
+- Replace complex conditional `EXPECT_TRUE` expressions with predicate assertions or custom matchers to get both clarity and performance.
+
+### Step 5: Minimize Logging and Output
+
+- Excessive logging slows tests and can obscure failures.
+- Use GoogleTest's XML or JSON output for detailed test reports rather than verbose stdout.
+- For long-running tests, consider conditional logging only on failures.
+
+---
+
+## 3. Avoiding Common Performance Anti-Patterns
+
+### Anti-Pattern: Resource Allocation in Every Test
+
+**What happens:**
+Creating heavy objects (database connections, file handles) in each test slows runtime significantly.
+
+**Solution:**
+Use shared fixtures with `SetUpTestSuite()` and `TearDownTestSuite()` for singleton-like resources.
+
+### Anti-Pattern: Large Data Generation Inside Each Test
+
+**What happens:**
+Generating large amounts of data in every test reduces efficiency.
+
+**Solution:**
+Generate static test data once in the test suite or externally load pre-baked test inputs.
+
+### Anti-Pattern: Overly Broad Test Cases
+
+**What happens:**
+Tests verify too many behaviors at once, making failures harder to locate and making tests longer.
+
+**Solution:**
+Split tests into smaller, focused tests.
+
+### Anti-Pattern: Excessive Use of Threads Without Control
+
+**What happens:**
+Uncontrolled multithreading leads to contention, deadlocks, and flaky tests.
+
+**Solution:**
+Use mocks or fakes for threaded components or carefully orchestrate threads within tests. Prefer death tests with thread-safe style when necessary.
+
+### Anti-Pattern: Running Disabled or Unnecessary Tests Frequently
+
+**What happens:**
+`DISABLED_` tests or slow tests not required for every build add overhead.
+
+**Solution:**
+Use `--gtest_filter` to exclude unnecessary tests during active development. Use `--gtest_also_run_disabled_tests` only in special runs.
+
+---
+
+## 4. Profiling Test Suites
+
+### Built-in Timing Flags
+
+GoogleTest offers flags that facilitate timing and test duration reporting:
+
+- `--gtest_print_time=1` (default) shows time spent by each test.
+- `--gtest_brief=1` suppresses passed tests for faster output.
+
+Use these flags with `--gtest_list_tests` to identify slow tests.
+
+### External Profiling Tools
+
+- Use CPU profilers (e.g., `perf`, Visual Studio Profiler) to detect hot paths.
+- Use heap profilers to detect memory leaks impacting runtime.
+
+### Action Plan
+
+- Collect timing data.
+- Isolate slow tests.
+- Investigate shared resource setup.
+- Refactor, cache, or mock as appropriate.
+
+---
+
+## 5. Best Practices for CI Environments
+
+### 1. Parallelize Test Execution
+
+- Use test runners or CI configurations that run tests in parallel by shard or machine.
+- Take advantage of GoogleTest's sharding support by setting environment variables:
+
+```bash
+export GTEST_TOTAL_SHARDS=4
+export GTEST_SHARD_INDEX=0  # 0-3
+```
+
+GoogleTest will automatically split tests into shards.
+
+### 2. Disable Flaky Tests Temporarily
+
+- Mark flaky or flaky death tests with `DISABLED_` prefix.
+- Enable only during special runs to avoid CI instability.
+
+### 3. Cache Shared Resources on CI Machines
+
+- Reuse prebuilt binaries, test data cache, or environment setup where possible.
+
+### 4. Use `--gtest_fail_fast` When Developing
+
+- Quickly catch failures without wasting CI cycles.
+
+### 5. Aggregate Test Flakiness and Timing Data
+
+- Monitor trends to detect regressions early.
+
+---
+
+## 6. Troubleshooting Performance Problems
+
+<AccordionGroup title="Common Issues and Solutions">
+<Accordion title="Test Runs Slowly Due to Setup Overhead">
+Ensure expensive initialization is done once per test suite using `SetUpTestSuite()`.
+Also verify no resource leaks maintain allocations across tests.
+</Accordion>
+<Accordion title="Intermittent Failures Caused by Timeouts or Deadlocks">
+Check for thread contention and improper synchronization.
+Use the "threadsafe" death test style to mitigate race conditions during death tests.
+</Accordion>
+<Accordion title="Excessive Log Output Slowing Tests">
+Redirect logs to files or disable detailed logging in normal runs.
+Use GoogleTest's XML or JSON outputs for automated analysis.
+</Accordion>
+<Accordion title="Tests Using Large Data Take Long to Run">
+Reduce data sizes, use fixtures to share data, or parameterize tests appropriately.
+</Accordion>
+</AccordionGroup>
+
+<Tip>
+Consider running `--gtest_repeat` with a high iteration count combined with profiling to detect flaky performance issues.
+</Tip>
+
+---
+
+## 7. Next Steps and Advanced Topics
+
+- Explore [Advanced GoogleTest Topics](advanced.md) for deep dives.
+- Use [Value-Parameterized Tests](guides/core-scenarios/parameterized-tests) to optimize coverage.
+- Learn about [Death Tests and Concurrency](advanced.md#death-tests) to write safer multithreaded tests.
+- Read [Scaling and Maintaining Large Test Suites](guides/advanced-best-practices/scaling-tests) for effective large-scale test management.
+
+---
+
+For detailed API references, see the [Testing Reference](docs/reference/testing.md). To analyze assertions and matchers impacting performance, consult the [Assertions Reference](docs/reference/assertions.md).
