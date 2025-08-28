@@ -1,0 +1,288 @@
+---
+title: "Working with Death Tests and Parameterized Tests"
+description: "Answers about death test usage, value-parameterized, and type-parameterized test suites. Offers guidance around tricky use cases and best practices for these advanced test patterns."
+---
+
+# Frequently Asked Questions: Working with Death Tests and Parameterized Tests
+
+This FAQ page empowers users to confidently employ advanced GoogleTest patterns: *death tests* and *parameterized tests*. Whether you need to validate error paths that cause process termination or run the same test logic for multiple data inputs or types, this guidance will clarify usage nuances, pitfalls, and best practices.
+
+---
+
+## 1. Death Tests
+
+### What are Death Tests and Why Use Them?
+Death tests verify that a piece of code terminates the process as expected—usually triggered by failed assertions or fatal errors. They ensure safety checks behave correctly by confirming that invalid states lead to proper termination rather than silent corruption.
+
+### How do I write a basic death test?
+Use the macros `ASSERT_DEATH()` or `EXPECT_DEATH()` inside your test:
+
+```cpp
+TEST(MyDeathTest, CausesDeath) {
+  ASSERT_DEATH({ MyFunctionThatMustDie(); }, "regex matching error message");
+  EXPECT_DEATH(Foo(42), "Error message pattern");
+}
+```
+
+The `statement` must cause the program to exit with a non-zero code or signal, and the `matcher` verifies expected error output.
+
+### What is the difference between `ASSERT_DEATH` and `EXPECT_DEATH`?
+`ASSERT_DEATH` produces a fatal failure if the test doesn't die, aborting the current test immediately, while `EXPECT_DEATH` records a nonfatal failure and continues running subsequent tests.
+
+### What about `ASSERT_EXIT` and `EXPECT_EXIT`?
+These allow checking exact exit conditions using predicates:
+
+```cpp
+EXPECT_EXIT(NormalExit(), testing::ExitedWithCode(0), "Success message");
+EXPECT_EXIT(KillProcess(), testing::KilledBySignal(SIGKILL), "signal kill");
+```
+
+### How does GoogleTest execute death tests under the hood?
+Depending on the platform and the `--gtest_death_test_style` flag (default is "fast"), GoogleTest forks or clones the process:
+- **Fast style**: Runs the death test immediately in a forked child process.
+- **Threadsafe style**: Re-executes the entire test binary in a child process, running only the targeted death test.
+
+### What are common caveats when writing death tests?
+- Death tests run in a child process; in-memory side effects are not visible to the parent.
+- You **cannot** put multiple death test assertions on a single line.
+- Using assertions that cause a `return` from the test statement inside `ASSERT_DEATH` can cause failures – the test expects termination.
+- Mock objects can leak during death tests; use `Mock::AllowLeak` if needed.
+- Death tests must be run in a mostly single-threaded environment; GoogleTest warns if multiple threads exist.
+
+### How do I handle death tests with exceptions?
+GoogleTest treats exceptions thrown inside death tests as failures. Death tests expect process termination (not exception throwing). If catching exceptions, use regular GoogleTest exception assertions (`EXPECT_THROW`).
+
+### How to use `EXPECT_DEBUG_DEATH`?
+This macro asserts death only in debug mode, enabling side effects in optimized (opt) mode. Example:
+
+```cpp
+EXPECT_DEBUG_DEATH(SomeFunction(), "error regex");
+```
+
+In release mode, the function runs normally without death.
+
+### Can I change the death test style at runtime?
+Yes, set the flag programmatically via:
+
+```cpp
+GTEST_FLAG_SET(death_test_style, "threadsafe");
+```
+
+Set it before running tests to select between "fast" and "threadsafe" modes.
+
+### How do I diagnose why my death test failed?
+If the test statement does *not* cause death, GoogleTest reports:
+- Failure to die,
+- Unexpected exception thrown,
+- Illegal `return` statement inside death test,
+- Mismatched error output, or
+- Unexpected exit code.
+
+The stderr output is captured and formatted to help debugging failures.
+
+### Can death tests be combined with other GoogleTest features?
+Yes, but observe:
+- Avoid complicated test setups that launch multiple threads before a death test.
+- Death tests usually must have test suites named with a `DeathTest` suffix for priority execution.
+
+
+## 2. Value-Parameterized Tests
+
+### What are value-parameterized tests?
+Value-parameterized tests allow running the same test logic multiple times with different input values. This avoids redundant code for testing multiple scenarios.
+
+### How do I write value-parameterized tests?
+1. Define a fixture inheriting from `testing::TestWithParam<T>` where `T` is the parameter type.
+
+```cpp
+class FooTest : public testing::TestWithParam<int> {};
+```
+
+2. Define your tests using the `TEST_P` macro in this fixture:
+
+```cpp
+TEST_P(FooTest, DoesSomething) {
+  EXPECT_TRUE(IsValid(GetParam()));
+}
+```
+
+3. Instantiate the test suite with parameter values using `INSTANTIATE_TEST_SUITE_P`:
+
+```cpp
+INSTANTIATE_TEST_SUITE_P(MyParams, FooTest, testing::Values(1, 2, 3));
+```
+
+All generated tests will run with each parameter value.
+
+### What parameter generators does GoogleTest provide?
+- **`Values()`**: Explicitly list values.
+- **`ValuesIn()`**: Use elements from a container or array.
+- **`Range()`**: Generate sequential numbers.
+- **`Bool()`**: Generate `{false, true}`.
+- **`Combine()`**: Cartesian product of multiple generators.
+- **`ConvertGenerator()`**: Converts generated types to custom types.
+
+### Can I customize test names for parameterized tests?
+Yes, provide an optional function/functor to `INSTANTIATE_TEST_SUITE_P`, which receives each parameter info and returns a string suffix. The suffix must be alphanumeric or underscores:
+
+```cpp
+INSTANTIATE_TEST_SUITE_P(MyPrefix, FooTest, testing::Values(1,2,3),
+    [](const testing::TestParamInfo<FooTest::ParamType>& info) {
+      return "Value" + std::to_string(info.param);
+    });
+```
+
+### What if I want to define abstract parameterized test suites?
+Define the fixture and test cases in a header/library, then instantiate tests in separate files to reuse the general test logic with different parameter sets.
+
+### What happens if I write `TEST_P` but don't instantiate with `INSTANTIATE_TEST_SUITE_P`?
+By default, GoogleTest fails a special test `GoogleTestVerification` indicating missing instantiations. Use
+
+```cpp
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(FooTest);
+```
+
+to allow it where appropriate.
+
+### Can parameterized tests have SetUpTestSuite or TearDownTestSuite?
+Yes, but these must be declared **public** to work with `TEST_P`.
+
+
+## 3. Typed and Type-Parameterized Tests
+
+### What are typed tests?
+Typed tests allow running the same test logic for multiple **types** rather than values.
+
+You define a class template fixture parameterized by a type:
+
+```cpp
+template <typename T>
+class MyTypedTest : public testing::Test { ... };
+```
+
+Then associate a type list:
+
+```cpp
+using MyTypes = ::testing::Types<int, float, double>;
+TYPED_TEST_SUITE(MyTypedTest, MyTypes);
+```
+
+Define tests with `TYPED_TEST`:
+
+```cpp
+TYPED_TEST(MyTypedTest, DoesStuff) {
+  TypeParam value = ...;
+  EXPECT_TRUE(...);
+}
+```
+
+### What are type-parameterized tests?
+Type-parameterized tests let you define tests first and decide which types to use later. You:
+- Declare with `TYPED_TEST_SUITE_P` and `TYPED_TEST_P`.
+- Register test names with `REGISTER_TYPED_TEST_SUITE_P`.
+- Instantiate with `INSTANTIATE_TYPED_TEST_SUITE_P`.
+
+This supports defining abstract test suites usable by multiple libraries without immediate instantiation.
+
+### Can I customize type names in test output?
+Yes, implement a class with template static method:
+
+```cpp
+class NameGenerator {
+ public:
+  template <typename T>
+  static std::string GetName(int) {
+    if constexpr(std::is_same_v<T, int>) return "Int";
+    if constexpr(std::is_same_v<T, float>) return "Float";
+    ...
+  }
+};
+
+TYPED_TEST_SUITE(MyTypedTest, MyTypes, NameGenerator);
+```
+
+### How are typed tests named in output?
+They are combined with the type name as the suffix, helping identify which types triggered failures.
+
+
+## 4. Common Pitfalls and Best Practices
+
+### Death Tests
+- Avoid using threads or complex global state before death tests.
+- Avoid return statements inside the death test statement; use braces for compound statements.
+- Prefer "threadsafe" style if your tests spawn threads.
+- Beware of mock leak detectors; mock leaks terminate tests without expected exit code.
+
+### Parameterized Tests
+- Parameter generators are evaluated after `InitGoogleTest`, so parameter values relying on runtime state must be set before that.
+- The entire test suite is instantiated for *all* parameters at startup.
+- Don't instantiate the same tests multiple times with overlapping parameters unless intended.
+- Use clear and unique parameter naming functions to improve test diagnostics.
+- Remember test fixtures are constructed for each test instance.
+
+### Typed Tests
+- The type list must be typedef'ed or aliased to allow macro parsing.
+- Registered type-parameterized tests must have their tests registered before instantiation.
+
+
+## 5. Troubleshooting Example
+
+If your death test fails with 'failed to die' or unexpected error message:
+
+<Tip>
+- Confirm your death test calls code that terminates the process (calls _Exit, abort, or raises fatal signal).
+- Check that your error message matcher (regex) accurately reflects the diagnostic output.
+- Switch to "threadsafe" death test style if your program uses threads
+- Confirm no `return` statements accidentally occur inside tested statements.
+- Run with increased logging to view captured stderr outputs.
+</Tip>
+
+If value-parameterized tests are not running:
+
+<Tip>
+- Make sure `INSTANTIATE_TEST_SUITE_P` is called for the test fixture.
+- Avoid naming mismatches in instantiation.
+- Use `GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST` if you intentionally skip instantiation.
+- Ensure parameter generators provide at least one value.
+</Tip>
+
+
+## 6. Additional Resources
+
+- [Death Assertions Reference](../reference/assertions.md#death)
+- [Value-Parameterized Tests Guide](../guides/core-scenarios/parameterized-tests.md)
+- [Typed Tests Guide](../advanced.md#typed-tests)
+- [Core Concepts of GoogleTest](../overview/foundations-and-architecture/core-concepts-and-terminology.md)
+
+---
+
+For hands-on examples and deeper integration details, consult the guides on [Mocking](../guides/core-scenarios/working-with-mocks.md) and [Performance Optimization](../guides/advanced-best-practices/performance-optimization.md).
+
+----
+
+##### Example usage of a Death Test and Parameterized Test Combined
+
+```cpp
+class MyDeathTest : public ::testing::Test {};  // Fixture for death tests
+
+TEST_F(MyDeathTest, DiesOnInvalidInput) {
+  ASSERT_DEATH(Invalidate("bad_input"), "Invalid input detected");
+}
+
+class AddTest : public ::testing::TestWithParam<std::tuple<int, int, int>> {};
+
+TEST_P(AddTest, ComputesSumCorrectly) {
+  int a = std::get<0>(GetParam());
+  int b = std::get<1>(GetParam());
+  int expected = std::get<2>(GetParam());
+  EXPECT_EQ(expected, Add(a, b));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+  AddTestParameters,
+  AddTest,
+  testing::Values(
+    std::make_tuple(1, 2, 3),
+    std::make_tuple(-1, 1, 0),
+    std::make_tuple(5, 5, 10)));
+```
